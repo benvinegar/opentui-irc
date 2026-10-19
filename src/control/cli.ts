@@ -343,11 +343,40 @@ function parseJson(value: string): JsonValue {
     fail(error("invalid-input", "Invalid JSON control input."));
   }
 }
-async function readFileBounded(path: string): Promise<string> {
+function cancellation(): CliFailure {
+  return new CliFailure(error("cancelled", "Control command cancelled."));
+}
+function checkCancelled(signal: AbortSignal): void {
+  if (signal.aborted) throw cancellation();
+}
+/** Observe late reader rejections as well as racing cancellation; never submit their late values. */
+async function cancellableRead(read: () => Promise<string>, signal: AbortSignal): Promise<string> {
+  checkCancelled(signal);
+  let onAbort = () => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(cancellation());
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    const pending = Promise.resolve().then(() => {
+      checkCancelled(signal);
+      return read();
+    });
+    const value = await Promise.race([pending, aborted]);
+    checkCancelled(signal);
+    return value;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+async function readFileBounded(path: string, signal: AbortSignal): Promise<string> {
+  checkCancelled(signal);
   // Avoid blocking on a FIFO before we can reject non-regular inputs below.
   const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
+    checkCancelled(signal);
     const stat = await file.stat();
+    checkCancelled(signal);
     if (!stat.isFile())
       fail(
         error(
@@ -361,6 +390,7 @@ async function readFileBounded(path: string): Promise<string> {
     let length = 0;
     while (length < buffer.length) {
       const read = await file.read(buffer, length, buffer.length - length, null);
+      checkCancelled(signal);
       if (read.bytesRead === 0) break;
       length += read.bytesRead;
     }
@@ -370,18 +400,68 @@ async function readFileBounded(path: string): Promise<string> {
     await file.close();
   }
 }
-async function readStdinBounded(limit: number): Promise<string> {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  if (process.stdin.isTTY)
-    fail(error("invalid-input", "Redirect stdin explicitly for control input."));
-  for await (const chunk of process.stdin) {
-    const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
-    bytes += buffer.byteLength;
-    if (bytes > limit) fail(error("invalid-input", "Control input exceeds the byte limit."));
-    chunks.push(buffer);
-  }
-  return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+function readStdinBounded(limit: number, signal: AbortSignal): Promise<string> {
+  checkCancelled(signal);
+  const stdin = process.stdin;
+  if (stdin.isTTY) fail(error("invalid-input", "Redirect stdin explicitly for control input."));
+  return new Promise((resolve, reject) => {
+    const buffer = Buffer.alloc(limit);
+    const wasFlowing = stdin.readableFlowing;
+    let bytes = 0;
+    let settled = false;
+    const cleanup = () => {
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      stdin.removeListener("data", onData);
+      stdin.removeListener("end", onEnd);
+      stdin.removeListener("error", onError);
+      stdin.removeListener("close", onClose);
+      // Do not destroy shared stdin, alter its encoding, or pause another active consumer.
+      if (wasFlowing !== true && stdin.listenerCount("data") === 0) stdin.pause();
+    };
+    const onError = (cause: unknown) => {
+      if (settled) return;
+      cleanup();
+      reject(cause);
+    };
+    const onAbort = () => onError(cancellation());
+    const onClose = () =>
+      onError(new CliFailure(error("invalid-input", "Control input closed before completion.")));
+    const onEnd = () => {
+      if (settled) return;
+      cleanup();
+      try {
+        resolve(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytes)));
+      } catch (cause) {
+        reject(cause);
+      }
+    };
+    const onData = (chunk: string | Uint8Array) => {
+      if (settled) return;
+      const size = typeof chunk === "string" ? Buffer.byteLength(chunk, "utf8") : chunk.byteLength;
+      if (size > limit - bytes) {
+        onError(new CliFailure(error("invalid-input", "Control input exceeds the byte limit.")));
+        return;
+      }
+      buffer.set(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk, bytes);
+      bytes += size;
+    };
+    if (stdin.readableEnded) {
+      onEnd();
+      return;
+    }
+    if (stdin.destroyed) {
+      onClose();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    stdin.on("end", onEnd);
+    stdin.on("error", onError);
+    stdin.on("close", onClose);
+    stdin.on("data", onData);
+    if (signal.aborted) onAbort();
+    else stdin.resume();
+  });
 }
 function catalog(): JsonObject {
   return {
@@ -469,8 +549,14 @@ export async function runControlCli(
         const file = textFlag(parsed, "file");
         const value =
           file === undefined || file === "-"
-            ? await (options.input ?? (() => readStdinBounded(JSON_LIMIT)))()
-            : await (options.read ?? readFileBounded)(file);
+            ? await cancellableRead(
+                options.input ?? (() => readStdinBounded(JSON_LIMIT, signal)),
+                signal,
+              )
+            : await cancellableRead(
+                () => (options.read ? options.read(file) : readFileBounded(file, signal)),
+                signal,
+              );
         return parseJson(value);
       };
       let document: JsonObject | undefined;
@@ -726,7 +812,10 @@ export async function runControlCli(
         }
         case "secrets store": {
           const input = bounded(
-            await (options.input ?? (() => readStdinBounded(SECRET_LIMIT)))(),
+            await cancellableRead(
+              options.input ?? (() => readStdinBounded(SECRET_LIMIT, signal)),
+              signal,
+            ),
             SECRET_LIMIT,
           );
           const value = input.endsWith("\r\n")

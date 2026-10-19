@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
+import { getEventListeners } from "node:events";
+import { PassThrough } from "node:stream";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,7 +44,7 @@ function failure(
 }
 async function invoke(
   args: readonly string[],
-  overrides: Partial<ControlCliOptions> & { useFilesystem?: boolean } = {},
+  overrides: Partial<ControlCliOptions> & { useFilesystem?: boolean; useStdin?: boolean } = {},
 ) {
   const lines: string[] = [];
   const calls: ControlRequest[] = [];
@@ -55,9 +57,13 @@ async function invoke(
     execute,
     output: (line) => lines.push(line),
     requestId: () => `request-${++counter}`,
-    input: async () => {
-      throw new Error("stdin must not be read");
-    },
+    ...(overrides.useStdin
+      ? {}
+      : {
+          input: async () => {
+            throw new Error("stdin must not be read");
+          },
+        }),
     ...(overrides.useFilesystem
       ? {}
       : {
@@ -638,6 +644,201 @@ describe("config and full-profile convenience flow", () => {
     expect(result.code).toBe(1);
     expect(execute).toHaveBeenCalledTimes(1);
     expect(result.envelope).toMatchObject({ error: { code: "cancelled" } });
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, failed) => {
+    resolve = done;
+    reject = failed;
+  });
+  return { promise, resolve, reject };
+}
+async function withStdin(test: (input: PassThrough) => Promise<void>) {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "stdin")!;
+  const input = new PassThrough();
+  Object.defineProperty(process, "stdin", { configurable: true, value: input });
+  try {
+    await test(input);
+  } finally {
+    Object.defineProperty(process, "stdin", descriptor);
+    input.destroy();
+  }
+}
+
+describe("cancellable control input", () => {
+  const cases = [
+    { args: ["secrets", "store", "--stdin"], value: "private-secret" },
+    { args: ["config", "apply", "--stdin"], value: '{"section":"tui","patch":{"theme":"light"}}' },
+    {
+      args: ["action", "--file", "action.json"],
+      value: '{"type":"conversation.activate","conversationId":"c"}',
+    },
+  ];
+  it.each(cases)(
+    "returns promptly while an injected reader remains pending: $args",
+    async ({ args, value }) => {
+      const controller = new AbortController();
+      const pending = deferred<string>();
+      const reader = vi.fn(() => pending.promise);
+      const task = invoke(args, { signal: controller.signal, input: reader, read: reader });
+      await vi.waitFor(() => expect(reader).toHaveBeenCalledTimes(1));
+      controller.abort(new Error("private-abort-reason"));
+      const result = await task;
+      expect(result.code).toBe(1);
+      expect(result.envelope).toMatchObject({ error: { code: "cancelled" } });
+      expect(result.calls).toEqual([]);
+      expect(result.lines[0]).not.toContain("private");
+      expect(getEventListeners(controller.signal, "abort")).toEqual([]);
+      pending.resolve(value);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(result.calls).toEqual([]);
+      expect(result.lines).toHaveLength(1);
+    },
+  );
+  it.each(cases)("observes late rejection of a cancelled reader: $args", async ({ args }) => {
+    const controller = new AbortController();
+    const pending = deferred<string>();
+    const reader = vi.fn(() => pending.promise);
+    const task = invoke(args, { signal: controller.signal, input: reader, read: reader });
+    await vi.waitFor(() => expect(reader).toHaveBeenCalledTimes(1));
+    controller.abort();
+    const result = await task;
+    pending.reject(new Error("private-reader-rejection"));
+    // Vitest also fails this suite if the rejection is not observed by the adapter.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(result.code).toBe(1);
+    expect(result.calls).toEqual([]);
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0]).not.toContain("private-reader-rejection");
+  });
+  it("rechecks cancellation after injected file I/O settles", async () => {
+    const controller = new AbortController();
+    const result = await invoke(["action", "--file", "action.json"], {
+      signal: controller.signal,
+      read: async () => {
+        controller.abort();
+        return '{"type":"conversation.activate","conversationId":"c"}';
+      },
+    });
+    expect(result.code).toBe(1);
+    expect(result.calls).toEqual([]);
+    expect(result.envelope).toMatchObject({ error: { code: "cancelled" } });
+  });
+  it("removes its stdin/signal handlers on cancellation without destroying shared stdin", async () => {
+    await withStdin(async (input) => {
+      const controller = new AbortController();
+      const task = invoke(["secrets", "store", "--stdin"], {
+        useStdin: true,
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(input.listenerCount("data")).toBe(1));
+      input.write("private-partial-input");
+      controller.abort();
+      const result = await task;
+      expect(result.code).toBe(1);
+      expect(result.envelope).toMatchObject({ error: { code: "cancelled" } });
+      expect(result.calls).toEqual([]);
+      expect(result.lines[0]).not.toContain("private");
+      expect(input.destroyed).toBe(false);
+      expect(input.isPaused()).toBe(true);
+      for (const name of ["data", "end", "error", "close"])
+        expect(input.listenerCount(name)).toBe(0);
+      expect(getEventListeners(controller.signal, "abort")).toEqual([]);
+      // Another consumer can still read the same stdin after the cancelled request.
+      const reused = invoke(["secrets", "store", "--stdin"], { useStdin: true });
+      await vi.waitFor(() => expect(input.listenerCount("data")).toBe(1));
+      input.end("different-secret\r\n");
+      const completed = await reused;
+      expect(completed.code).toBe(0);
+      expect(last(completed.calls).params).toEqual({ value: "different-secret" });
+    });
+  });
+  it("preserves another stdin consumer and its flowing state on cancellation", async () => {
+    await withStdin(async (input) => {
+      const other = vi.fn();
+      input.on("data", other);
+      const controller = new AbortController();
+      const task = invoke(["secrets", "store", "--stdin"], {
+        useStdin: true,
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(input.listenerCount("data")).toBe(2));
+      controller.abort();
+      await task;
+      expect(input.destroyed).toBe(false);
+      expect(input.readableFlowing).toBe(true);
+      expect(input.listeners("data")).toEqual([other]);
+      input.write("subsequent-input");
+      expect(other).toHaveBeenCalledOnce();
+    });
+  });
+  it.each([
+    { args: ["secrets", "store", "--stdin"], data: Buffer.alloc(65537, 97), code: "invalid-input" },
+    {
+      args: ["config", "apply", "--stdin"],
+      data: Buffer.alloc(1048577, 97),
+      code: "invalid-input",
+    },
+    {
+      args: ["secrets", "store", "--stdin"],
+      data: Buffer.from([0xff, 0xfe]),
+      code: "invalid-input",
+    },
+  ])("keeps default stdin bounded and strict UTF-8: $args", async ({ args, data, code }) => {
+    await withStdin(async (input) => {
+      const controller = new AbortController();
+      const task = invoke(args, { useStdin: true, signal: controller.signal });
+      await vi.waitFor(() => expect(input.listenerCount("data")).toBe(1));
+      input.end(data);
+      const result = await task;
+      expect(result.code).toBe(1);
+      expect(result.calls).toEqual([]);
+      expect(result.envelope).toMatchObject({ error: { code } });
+      for (const name of ["data", "end", "error", "close"])
+        expect(input.listenerCount(name)).toBe(0);
+      expect(getEventListeners(controller.signal, "abort")).toEqual([]);
+    });
+  });
+  it.each(["error", "close"])("cleans up and sanitizes a stdin %s event", async (event) => {
+    await withStdin(async (input) => {
+      const controller = new AbortController();
+      const task = invoke(["secrets", "store", "--stdin"], {
+        useStdin: true,
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(input.listenerCount("data")).toBe(1));
+      input.emit(event, new Error("private-stream-error"));
+      const result = await task;
+      expect(result.code).toBe(1);
+      expect(result.calls).toEqual([]);
+      expect(result.lines[0]).not.toContain("private-stream-error");
+      for (const name of ["data", "end", "error", "close"])
+        expect(input.listenerCount(name)).toBe(0);
+      expect(input.destroyed).toBe(false);
+      expect(getEventListeners(controller.signal, "abort")).toEqual([]);
+    });
+  });
+  it("decodes multibyte UTF-8 split across stdin chunks and cleans up after success", async () => {
+    await withStdin(async (input) => {
+      const controller = new AbortController();
+      const task = invoke(["secrets", "store", "--stdin"], {
+        useStdin: true,
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(input.listenerCount("data")).toBe(1));
+      const bytes = Buffer.from("秘密\r\n", "utf8");
+      for (const byte of bytes) input.write(Buffer.from([byte]));
+      input.end();
+      const result = await task;
+      expect(result.code).toBe(0);
+      expect(last(result.calls).params).toEqual({ value: "秘密" });
+      for (const name of ["data", "end", "error", "close"])
+        expect(input.listenerCount(name)).toBe(0);
+      expect(getEventListeners(controller.signal, "abort")).toEqual([]);
+    });
   });
 });
 
