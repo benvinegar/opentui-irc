@@ -116,7 +116,7 @@ This is a capability/positioning map from official project documentation, not an
 | INPUT-13 | Spellcheck, external-editor integration, advanced snippet/template engine                                       | L        |
 | INPUT-14 | Embedded shell, arbitrary executable hooks, full plugin ecosystem                                               | X        |
 
-**Alpha command set:** `/connect`, `/disconnect`, `/reconnect`, `/join`, `/part`, `/query`, `/msg`, `/notice`, `/me`, `/nick`, `/away`, `/back`, `/whois`, `/who`, `/names`, `/topic`, `/mode`, `/invite`, `/kick`, `/close`, `/clear`, `/quit`, `/help`.
+**Alpha command set:** `/connect`, `/disconnect`, `/reconnect`, `/join`, `/part`, `/query`, `/msg`, `/notice`, `/me`, `/nick`, `/away`, `/back`, `/whois`, `/who`, `/names`, `/topic`, `/close`, `/clear`, `/quit`, `/help`.
 
 **v1 additions:** `/list`, `/ignore`, `/unignore`, `/mute`, `/unmute`, `/search`, `/set`. Moderation conveniences, aliases, and `/raw` are deferred; basic underlying IRC commands may remain available without dedicated UI. Exact syntax remains to be designed. `/clear` clears the view, not stored history; deletion must be a separate explicit operation.
 

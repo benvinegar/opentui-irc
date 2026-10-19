@@ -22,6 +22,7 @@ Use `bun run format` before committing. Installation configures a format/lint pr
 - [Product plan](docs/PLAN.md)
 - [Architecture and module ownership](docs/ARCHITECTURE.md)
 - [API behavioral contracts](docs/CONTRACTS.md)
+- [Architecture decision records](docs/DECISIONS.md)
 - [Parallel implementation workstreams](docs/WORKSTREAMS.md)
 - [Typed contracts](src/contracts/)
 - [Agent/contributor guidance](AGENTS.md)

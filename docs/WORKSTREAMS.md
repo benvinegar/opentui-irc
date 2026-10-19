@@ -42,7 +42,7 @@ Owns: `src/contracts/**`, root configuration, `tests/fixtures/**`, architectural
 
 ## T1 — codec and protocol primitives
 
-Owns: `src/irc/codec/**`, `src/irc/casemapping.ts`, `tests/irc/codec/**`.
+Owns: `src/irc/codec/**`, `src/domain/irc-identifiers.ts`, `tests/irc/codec/**`.
 
 Implement `createIrcCodec(limits: ProtocolLimits): IrcCodec`. Extend casemapping tests where needed; keep helpers pure.
 
@@ -114,7 +114,7 @@ Acceptance:
 
 ## T6 — domain and application coordinator
 
-Owns: `src/domain/**`, `src/app/**`, `tests/domain/**`, `tests/app/**`.
+Owns: `src/domain/**` except the T1-owned `irc-identifiers.ts`, `src/app/**`, `tests/domain/**`, `tests/app/**`.
 
 Implement `CreateApp` and pure reducers against injected ports; preserve provided session cursor/read-model semantics.
 

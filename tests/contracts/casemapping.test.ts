@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { foldIdentifier } from "../../src/irc/casemapping";
+import { foldIdentifier } from "../../src/domain/irc-identifiers";
 
 describe("IRC identifier equivalence", () => {
   it("folds only ASCII letters in ASCII mode", () => {

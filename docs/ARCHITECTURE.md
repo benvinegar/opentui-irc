@@ -56,7 +56,7 @@ All arrows are in-process interfaces, not RPC or remote services. One applicatio
 
 Use direct imports from specific contract files. Avoid barrel exports hiding cycles. Contracts are the only shared modification hotspot; implementation agents should own disjoint directories.
 
-Dependency enforcement starts with review and agent guidance; add automated import-boundary checks before parallel implementations land. TypeScript checks shapes, not architectural layering or runtime semantics.
+`tests/contracts/boundaries.test.ts` checks literal imports against these layers; review still covers dynamic imports and transitive dependencies. TypeScript checks shapes, not runtime semantics. Shared IRC identifier folding lives in `domain/irc-identifiers.ts` so both protocol and app/domain code can use it without reversing dependencies.
 
 ## 4. Contract index
 
@@ -161,7 +161,7 @@ Read positions and persisted metadata survive restarts; transient typing state, 
 
 ### Settings and secrets
 
-Settings UI edits a section, then submits expected revision via `saveSettings()`. App validates semantics, repository validates schema and compares both file fingerprints/revision before replacing one file atomically. External edits cause `conflict`, never silent overwrites. Apply safe appearance values live; explain network reconnect requirements. Do not write two files as if the filesystem offers a cross-file atomic transaction.
+Settings UI edits a section, then submits expected revision via `saveSettings()`. App validates semantics, repository validates schema and compares both file fingerprints/revision before replacing one file atomically. Detectable external edits cause `conflict`. Serialize cooperating writers with an advisory lock and recheck fingerprints immediately before replacement; an arbitrary editor can still race the final check/rename. Document that filesystem limitation rather than promising a cross-process atomic compare-and-swap. Apply safe appearance values live; explain network reconnect requirements. Do not write two files as if the filesystem offers a cross-file atomic transaction.
 
 Only `storeSecret()` accepts secret strings from secure UI input. It returns a reference; failures are visible. Passwords are never put in settings, read models, domain events or diagnostics. Initially allow environment references; secure interactive storage requires a functioning keychain adapter or an explicit unsupported result. Do not silently fall back to plaintext.
 

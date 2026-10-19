@@ -32,7 +32,12 @@ export interface UserSettings {
     readonly enabled: boolean;
     /** null means retain indefinitely; zero is invalid. Product default still to choose. */
     readonly retentionDays: number | null;
-    readonly excludedConversations: readonly string[];
+    /** Exact target names using the network's IRC casemapping; no wildcard language in revision 1. */
+    readonly excludedConversations: readonly {
+      readonly networkId: NetworkId;
+      readonly kind: "channel" | "direct" | "status";
+      readonly name: string;
+    }[];
     readonly persistDrafts: boolean;
   };
   readonly notifications: {
@@ -66,7 +71,7 @@ export type SettingsChange =
 /** App owns semantic validation; adapter validates schema and atomic/conflict-safe persistence. */
 export interface SettingsRepository {
   load(signal: AbortSignal): Promise<Result<SettingsDocument>>;
-  /** CAS one file/section at a time. Revision covers both files; external edits cause conflict. */
+  /** Optimistic revision check then atomic one-file save; see CONTRACTS.md for external-writer races. */
   save(
     next: SettingsChange,
     expectedRevision: ConfigRevision,

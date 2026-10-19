@@ -41,7 +41,7 @@ No text-equality echo matching. A missing echo does not prove rejection. A succe
 ### `saveSettings(change, expectedRevision, signal)`
 
 - Save one section at a time. A successful result means the validated file replacement completed durably according to the adapter's documented filesystem guarantees and the settings read model was updated.
-- Return conflict if either settings file changed since the expected revision. Do not silently overwrite user edits made by an editor.
+- Return conflict if either settings file changed since the expected revision at the final pre-replacement check. Serialize cooperating writers with an advisory lock. Standard filesystems cannot atomically compare both arbitrary externally edited files and replace one: a non-cooperating editor can race the last check/rename. Document this residual window; never claim stronger guarantees.
 - Apply settings only after successful save; reconnect-required changes must not mutate live session credentials unexpectedly.
 - `storeSecret` is the explicit secret ingress, not an exception allowing secret strings elsewhere. Clear UI input after handoff; JavaScript cannot promise memory zeroization.
 
@@ -121,7 +121,7 @@ No text-equality echo matching. A missing echo does not prove rejection. A succe
 - `SettingsDocument.revision` covers both persisted files. UI receives persisted settings; eventual CLI overrides must be tracked separately so saving does not accidentally persist temporary flags.
 - Validate nonempty unique network IDs, endpoint ports, SASL/TLS policy, retention bounds, shortcut conflicts, panel widths and channel/key references.
 - JSONC parsing/writes preserve comments where feasible. Until comment-preserving writes exist, show a clear warning or use a confirmed explicit rewrite rather than silently removing comments.
-- Atomic single-file replacement uses temp file + appropriate permissions + rename, with flush/recovery guarantees documented per platform. Detect same-process and external edit conflicts; tests must cover a race during save, not just load-time checks.
+- Atomic single-file replacement uses temp file + appropriate permissions + rename, with flush/recovery guarantees documented per platform. Detect same-process and observable external edit conflicts; tests must cover an edit during save preparation, not just load-time checks. The final non-cooperating-writer check/rename race cannot be eliminated with ordinary file replacement.
 - No automatic cwd/project config loading. No secrets in exported settings; references may themselves be sensitive and should be reviewed/redacted on export.
 
 ## OS effects and command service

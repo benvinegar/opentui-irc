@@ -105,7 +105,7 @@ export interface AppApi {
   discovery(networkId: NetworkId): Result<Readable<DiscoverySnapshot>>;
   dispatch(action: AppAction, signal: AbortSignal): Promise<Result<ActionReceipt>>;
   search(query: SearchQuery, signal: AbortSignal): Promise<Result<Page<Message>>>;
-  /** Validates and CAS-saves settings; secret values are handled separately by secure input. */
+  /** Validates and revision-checks settings saves; secret values use secure input separately. */
   saveSettings(
     change: SettingsChange,
     expectedRevision: ConfigRevision,
