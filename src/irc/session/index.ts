@@ -826,6 +826,10 @@ class Attempt {
       case "AWAY":
         this.emit({ type: "away", nick: plain(sender), away: p.length > 0 });
         return;
+      // Successful registration may end with ERR_NOMOTD instead of the MOTD numerics.
+      case "422":
+        this.emit({ type: "notice", text: "The server has no message of the day." });
+        return;
       case "305":
       case "306":
         this.emit({ type: "away", nick: plain(this.nick), away: input.command === "306" });

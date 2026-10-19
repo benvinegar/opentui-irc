@@ -768,6 +768,26 @@ describe("one-attempt session", () => {
       ),
     ).toBe(true);
   });
+  test("a missing MOTD after registration is informational, not a connection error", async () => {
+    const fixture = await harness();
+    await until(() => hasReady(fixture.events));
+    fixture.send(":s 422 me :untrusted raw MOTD failure");
+    await until(() =>
+      fixture.events.some(
+        (event) =>
+          event.payload.type === "notice" &&
+          event.payload.text === "The server has no message of the day.",
+      ),
+    );
+    expect(fixture.events.some((event) => event.payload.type === "error")).toBe(false);
+    expect(JSON.stringify(fixture.events)).not.toContain("untrusted raw MOTD failure");
+    fixture.send(":s 404 me #room :still a real request rejection");
+    await until(() => fixture.events.some((event) => event.payload.type === "error"));
+    expect(fixture.events.at(-1)?.payload).toMatchObject({
+      type: "error",
+      error: { code: "unavailable", message: "You cannot send to this channel." },
+    });
+  });
   test("query timeouts quarantine late replies; limits fail explicitly; unknown numerics stay safe", async () => {
     const fixture = await harness({
       policy: { queryTimeoutMs: 5, keepaliveMs: 10, staleTimeoutMs: 1000, maxDirectoryItems: 1 },
