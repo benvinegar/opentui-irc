@@ -51,7 +51,10 @@ export function createCommandService(app: Pick<AppApi, "state" | "timeline">): C
     },
     parse(text, context) {
       if (!text.trim()) return invalid("Write a message first.");
-      if (text.length > 32_768 || /[\u0000\u001b\u007f]/u.test(text))
+      if (
+        text.length > 32_768 ||
+        /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(text)
+      )
         return invalid("Input is too long or contains unsafe control characters.");
       const { snapshot, conversation, networkId } = resolve(context);
       if (!text.startsWith("/") || text.startsWith("//")) {

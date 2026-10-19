@@ -1,9 +1,10 @@
 /* oxlint-disable no-control-regex -- Reject terminal controls in externally supplied form values. */
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createSignal, onCleanup } from "solid-js";
 import type { AppApi } from "../contracts/app";
-import { entityId } from "../contracts/common";
+import { entityId, type SecretRef } from "../contracts/common";
 import type { SettingsDocument } from "../contracts/settings";
 import { Button, Field, usePalette } from "./primitives";
+import { SecureField } from "./secure-field";
 
 export function SettingsForm(props: {
   app: AppApi;
@@ -19,6 +20,18 @@ export function SettingsForm(props: {
   const [nick, setNick] = createSignal("");
   const [account, setAccount] = createSignal("");
   const [variable, setVariable] = createSignal("");
+  const [password, setPassword] = createSignal("");
+  const [authMode, setAuthMode] = createSignal<"vault" | "environment">("vault");
+  const [storedSecret, setStoredSecret] = createSignal<SecretRef>();
+  const formAbort = new AbortController();
+  const abortForm = () => formAbort.abort();
+  if (props.signal.aborted) formAbort.abort();
+  else props.signal.addEventListener("abort", abortForm, { once: true });
+  onCleanup(() => {
+    formAbort.abort();
+    setPassword("");
+    props.signal.removeEventListener("abort", abortForm);
+  });
   const [channel, setChannel] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
@@ -39,11 +52,21 @@ export function SettingsForm(props: {
       return;
     }
     if (
-      !!account() !== !!variable() ||
-      (variable() && !/^[A-Za-z_][A-Za-z0-9_]{0,255}$/u.test(variable()))
+      (account() && authMode() === "vault" && !password() && !storedSecret()) ||
+      (!account() && (password() || variable() || storedSecret()))
     ) {
       setError(
-        "For SASL, enter both the account and the name of an environment variable containing its password.",
+        "Enter both your SASL account and password, or leave both empty for a network without account authentication.",
+      );
+      return;
+    }
+    if (
+      account() &&
+      authMode() === "environment" &&
+      !/^[A-Za-z_][A-Za-z0-9_]{0,255}$/u.test(variable())
+    ) {
+      setError(
+        "Enter the NAME of an environment variable containing your password, not the password itself.",
       );
       return;
     }
@@ -53,6 +76,26 @@ export function SettingsForm(props: {
     }
     setBusy(true);
     setError("");
+    let passwordRef = storedSecret();
+    if (account() && authMode() === "vault" && !passwordRef) {
+      const secretValue = password();
+      setPassword("");
+      const secured = await props.app.storeSecret(secretValue, formAbort.signal);
+      if (!secured.ok) {
+        setBusy(false);
+        setError(
+          `${secured.error.message} Use the environment-reference fallback below if your OS vault is unavailable. Password input was cleared.`,
+        );
+        return;
+      }
+      passwordRef = secured.value;
+      setStoredSecret(passwordRef);
+    } else if (account() && authMode() === "environment")
+      passwordRef = entityId<"secret-ref">(`env:${variable()}`);
+    if (formAbort.signal.aborted) {
+      setBusy(false);
+      return;
+    }
     const id = entityId<"network">(`network-${crypto.randomUUID()}`);
     const result = await props.app.saveSettings(
       {
@@ -73,12 +116,12 @@ export function SettingsForm(props: {
               },
               autoConnect: false,
               autoJoin: channel() ? [{ channel: channel() }] : [],
-              ...(account()
+              ...(account() && passwordRef
                 ? {
                     sasl: {
                       mechanism: "PLAIN",
                       account: account(),
-                      password: entityId<"secret-ref">(`env:${variable()}`),
+                      password: passwordRef,
                       required: true,
                     },
                   }
@@ -88,7 +131,7 @@ export function SettingsForm(props: {
         },
       },
       original.revision,
-      props.signal,
+      formAbort.signal,
     );
     setBusy(false);
     if (!result.ok) {
@@ -127,8 +170,13 @@ export function SettingsForm(props: {
   return (
     <>
       <text fg={colors.muted}>
-        Secure TLS connections only in this setup form. Set your password in an environment variable
-        before starting OpenIRC; enter only its name below.
+        Secure TLS connections only. Account passwords are hidden and saved in your OS credential
+        vault, never in settings. Local history is{" "}
+        {original.user.history.enabled ? "enabled" : "disabled"}
+        {original.user.history.enabled
+          ? ` with ${original.user.history.retentionDays ?? "unlimited"}-day retention`
+          : ""}
+        ; review Privacy below.
       </text>
       <Field
         id="network-name"
@@ -158,12 +206,45 @@ export function SettingsForm(props: {
         value={account()}
         onInput={setAccount}
       />
-      <Field
-        id="network-env"
-        label="Password environment variable NAME, not password"
-        value={variable()}
-        onInput={setVariable}
-        placeholder="OPENIRC_PASSWORD"
+      <Show
+        when={authMode() === "vault"}
+        fallback={
+          <Field
+            id="network-env"
+            label="Password environment variable NAME, not password"
+            value={variable()}
+            onInput={setVariable}
+            placeholder="OPENIRC_PASSWORD"
+          />
+        }
+      >
+        <SecureField
+          id="network-password"
+          value={password()}
+          onInput={(value) => {
+            setPassword(value);
+            setStoredSecret(undefined);
+          }}
+          onError={setError}
+        />
+        <Show when={storedSecret()}>
+          <text fg={colors.green}>Password stored securely. Only its reference will be saved.</text>
+        </Show>
+      </Show>
+      <Button
+        id="auth-mode"
+        layer="modal"
+        label={
+          authMode() === "vault"
+            ? "Use environment reference instead (fallback)"
+            : "Use a hidden password with OS vault instead"
+        }
+        onPress={() => {
+          setPassword("");
+          setStoredSecret(undefined);
+          setVariable("");
+          setAuthMode(authMode() === "vault" ? "environment" : "vault");
+        }}
       />
       <Field
         id="network-channel"

@@ -165,7 +165,7 @@ export function Field(props: {
         onInput={props.onInput}
         placeholder={props.placeholder ?? ""}
         backgroundColor={colors.raised}
-        focusedBackgroundColor="#383f59"
+        focusedBackgroundColor={colors.bg}
         textColor={colors.text}
         maxLength={512}
       />
@@ -199,7 +199,12 @@ export function Dialog(props: {
         </text>
         <Button id="dialog-close" layer="modal" label="Close [Esc]" onPress={props.onClose} />
       </box>
-      <scrollbox flexGrow={1} contentOptions={{ flexDirection: "column", gap: 1 }} scrollX={false}>
+      <scrollbox
+        id="modal-scroll"
+        flexGrow={1}
+        contentOptions={{ flexDirection: "column", gap: 1 }}
+        scrollX={false}
+      >
         {props.children}
       </scrollbox>
     </box>

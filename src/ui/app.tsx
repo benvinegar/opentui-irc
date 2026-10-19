@@ -12,16 +12,22 @@ import {
 import {
   onBlur,
   onFocus,
+  onResize,
   useKeyboard,
   usePaste,
   useRenderer,
   useTerminalDimensions,
 } from "@opentui/solid";
-import type { Renderable, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
+import { ScrollBoxRenderable, type Renderable, type TextareaRenderable } from "@opentui/core";
 import type { AppAction, AppApi } from "../contracts/app";
 import type { ConversationId, MessageId } from "../contracts/common";
 import type { Message, TimelineSnapshot } from "../contracts/model";
-import type { CommandService, ExternalActions, InputContext } from "../contracts/services";
+import type {
+  CommandService,
+  Completion,
+  ExternalActions,
+  InputContext,
+} from "../contracts/services";
 import { useReadable } from "./bridge";
 import { Button, Dialog, Field, FocusContext, ThemeContext, usePalette } from "./primitives";
 import { SettingsForm } from "./settings";
@@ -87,9 +93,24 @@ function Shell(props: UiOptions) {
   let sendBusy = false;
   let lastReport = "";
   let returnFocus = "composer";
-  const histories = new Map<ConversationId, string[]>();
+  const histories = new Map<ConversationId, { text: string; literal: boolean }[]>();
   const literalConversations = new Set<ConversationId>();
-  let historyIndex = -1;
+  let historyIndex = 0;
+  let historyDraft = "";
+  let historyLiteralDraft = false;
+  let completionCycle:
+    | {
+        base: string;
+        output: string;
+        cursor: number;
+        choices: readonly Completion[];
+        index: number;
+        conversationId: ConversationId | undefined;
+      }
+    | undefined;
+  let pendingAnchor: { id: string; offset: number } | undefined;
+  let pendingReveal: MessageId | undefined;
+  const activeId = createMemo(() => state().activeConversationId);
   const active = createMemo(() =>
     state().conversations.find((item) => item.id === state().activeConversationId),
   );
@@ -101,8 +122,22 @@ function Shell(props: UiOptions) {
     ...(active() ? { conversationId: active()!.id } : {}),
   });
   const [timeline, setTimeline] = createSignal<TimelineSnapshot>();
+  const captureAnchor = () => {
+    if (
+      !transcript ||
+      transcript.scrollTop + transcript.viewport.height >= transcript.scrollHeight - 1
+    )
+      return;
+    const row = transcript
+      .getChildren()
+      .find(
+        (child) =>
+          child.id.startsWith("message-") && child.y + child.height > transcript!.viewport.y,
+      );
+    if (row) pendingAnchor = { id: row.id, offset: row.y - transcript.viewport.y };
+  };
   createEffect(() => {
-    const id = active()?.id;
+    const id = activeId();
     setTimeline(undefined);
     if (!id) return;
     const model = props.app.timeline(id);
@@ -111,13 +146,26 @@ function Shell(props: UiOptions) {
       return;
     }
     setTimeline(model.value.getSnapshot());
-    onCleanup(model.value.subscribe(() => setTimeline(model.value.getSnapshot())));
+    onCleanup(
+      model.value.subscribe(() => {
+        captureAnchor();
+        setTimeline(model.value.getSnapshot());
+      }),
+    );
   });
   // App windows are bounded; impose a second hard cap on mounted layout work.
   const messages = createMemo(() => timeline()?.messages.slice(-300) ?? []);
   const focus = (id: string) => {
     setFocusId(id);
-    controls.get(id)?.control.focus();
+    const control = controls.get(id)?.control;
+    control?.focus();
+    let child = control;
+    let parent = control?.parent;
+    while (parent && child) {
+      if (parent instanceof ScrollBoxRenderable) parent.scrollChildIntoView(child.id);
+      child = parent;
+      parent = parent.parent;
+    }
   };
   const closeModal = () => {
     setModal(null);
@@ -170,7 +218,7 @@ function Shell(props: UiOptions) {
       previousConversation = value.conversationId;
       setReply(undefined);
       setLiteralDraft(literalConversations.has(value.conversationId));
-      historyIndex = -1;
+      historyIndex = 0;
       transcript?.scrollTo(transcript.scrollHeight);
       setAtBottom(true);
     }
@@ -217,8 +265,15 @@ function Shell(props: UiOptions) {
         sendBusy = false;
         if (result.ok) {
           const previous = histories.get(conversationId) ?? [];
-          histories.set(conversationId, [...previous.slice(-49), text]);
-          historyIndex = -1;
+          histories.set(conversationId, [
+            ...previous.slice(-49),
+            { text, literal: literalDraft() },
+          ]);
+          if (histories.size > 32) {
+            const oldest = histories.keys().next().value;
+            if (oldest) histories.delete(oldest);
+          }
+          historyIndex = 0;
           // Do not erase edits made while the acceptance promise was pending.
           if (active()?.id === conversationId && composer.plainText === text) {
             composer.clear();
@@ -249,7 +304,7 @@ function Shell(props: UiOptions) {
       closeModal();
       return;
     }
-    // Even a pasted /command is a literal message. This flag survives editing until send/switch.
+    // Even a pasted /command is a literal message, including after conversation switches.
     composer.insertText(paste());
     setLiteralDraft(true);
     if (active()) literalConversations.add(active()!.id);
@@ -293,15 +348,36 @@ function Shell(props: UiOptions) {
     if (!composer) return;
     // Native buffer offsets count cells; extracting the prefix converts safely to UTF-16.
     const cursor = composer.getTextRange(0, composer.cursorOffset).length;
-    const completion = props.commands.complete(composer.plainText, cursor, context())[0];
+    if (
+      completionCycle?.output === composer.plainText &&
+      completionCycle.cursor === cursor &&
+      completionCycle.conversationId === activeId()
+    )
+      completionCycle.index = (completionCycle.index + 1) % completionCycle.choices.length;
+    else
+      completionCycle = {
+        base: composer.plainText,
+        output: "",
+        cursor,
+        choices: props.commands.complete(composer.plainText, cursor, context()),
+        index: 0,
+        conversationId: activeId(),
+      };
+    const completion = completionCycle.choices[completionCycle.index];
     if (!completion) {
+      completionCycle = undefined;
       setStatus("No completions. Try /help for commands.");
       return;
     }
-    const text = composer.plainText;
-    const prefix = text.slice(0, completion.replace.start) + completion.insertText;
-    composer.replaceText(prefix + text.slice(completion.replace.end));
+    const prefix = completionCycle.base.slice(0, completion.replace.start) + completion.insertText;
+    const output = prefix + completionCycle.base.slice(completion.replace.end);
+    composer.replaceText(output);
     composer.cursorOffset = composer.editBuffer.measureText(prefix);
+    completionCycle.output = output;
+    completionCycle.cursor = prefix.length;
+    setStatus(
+      `${completion.label}${completionCycle.choices.length > 1 ? ` · Tab cycles ${completionCycle.choices.length} choices` : ""}`,
+    );
     syncDraft();
   };
   useKeyboard((event) => {
@@ -382,13 +458,19 @@ function Shell(props: UiOptions) {
       event.preventDefault();
       const items = histories.get(active()!.id) ?? [];
       if (!items.length) return;
+      if (historyIndex === 0) {
+        historyDraft = composer.plainText;
+        historyLiteralDraft = literalDraft();
+      }
       historyIndex = Math.min(
         items.length,
         Math.max(0, historyIndex + (event.name === "up" ? 1 : -1)),
       );
-      composer.replaceText(
-        historyIndex ? items[items.length - historyIndex]! : (timeline()?.draft ?? ""),
-      );
+      const item = historyIndex ? items[items.length - historyIndex] : undefined;
+      composer.replaceText(item ? item.text : historyDraft);
+      setLiteralDraft(item ? item.literal : historyLiteralDraft);
+      if (literalDraft()) literalConversations.add(active()!.id);
+      else literalConversations.delete(active()!.id);
       composer.gotoBufferEnd();
       syncDraft();
     }
@@ -411,17 +493,33 @@ function Shell(props: UiOptions) {
     state().conversations.filter((item) =>
       item.name.toLowerCase().includes(formText().toLowerCase()),
     );
+  onResize(captureAnchor);
   onFocus(() => setTerminalFocused(true));
   onBlur(() => setTerminalFocused(false));
   onMount(() => {
     focus("composer");
+    const restoreAnchor = () => {
+      if (pendingReveal && transcript?.getRenderable(`message-${pendingReveal}`)) {
+        transcript.scrollChildIntoView(`message-${pendingReveal}`);
+        pendingReveal = undefined;
+        pendingAnchor = undefined;
+        setReveal(undefined);
+      }
+      if (!pendingAnchor || !transcript) return;
+      const row = transcript.getRenderable(pendingAnchor.id);
+      const offset = pendingAnchor.offset;
+      pendingAnchor = undefined;
+      if (row) transcript.scrollBy(row.y - transcript.viewport.y - offset);
+    };
+    renderer.on("frame", restoreAnchor);
+    onCleanup(() => renderer.off("frame", restoreAnchor));
     const timer = setInterval(() => {
       if (!transcript || !active()) return;
       const bottom =
         transcript.scrollTop + transcript.viewport.height >= transcript.scrollHeight - 1;
       setAtBottom(bottom);
       const last = messages().at(-1)?.id;
-      const key = `${active()!.id}:${terminalFocused()}:${bottom}:${last}:${modal()}`;
+      const key = `${active()!.id}:${terminalFocused()}:${bottom}:${last}:${modal()}:${timeline()?.atLatest}`;
       if (lastReport === key) return;
       lastReport = key;
       void run({
@@ -437,8 +535,10 @@ function Shell(props: UiOptions) {
   createEffect(() => {
     const id = reveal();
     const mounted = messages();
-    if (id && mounted.some((message) => message.id === id))
-      queueMicrotask(() => transcript?.scrollChildIntoView(`message-${id}`));
+    if (id && mounted.some((message) => message.id === id)) {
+      pendingReveal = id;
+      renderer.requestRender();
+    }
   });
   const messageActions = () => {
     const message = selectedMessage();
@@ -659,8 +759,11 @@ function Shell(props: UiOptions) {
                   <text fg={colors.text}>2. Choose Connect beside the network.</text>
                   <text fg={colors.text}>3. Join a channel or message a nickname.</text>
                   <text fg={colors.muted}>
-                    History is stored locally when enabled. Review retention and privacy in Settings
-                    before connecting.
+                    Local history is {settings()?.user.history.enabled ? "enabled" : "disabled"}.
+                    {settings()?.user.history.enabled
+                      ? ` Messages are retained ${settings()?.user.history.retentionDays === null ? "indefinitely" : `for ${settings()?.user.history.retentionDays} days`}.`
+                      : ""}{" "}
+                    Review privacy in Settings before connecting.
                   </text>
                   <Button
                     id="welcome-setup"
@@ -706,6 +809,7 @@ function Shell(props: UiOptions) {
                 />
               </box>
               <scrollbox
+                id="transcript"
                 ref={(element) => (transcript = element)}
                 flexGrow={1}
                 minHeight={0}
@@ -811,6 +915,12 @@ function Shell(props: UiOptions) {
                   ref={(element) => {
                     composer = element;
                     controls.set("composer", { layer: "main", control: element });
+                    onCleanup(() => {
+                      if (composer === element) {
+                        composer = undefined;
+                        controls.delete("composer");
+                      }
+                    });
                   }}
                   height={3}
                   flexGrow={1}
