@@ -15,7 +15,17 @@ import type { NetworkProfile, SecretProvider } from "../../contracts/settings";
 import type { ByteConnection, TransportFactory } from "../../contracts/transport";
 import { foldIdentifier } from "../../domain/irc-identifiers";
 import { createIrcCodec } from "../codec";
-import { atom, content, eventStream, failure, ok, plain, problem } from "./primitives";
+import {
+  atom,
+  content,
+  eventStream,
+  failure,
+  ok,
+  plain,
+  plainMultiline,
+  problem,
+} from "./primitives";
+import { splitMessage } from "./split-message";
 import {
   ModernSession,
   modernCapabilities,
@@ -37,6 +47,9 @@ export interface SessionPolicy extends ModernPolicy {
   readonly maxEvents: number;
   readonly maxQueueCommands: number;
   readonly maxQueueBytes: number;
+  readonly maxQueueFragments: number;
+  readonly maxSendBytes: number;
+  readonly maxSendFragments: number;
   readonly maxPendingSends: number;
   readonly maxChannels: number;
   readonly maxMembers: number;
@@ -68,6 +81,9 @@ export const defaultSessionPolicy: SessionPolicy = {
   maxEvents: 2048,
   maxQueueCommands: 128,
   maxQueueBytes: 262_144,
+  maxQueueFragments: 512,
+  maxSendBytes: 131_072,
+  maxSendFragments: 256,
   maxPendingSends: 256,
   maxChannels: 128,
   maxMembers: 20_000,
@@ -100,7 +116,12 @@ type Send = {
   expectsEcho: boolean;
   replyToServerId?: string;
 };
-type Queued = { command: SessionCommand; operationId: OperationId; bytes: number };
+type Queued = {
+  command: SessionCommand;
+  operationId: OperationId;
+  bytes: number;
+  fragments: number;
+};
 type Whois = {
   operationId: OperationId;
   nick: string;
@@ -186,6 +207,7 @@ class Attempt {
   private phase: ConnectionPhase = "connecting";
   private readonly queue: Queued[] = [];
   private queueBytes = 0;
+  private queueFragments = 0;
   private draining = false;
   private nextWriteAt = 0;
   private readonly sends = new Map<OperationId, Send>();
@@ -347,6 +369,7 @@ class Attempt {
     this.modern.close(!overflow);
     this.queue.length = 0;
     this.queueBytes = 0;
+    this.queueFragments = 0;
     this.channels.clear();
     this.whois = undefined;
     this.directory = undefined;
@@ -942,7 +965,7 @@ class Attempt {
                 target: message.target,
                 sender: message.sender,
                 kind: send.kind,
-                text: plain(send.text),
+                text: plainMultiline(send.text),
                 receivedAt: message.receivedAt,
                 source: "live",
                 operationId: send.operationId,
@@ -1177,6 +1200,8 @@ class Attempt {
     )
       return failure("conflict", "Operation is already active.");
     let bytes = 32;
+    let fragments = 1;
+    let emptyLines = 0;
     switch (command.type) {
       case "join":
       case "part":
@@ -1202,7 +1227,7 @@ class Attempt {
           !atom(command.target) ||
           command.target.includes("*") ||
           !command.text ||
-          !content(command.text) ||
+          /[\r\0]/.test(command.text) ||
           command.text.includes("\x01")
         )
           return failure("invalid-input", "Invalid message target or content.");
@@ -1217,6 +1242,12 @@ class Attempt {
         }
         if (this.sends.size >= this.policy.maxPendingSends)
           return failure("rate-limited", "Too many unresolved message sends.");
+        {
+          const plan = this.split(command);
+          if (!plan.ok) return plan;
+          fragments = plan.value.pieces.length;
+          emptyLines = plan.value.emptyLines;
+        }
         bytes += byteLength(command.target) + byteLength(command.text);
         break;
       case "nick":
@@ -1240,7 +1271,8 @@ class Attempt {
     }
     if (
       this.queue.length >= this.policy.maxQueueCommands ||
-      bytes > this.policy.maxQueueBytes - this.queueBytes
+      bytes > this.policy.maxQueueBytes - this.queueBytes ||
+      fragments > this.policy.maxQueueFragments - this.queueFragments
     )
       return failure("rate-limited", "IRC outgoing queue is full.");
     // Admission owns a detached immutable command. In particular, caller abort never unsends it.
@@ -1275,14 +1307,24 @@ class Attempt {
         expectsEcho: false,
         ...(command.replyToServerId ? { replyToServerId: command.replyToServerId } : {}),
       });
-    this.queue.push({ command: owned, operationId, bytes });
+    this.queue.push({ command: owned, operationId, bytes, fragments });
     this.queueBytes += bytes;
+    this.queueFragments += fragments;
+    if (emptyLines)
+      this.emit({
+        type: "notice",
+        text: "Basic IRC represents each empty line as a single space; the original multiline text is preserved locally.",
+      });
     void this.drain();
     return ok();
   }
   private async pacedWrite(output: IrcFrame, send?: Send) {
-    const delay = this.nextWriteAt - this.options.clock.now();
-    if (delay > 0) await this.options.clock.sleep(delay, this.controller.signal);
+    while (this.nextWriteAt > this.options.clock.now()) {
+      await this.options.clock.sleep(
+        this.nextWriteAt - this.options.clock.now(),
+        this.controller.signal,
+      );
+    }
     if (this.stopped || this.shuttingDown) return failure<void>("cancelled", "Connection closed.");
     const available = this.modern.validateFrame(output);
     if (!available.ok) return available;
@@ -1301,6 +1343,7 @@ class Attempt {
         if (this.stopped) return;
         this.queue.shift();
         this.queueBytes -= item.bytes;
+        this.queueFragments -= item.fragments;
         if (!result.ok) {
           const send = this.sends.get(item.operationId);
           if (send) {
@@ -1366,14 +1409,26 @@ class Attempt {
         if (this.directory) this.directory.started = this.options.clock.now();
         return this.pacedWrite(frame("LIST", []));
       case "send":
-        return this.send(item.operationId, command);
+        return this.send(item.operationId, command, item);
       default:
         return this.modern.perform(command, item.operationId, (output) => this.pacedWrite(output));
     }
   }
+  private split(command: Extract<SessionCommand, { type: "send" }>) {
+    return splitMessage({
+      text: command.text,
+      target: command.target,
+      kind: command.kind,
+      maxCommandBytes: this.limits.maxCommandBytes,
+      sourcePrefixBytes: this.ownPrefixBytes,
+      maxBytes: this.policy.maxSendBytes,
+      maxFragments: this.policy.maxSendFragments,
+    });
+  }
   private async send(
     operationId: OperationId,
     command: Extract<SessionCommand, { type: "send" }>,
+    item: Queued,
   ): Promise<Result<void>> {
     const send = this.sends.get(operationId)!;
     const reliableEcho = ["echo-message", "message-tags", "labeled-response", "batch"].every(
@@ -1381,27 +1436,17 @@ class Attempt {
     );
     const ircCommand = command.kind === "notice" ? "NOTICE" : "PRIVMSG";
     const wrap = (text: string) => (command.kind === "action" ? `\x01ACTION ${text}\x01` : text);
-    // Reserve ':' even if the eventual fragment contains no spaces, and account for CTCP framing.
-    const budget =
-      this.limits.maxCommandBytes -
-      byteLength(`${ircCommand} ${command.target} :${wrap("")}\r\n`) -
-      this.ownPrefixBytes;
-    if (budget < 4)
-      return failure("invalid-input", "Message target leaves no room for UTF-8 content.");
-    const pieces: string[] = [];
-    let piece = "";
-    let size = 0;
-    for (const point of command.text) {
-      const bytes = byteLength(point);
-      if (size + bytes > budget) {
-        pieces.push(piece);
-        piece = "";
-        size = 0;
-      }
-      piece += point;
-      size += bytes;
-    }
-    if (piece) pieces.push(piece);
+    const plan = this.split(command);
+    if (!plan.ok) return plan;
+    const pieces = plan.value.pieces;
+    const growth = pieces.length - item.fragments;
+    if (growth > this.policy.maxQueueFragments - this.queueFragments)
+      return failure(
+        "rate-limited",
+        "Updated IRC source prefix exceeds the outgoing fragment budget.",
+      );
+    this.queueFragments += growth;
+    item.fragments = pieces.length;
     send.fragments = pieces.length;
     send.expectsEcho = reliableEcho;
     const outputs = pieces.map((text) => {

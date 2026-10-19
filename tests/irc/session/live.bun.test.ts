@@ -52,6 +52,7 @@ async function until(predicate: () => boolean) {
 
 test("real Bun TCP -> codec -> session: register, join, names race, labeled batch echo, LIST, WHOIS, abort", async () => {
   const accepted: string[] = [];
+  let echoSequence = 0;
   const codecs = new WeakMap<Bun.Socket, ReturnType<typeof createIrcCodec>>();
   const listener = Bun.listen({
     hostname: "127.0.0.1",
@@ -98,7 +99,7 @@ test("real Bun TCP -> codec -> session: register, join, names race, labeled batc
           if (frame.command === "PRIVMSG") {
             send(`@label=${frame.tags.label} :fixture BATCH +reply labeled-response`);
             send(
-              `@batch=reply;msgid=echo-1${frame.tags["+reply"] ? `;+reply=${frame.tags["+reply"]}` : ""} :me!u@localhost PRIVMSG ${p[0]} :${p[1]}`,
+              `@batch=reply;msgid=echo-${++echoSequence}${frame.tags["+reply"] ? `;+reply=${frame.tags["+reply"]}` : ""} :me!u@localhost PRIVMSG ${p[0]} :${p[1]}`,
             );
             send(":fixture BATCH -reply");
           }
@@ -306,6 +307,29 @@ test("real Bun TCP -> codec -> session: register, join, names race, labeled batc
       )?.payload,
     ).toMatchObject({ message: { replyToServerId: "remote-1", text: "a real tagged reply" } });
     expect(accepted).toContain("TAGMSG");
+    const multiline = "first 🐈\n\n/quit literal paste\nlast\n";
+    expect(
+      (
+        await session.execute(
+          { type: "send", target: "#room", text: multiline, kind: "text" },
+          entityId<"operation">("multiline"),
+          controller.signal,
+        )
+      ).ok,
+    ).toBe(true);
+    await until(() =>
+      events.some(
+        (event) =>
+          event.payload.type === "chat" && event.payload.message.operationId === "multiline",
+      ),
+    );
+    expect(
+      events.find(
+        (event) =>
+          event.payload.type === "chat" && event.payload.message.operationId === "multiline",
+      )?.payload,
+    ).toMatchObject({ message: { text: multiline, kind: "text" } });
+    expect(accepted).not.toContain("QUIT");
     controller.abort();
     await consume;
     expect(events.at(-1)?.payload).toMatchObject({ type: "state", phase: "disconnected" });

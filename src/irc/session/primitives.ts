@@ -22,6 +22,7 @@ export function plain(value: string): string {
     .replace(/\x04(?:[0-9A-Fa-f]{6}(?:,[0-9A-Fa-f]{6})?)?/g, "")
     .replace(/[\x00-\x1f\x7f-\x9f]/g, "");
 }
+export const plainMultiline = (value: string) => value.split("\n").map(plain).join("\n");
 export const atom = (value: string) =>
   value.length > 0 && value.length <= 200 && !/[\s\x00-\x1f\x7f,:]/.test(value);
 export const content = (value: string) => !/[\r\n\0]/.test(value);

@@ -395,6 +395,103 @@ describe("one-attempt session", () => {
     fixture.send(":alice!u@h PRIVMSG #room :repeat");
     await until(() => fixture.events.filter((event) => event.payload.type === "chat").length === 3);
   });
+  test.each(["text", "notice", "action"] as const)(
+    "deliberate LF %s fallback preserves paste lines and aggregates a reliable echo",
+    async (kind) => {
+      const times: number[] = [];
+      const fixture = await harness({
+        capabilities: "message-tags batch labeled-response echo-message",
+        policy: { floodIntervalMs: 2 },
+        onWrite(frame, send) {
+          if (frame.command === "PRIVMSG" || frame.command === "NOTICE") {
+            times.push(Date.now());
+            send(
+              `@label=${frame.tags.label} :me!u@h ${frame.command} ${frame.params[0]} :${frame.params[1]}`,
+            );
+          }
+        },
+      });
+      await until(() => hasReady(fixture.events));
+      const text = "hello 🐈\n/join #not-a-command\n\nlast line\n";
+      expect(
+        (
+          await fixture.session.execute(
+            { type: "send", target: "#room", text, kind },
+            op("multiline"),
+            signal(),
+          )
+        ).ok,
+      ).toBe(true);
+      await until(() =>
+        fixture.events.some(
+          (event) => event.payload.type === "send-state" && event.payload.state === "echo-observed",
+        ),
+      );
+      const lines = fixture.written.filter(
+        (frame) => frame.command === "PRIVMSG" || frame.command === "NOTICE",
+      );
+      const expected = ["hello 🐈", "/join #not-a-command", " ", "last line", " "];
+      expect(lines.map((frame) => frame.params[1])).toEqual(
+        kind === "action" ? expected.map((line) => `\x01ACTION ${line}\x01`) : expected,
+      );
+      expect(fixture.written.some((frame) => frame.command === "JOIN")).toBe(false);
+      expect(times.slice(1).every((time, index) => time - times[index]! >= 2)).toBe(true);
+      const echoes = fixture.events.flatMap((event) =>
+        event.payload.type === "chat" && event.payload.message.operationId === op("multiline")
+          ? [event.payload.message]
+          : [],
+      );
+      expect(echoes).toHaveLength(1);
+      expect(echoes[0]).toMatchObject({ text, kind });
+      expect(echoes[0]?.serverId).toBeUndefined();
+      expect(
+        fixture.events.some(
+          (event) => event.payload.type === "notice" && event.payload.text.includes("single space"),
+        ),
+      ).toBe(true);
+    },
+  );
+  test("multiline bounds and CR/NUL reject before admission without partial transmission", async () => {
+    const fixture = await harness({
+      policy: {
+        maxSendBytes: 12,
+        maxSendFragments: 2,
+        maxQueueFragments: 3,
+        floodIntervalMs: 1000,
+      },
+    });
+    await until(() => hasReady(fixture.events));
+    for (const [index, text] of ["a\rb", "a\0b", "a\nb\nc", "🐈".repeat(4)].entries()) {
+      expect(
+        (
+          await fixture.session.execute(
+            { type: "send", target: "#room", text, kind: "text" },
+            op(`bad-${index}`),
+            signal(),
+          )
+        ).ok,
+      ).toBe(false);
+    }
+    expect(fixture.written.some((frame) => frame.command === "PRIVMSG")).toBe(false);
+    expect(
+      (
+        await fixture.session.execute(
+          { type: "send", target: "#room", text: "a\nb", kind: "text" },
+          op("accepted"),
+          signal(),
+        )
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await fixture.session.execute(
+          { type: "send", target: "#room", text: "c\nd", kind: "text" },
+          op("queue-fragments"),
+          signal(),
+        )
+      ).ok,
+    ).toBe(false);
+  });
   test("LIST and WHOIS serialize overlapping requests and correlate typed results", async () => {
     const fixture = await harness();
     await until(() => hasReady(fixture.events));
