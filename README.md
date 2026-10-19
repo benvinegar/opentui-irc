@@ -1,33 +1,99 @@
 # OpenIRC
 
-A newcomer-friendly IRC client for Linux and macOS, built with Bun, SolidJS, and OpenTUI.
+A newcomer-friendly IRC client for Linux and macOS, built with Bun, SolidJS, and OpenTUI. Mouse-driven controls, a channel/DM sidebar, and one conversation at a time—with keyboard alternatives throughout.
 
-**Status:** architecture and typed contracts only. There is no runnable IRC client yet.
+**Status: early daily-driver alpha.** The real terminal client, IRC connection stack, local history, search, and settings are implemented. This is not yet the complete feature set in the product plan.
 
-The planned interface combines Discord-like styling with Slack-like channel/DM navigation, mouse-driven controls, and keyboard alternatives. Modern IRCv3 features are negotiated with the server rather than assumed.
+## Run
 
-## Develop
-
-Requires Bun 1.3.14+ and Node.js 24 for the current Vitest tooling.
+Requires Bun **1.3.14+** and an interactive terminal.
 
 ```sh
 bun install --frozen-lockfile
-bun run check
+bun run start
 ```
 
-Use `bun run format` before committing. Installation configures a format/lint pre-commit hook. Production Solid/OpenTUI dependencies and startup commands will be added with the real terminal spike, not a placeholder executable.
+Use **Settings → Add network**, choose a TLS server, enter a nickname, and optionally configure an existing SASL account. Connect, join a channel, or open a direct conversation from the sidebar. You can also type `/help` for commands.
 
-## Architecture and implementation
+Optional Libera.Chat and OFTC presets fill in server details without connecting automatically. Replies, reactions, typing, history playback, read markers, and message removal are capability-dependent; unsupported controls stay unavailable.
 
+Passwords can be stored in the platform credential vault when available. If that service is unavailable, explicitly reference an environment variable; OpenIRC never falls back to writing plaintext passwords in settings. Account registration itself remains network-specific.
+
+### Keyboard basics
+
+| Shortcut            | Action                                            |
+| ------------------- | ------------------------------------------------- |
+| Ctrl+K              | Switch conversation                               |
+| Ctrl+J              | Join channel                                      |
+| Ctrl+F              | Search local history                              |
+| F1                  | Help                                              |
+| Tab                 | Complete in composer; navigate controls elsewhere |
+| Enter / Shift+Enter | Send / newline                                    |
+| Ctrl+Q              | Confirm quit                                      |
+
+Mouse selection, scrolling, scrollbars, buttons, menus, setup, and conversation switching work without slash commands. Keyboard modifiers, clipboard integration and terminal-focus reporting vary by terminal.
+
+## History and connections
+
+- Local message history is **plaintext**, enabled by default with **30-day retention**. Settings can disable future logging; deleting existing history is a separate explicit action.
+- Closing the client disconnects. Use an existing IRC bouncer for offline collection; OpenIRC does not run a background service.
+- Reconnects restore open channels. Server playback and modern interactions depend on negotiated server capabilities.
+- Multiline drafts use a bounded, paced ordinary-IRC fallback. Negotiated IRCv3 multiline is not implemented yet.
+- Written or echoed messages are not recipient-delivery/read receipts. Uncertain sends are never automatically resent.
+- No automatic link previews or media fetches; opening an external link requires confirmation.
+
+## Configuration
+
+Both JSONC files and in-app settings are supported. The current settings UI covers network creation, secure authentication, history logging, and themes; some advanced edits still require files.
+
+| Data                     | Default location                                                      |
+| ------------------------ | --------------------------------------------------------------------- |
+| Settings, both platforms | `${XDG_CONFIG_HOME:-~/.config}/openirc/openirc.jsonc` and `tui.jsonc` |
+| Linux history            | `${XDG_DATA_HOME:-~/.local/share}/openirc/history.sqlite`             |
+| macOS history            | `~/Library/Application Support/OpenIRC/history.sqlite`                |
+
+```sh
+bun run start --check-config
+bun run start --config-dir /path/to/config --data-dir /path/to/data
+bun run start --help
+```
+
+There is no automatic project/cwd configuration discovery. Settings use revision checks to detect conflicting edits. See [persistence guarantees](src/storage/README.md).
+
+## Develop
+
+Node.js 24 is also required for the Vitest tooling.
+
+```sh
+bun run check       # format, lint, types, unit tests, Bun integration/UI tests
+bun run test        # platform-neutral tests under Node/Vitest
+bun run test:bun    # Bun sockets, SQLite, production CLI and real headless OpenTUI
+bun run format
+```
+
+Tests use local fake IRC servers and temporary files—not public networks or personal credentials. An optional real-server check launches a pinned official Ergo container on loopback only and cleans it up afterward:
+
+```sh
+bun run test:ergo    # requires Docker; may download the pinned official image
+```
+
+Ergo 2.19.1 was verified for registration, JOIN, server IDs/echoes, replies, typing, reactions, and CHATHISTORY playback. Read-marker and redaction protocol tests do not establish every server/bouncer's interoperability. Installation configures a format/lint pre-commit hook. Source execution is the supported development path; standalone binaries are not packaged yet.
+
+## Architecture and scope
+
+- [Implementation status and remaining work](docs/IMPLEMENTATION.md)
+- [Security/privacy model](docs/SECURITY.md)
 - [Product plan](docs/PLAN.md)
 - [Architecture and module ownership](docs/ARCHITECTURE.md)
 - [API behavioral contracts](docs/CONTRACTS.md)
-- [Architecture decision records](docs/DECISIONS.md)
-- [Parallel implementation workstreams](docs/WORKSTREAMS.md)
-- [Typed contracts](src/contracts/)
+- [Architecture decisions](docs/DECISIONS.md)
+- [Parallel workstreams](docs/WORKSTREAMS.md)
+- [UI implementation and limitations](src/ui/README.md)
 - [Agent/contributor guidance](AGENTS.md)
 
-Future adapters implement explicit TypeScript ports; the UI dispatches typed user actions and observes framework-neutral read models. No plugin framework or background bouncer is included.
+The UI sends typed actions and observes framework-neutral read models. IRC sessions, transport, storage and OS effects use replaceable adapters. No plugin system, moderation suite, DCC, split panes, cloud sync, or bundled bouncer is included.
+
+Linux is exercised locally; macOS CI is configured, but real macOS/SSH/tmux manual validation remains outstanding.
 
 ## License
 

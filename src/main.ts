@@ -73,6 +73,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
         failure = "OpenIRC could not flush all local state.";
       }
       ui?.destroy();
+      if (ui?.done) await ui.done;
       if (failure) {
         console.error(plainText(failure));
         exitCode = 1;
@@ -130,8 +131,10 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
       external: createExternalActions(),
       onQuit: stop,
     });
-    if (stopping) ui.destroy();
-    else if (ui.done) void ui.done.then(stop);
+    if (stopping) {
+      ui.destroy();
+      if (ui.done) await ui.done;
+    } else if (ui.done) void ui.done.then(stop);
     await done;
     return exitCode;
   } catch {

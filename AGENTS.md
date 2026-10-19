@@ -32,7 +32,7 @@ bun run format
 bun run check
 ```
 
-Current Vitest tests are platform-neutral under Node. Future Bun socket/SQLite integration tests must run under Bun with a separate documented command. Never test against public IRC networks in CI. Add focused tests for new behavior and run all checks before integrating.
+`bun run check` runs platform-neutral Vitest tests under Node and adapter/UI integration via `bun run test:bun`. Name Bun tests `*.bun.test.ts`; TSX suites use a JSX-free wrapper importing `@opentui/solid/preload` before dynamically importing the suite (Bun test does not load application preloads). `src/main.ts` is the real composition root; run `bun run start`. Never test against public IRC networks in CI. Add focused tests for new behavior and run all checks before integrating.
 
 ## Commits and changelog
 

@@ -1,6 +1,6 @@
 # Architecture
 
-Status: contract-first foundation, not a working IRC client. See [PLAN.md](PLAN.md) for product scope and [WORKSTREAMS.md](WORKSTREAMS.md) for implementation assignments.
+Status: implemented early daily-driver alpha. `src/main.ts` composes the real UI, application, IRC stack and persistence adapters. See [PLAN.md](PLAN.md) for broader scope, [WORKSTREAMS.md](WORKSTREAMS.md) for component ownership, and adapter/UI READMEs for current limitations.
 
 ## 1. Design rules
 
@@ -42,17 +42,17 @@ All arrows are in-process interfaces, not RPC or remote services. One applicatio
 
 ## 3. Module ownership and dependency rules
 
-| Module           | Owns                                               | May depend on                     | Must not depend on                           |
-| ---------------- | -------------------------------------------------- | --------------------------------- | -------------------------------------------- |
-| `contracts/`     | Shared IDs, values, actions, ports                 | Other contract files only         | Runtime libraries, adapters, UI              |
-| `domain/`        | Pure conversation/unread/history/identity rules    | Contracts, pure helpers           | App, I/O, Solid/OpenTUI                      |
-| `irc/`           | Wire codec, ISUPPORT/CAP/SASL, one-attempt session | Contracts, pure domain helpers    | App, storage, UI                             |
-| `transport/`     | Bun socket/TLS adapter                             | Contracts, Bun                    | Domain/UI state                              |
-| `storage/`       | SQLite/history/config/secret adapters              | Contracts, Bun/filesystem         | App, UI, live session                        |
-| `services/`      | Commands, completion, OS effects                   | Contracts, pure helpers           | Direct socket/SQL access, UI internals       |
-| `app/`           | Lifecycle, orchestration, read models              | Contracts, domain                 | Concrete adapter construction, Solid/OpenTUI |
-| `ui/`            | Components, local interaction state, Solid bridge  | Contracts, Solid/OpenTUI          | SQL, sockets, wire codec, concrete storage   |
-| future `main.ts` | Composition and terminal startup/shutdown          | All adapters and public factories | Product rules duplicated from app            |
+| Module               | Owns                                               | May depend on                     | Must not depend on                           |
+| -------------------- | -------------------------------------------------- | --------------------------------- | -------------------------------------------- |
+| `contracts/`         | Shared IDs, values, actions, ports                 | Other contract files only         | Runtime libraries, adapters, UI              |
+| `domain/`            | Pure conversation/unread/history/identity rules    | Contracts, pure helpers           | App, I/O, Solid/OpenTUI                      |
+| `irc/`               | Wire codec, ISUPPORT/CAP/SASL, one-attempt session | Contracts, pure domain helpers    | App, storage, UI                             |
+| `transport/`         | Bun socket/TLS adapter                             | Contracts, Bun                    | Domain/UI state                              |
+| `storage/`           | SQLite/history/config/secret adapters              | Contracts, Bun/filesystem         | App, UI, live session                        |
+| `services/`          | Commands, completion, OS effects                   | Contracts, pure helpers           | Direct socket/SQL access, UI internals       |
+| `app/`               | Lifecycle, orchestration, read models              | Contracts, domain                 | Concrete adapter construction, Solid/OpenTUI |
+| `ui/`                | Components, local interaction state, Solid bridge  | Contracts, Solid/OpenTUI          | SQL, sockets, wire codec, concrete storage   |
+| `main.ts` / `cli.ts` | Composition and terminal startup/shutdown          | All adapters and public factories | Product rules duplicated from app            |
 
 Use direct imports from specific contract files. Avoid barrel exports hiding cycles. Contracts are the only shared modification hotspot; implementation agents should own disjoint directories.
 
@@ -102,7 +102,7 @@ Contracts are **revision 1, internal and evolvable**, not semver-stable public A
 
 Snapshots are immutable by convention; publish fresh changed objects with structural sharing. Consumers must never mutate them. `getSnapshot()` preserves reference identity until a change. Subscription callbacks run after a commit; unsubscribing is idempotent. Reads do not initiate I/O.
 
-The provided `createReadModel()` is a tiny framework-neutral publication primitive, not an application store or replacement for Solid. The app must serialize writes, avoid reentrant publication, and provide a non-throwing listener-error handler. The Solid bridge creates a signal from `getSnapshot()`, subscribes, and disposes via `onCleanup`. Split subscriptions/selectors so unrelated channels do not update the active transcript.
+`createReadModel()` is a tiny framework-neutral publication primitive, not an application store or replacement for Solid. The app must serialize writes, avoid reentrant publication, and provide a non-throwing listener-error handler. The Solid bridge creates a signal from `getSnapshot()`, subscribes, and disposes via `onCleanup`. Split subscriptions/selectors so unrelated channels do not update the active transcript.
 
 Closing a conversation publishes its final state, removes it from the sidebar and releases its hot window. Existing readables remain inert/readable until subscribers dispose; new `timeline(id)` calls fail unavailable. Closing a DM does not delete history; closing a joined channel requests PART first. Failures must be visible and must not falsely mark a channel as parted.
 
@@ -190,7 +190,7 @@ Avoid generic `event: string, payload: unknown` extensibility. Exhaustive discri
 - UI: fake `AppApi`, shared `tests/fixtures/scenario.ts`, OpenTUI input/frame tests. Do not require a real IRC network to build components.
 - End to end: compose adapters and run newcomer journeys in a real terminal on Linux/macOS.
 
-Current tests run in Vitest's Node environment and cover platform-neutral foundation only. Bun-specific adapters will need a separate Bun-runtime integration command/job; do not import `bun:sqlite` into Node Vitest and pretend it is tested.
+`bun run test` runs platform-neutral tests in Vitest's Node environment. `bun run test:bun` runs real Bun socket/TLS, SQLite, CLI, composition and headless OpenTUI tests. `bun run check` includes both. Never import `bun:sqlite` into Node Vitest and pretend it is tested. A Linux pseudo-terminal startup/SIGTERM cleanup smoke test was also performed; real macOS/SSH/tmux manual coverage remains outstanding.
 
 ## 10. Decisions deliberately left open
 
@@ -199,4 +199,4 @@ Current tests run in Vitest's Node environment and cover platform-neutral founda
 - Exact runtime budgets (queue size, timeline window, pending operations, history limits): centralize validated policy in app/session options before implementation; test overflow behavior.
 - Retention default and secure credential backend: choose explicitly before personal credentials are used.
 - Formatting annotations and legacy services fallback need additional typed contracts if implemented.
-- Packaging/build entrypoint: add only when the real OpenTUI/Solid boot spike exists. There is no runnable terminal client yet.
+- Standalone packaging/build artifacts remain future work. The supported development entrypoint is `bun run start`, backed by `src/main.ts` and the configured Solid preload.
