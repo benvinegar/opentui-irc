@@ -17,10 +17,22 @@ import {
 } from "../contracts/control";
 import type { SecretProvider, SettingsDocument, SettingsRepository } from "../contracts/settings";
 import type { SearchQuery } from "../contracts/storage";
+import { secretReference } from "../storage/validation";
 import { actionSchema, parseAppAction, permissionsForAction } from "./actions";
 import { parseConfigEdit, prepareConfigChange } from "./config";
 import { configurationSchema } from "./schema";
-import { boolean, ControlFault, fail, fields, integer, json, opaqueId, string } from "./validation";
+import { parseControlRequest } from "./protocol";
+import {
+  boolean,
+  ControlFault,
+  fail,
+  fields,
+  integer,
+  json,
+  object,
+  opaqueId,
+  string,
+} from "./validation";
 
 export interface ControlServiceOptions {
   readonly settings: SettingsRepository;
@@ -42,18 +54,20 @@ const FAILURE = (id: string, detail: ControlError): ControlResponse => ({
   error: detail,
 });
 const unwrap = <T>(result: Result<T, ControlError>): T => {
-  if (!result.ok) throw new ControlFault(result.error);
+  // App/adapter errors can originate in remote IRC replies. Never turn their free-form
+  // messages into an inspect/configure side channel for message bodies or credentials.
+  if (!result.ok)
+    throw new ControlFault({
+      code: result.error.code,
+      message: "The requested operation could not be completed.",
+      retryable: result.error.retryable,
+      ...(result.error.outcome ? { outcome: result.error.outcome } : {}),
+    });
   return result.value;
 };
-const MUTATIONS = new Set([
-  "config.apply",
-  "config.reload",
-  "action.dispatch",
-  "secrets.store",
-  "app.shutdown",
-]);
 const REPLAY_TTL_MS = 120000;
 const REPLAY_LIMIT = 256;
+const REPLAY_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_INFLIGHT = 32;
 
 /** The business/control boundary. All live actions delegate to the existing AppApi. */
@@ -62,8 +76,19 @@ export function createControlService(options: ControlServiceOptions): ControlHan
   const now = options.now ?? Date.now;
   const cache = new Map<
     string,
-    { fingerprint: string; promise: Promise<ControlResponse>; expires: number; pending: boolean }
+    {
+      fingerprint: string;
+      promise: Promise<ControlResponse>;
+      expires: number;
+      pending: boolean;
+      bytes: number;
+    }
   >();
+  let replayBytes = 0;
+  const removeReplay = (id: string) => {
+    replayBytes -= cache.get(id)?.bytes ?? 0;
+    cache.delete(id);
+  };
   const live = () => {
     if (!options.app) fail("unavailable", "This command needs a running OpenIRC instance.");
     return options.app;
@@ -111,12 +136,14 @@ export function createControlService(options: ControlServiceOptions): ControlHan
               maxRequestBytes: 1048576,
               maxResponseBytes: 4194304,
               replayEntries: REPLAY_LIMIT,
+              replayMaxBytes: REPLAY_MAX_BYTES,
               replayTtlMs: REPLAY_TTL_MS,
               replayDurable: false,
             },
             schemas: { settings: configurationSchema(), action: actionSchema() },
             notes: [
               "Secret references are visible; resolved credentials are never returned.",
+              "Local configure plus network authority can repoint a credential reference to another host and connect. This is same-UID consent, not a secret-vault sandbox.",
               "Message/draft reads, sends, and destructive work require separate explicit permissions.",
               "No automatic mutation retries. Replay protection is bounded and not durable across restart.",
               "Offline mode never connects to IRC or opens local message history.",
@@ -162,6 +189,13 @@ export function createControlService(options: ControlServiceOptions): ControlHan
           if (plan.requiredPermissions.includes("destructive")) confirm(params.confirm);
           // Even a no-op must not accidentally ignore external file changes hidden by the live read model.
           checkRevision(unwrap(await options.settings.load(signal)), expected);
+          if (signal.aborted) fail("cancelled", "Control request cancelled before save.");
+          // Planning must still describe the live base after an asynchronous disk check.
+          if (options.app) {
+            const liveSettings = options.app.settings.getSnapshot();
+            if (!liveSettings) fail("unavailable", "Settings are not ready.");
+            checkRevision(liveSettings, expected);
+          }
           if (!plan.changed)
             return SUCCESS(request.id, { applied: false, revision: expected, plan });
           let operationId: string | undefined;
@@ -185,6 +219,7 @@ export function createControlService(options: ControlServiceOptions): ControlHan
           if (params.dryRun !== undefined) boolean(params.dryRun);
           requireRights(request, ["inspect"]);
           const disk = unwrap(await options.settings.load(signal));
+          if (signal.aborted) fail("cancelled", "Control request cancelled before reload.");
           if (!options.app)
             return SUCCESS(request.id, {
               applied: false,
@@ -211,6 +246,7 @@ export function createControlService(options: ControlServiceOptions): ControlHan
           const rights = [...new Set(plans.flatMap((plan) => plan.requiredPermissions))];
           requireRights(request, ["configure", ...rights]);
           if (rights.includes("destructive")) confirm(params.confirm);
+          if (signal.aborted) fail("cancelled", "Control request cancelled before reload.");
           const operationId = unwrap(await options.app.reloadSettings(disk.revision, signal));
           return SUCCESS(request.id, {
             applied: true,
@@ -296,10 +332,19 @@ export function createControlService(options: ControlServiceOptions): ControlHan
         case "discovery.get": {
           const params = fields(request.params, ["networkId"]);
           requireRights(request, ["inspect"]);
-          return SUCCESS(
-            request.id,
-            unwrap(live().discovery(opaqueId<"network">(params.networkId))).getSnapshot(),
-          );
+          const snapshot = unwrap(
+            live().discovery(opaqueId<"network">(params.networkId)),
+          ).getSnapshot();
+          const { error: directoryError, ...directory } = snapshot.directory;
+          const { error: userError, ...user } = snapshot.user;
+          return SUCCESS(request.id, {
+            networkId: snapshot.networkId,
+            directory: {
+              ...directory,
+              ...(directoryError ? { errorCode: directoryError.code } : {}),
+            },
+            user: { ...user, ...(userError ? { errorCode: userError.code } : {}) },
+          });
         }
         case "secrets.store": {
           const params = fields(request.params, ["value"]);
@@ -310,6 +355,8 @@ export function createControlService(options: ControlServiceOptions): ControlHan
           const reference = options.app
             ? unwrap(await options.app.storeSecret(value, signal))
             : unwrap(await options.secrets.store(value, signal));
+          if (!secretReference(reference))
+            fail("internal", "Secret storage did not return a valid reference.");
           return SUCCESS(request.id, { reference });
         }
         case "app.shutdown": {
@@ -329,40 +376,61 @@ export function createControlService(options: ControlServiceOptions): ControlHan
       return FAILURE(request.id, detail);
     }
   };
+  const ownedResponse = (response: ControlResponse): ControlResponse =>
+    response.ok
+      ? { ...response, result: json(response.result) }
+      : { ...response, error: { ...response.error } };
   return async (request, signal) => {
-    if (
-      request.version !== 1 ||
-      !CONTROL_METHODS.includes(request.method) ||
-      !Array.isArray(request.permissions) ||
-      request.permissions.some((right) => !ALL_CONTROL_PERMISSIONS.includes(right))
-    )
-      return FAILURE(request.id, {
+    // Validate and detach even when invoked without the Unix transport. Mutable caller
+    // data must never diverge from the payload/intent admitted into the replay cache.
+    let input: ControlRequest;
+    try {
+      const parsed = parseControlRequest(request);
+      if (!parsed.ok) throw new ControlFault(parsed.error);
+      input = {
+        ...parsed.value,
+        params: jsonObjectCopy(parsed.value.params),
+        permissions: [...parsed.value.permissions],
+      };
+      if (Buffer.byteLength(JSON.stringify(input)) > 1048576)
+        fail("protocol", "Control request exceeds its size limit.");
+    } catch {
+      return FAILURE("invalid-request", {
         code: "protocol",
         message: "Unsupported control request.",
         retryable: false,
       });
-    if (!MUTATIONS.has(request.method)) return execute(request, signal);
+    }
     if (signal.aborted)
-      return FAILURE(request.id, {
+      return FAILURE(input.id, {
         code: "cancelled",
         message: "Request cancelled before admission.",
         retryable: false,
       });
-    for (const [id, entry] of cache) if (!entry.pending && entry.expires <= now()) cache.delete(id);
-    const fingerprint = createHash("sha256")
-      .update(JSON.stringify([request.method, request.params, request.permissions]))
-      .digest("hex");
-    const prior = cache.get(request.id);
+    for (const [id, entry] of cache) if (!entry.pending && entry.expires <= now()) removeReplay(id);
+    const canonical = JSON.stringify(
+      [input.method, input.params, [...input.permissions].sort()],
+      (_key, value: unknown) =>
+        object(value)
+          ? Object.fromEntries(
+              Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+            )
+          : value,
+    );
+    const fingerprint = createHash("sha256").update(canonical).digest("hex");
+    const prior = cache.get(input.id);
+    // IDs cover reads as well as writes: changing method, payload or rights cannot reuse
+    // another request's cached result or silently perform a different operation.
     if (prior)
       return prior.fingerprint === fingerprint
-        ? prior.promise
-        : FAILURE(request.id, {
+        ? ownedResponse(await prior.promise)
+        : FAILURE(input.id, {
             code: "conflict",
             message: "Request ID was already used for a different operation.",
             retryable: false,
           });
     if ([...cache.values()].filter((entry) => entry.pending).length >= MAX_INFLIGHT)
-      return FAILURE(request.id, {
+      return FAILURE(input.id, {
         code: "rate-limited",
         message: "Too many control operations are pending.",
         retryable: false,
@@ -370,16 +438,24 @@ export function createControlService(options: ControlServiceOptions): ControlHan
     while (cache.size >= REPLAY_LIMIT) {
       const removable = [...cache].find(([, entry]) => !entry.pending);
       if (!removable) break;
-      cache.delete(removable[0]);
+      removeReplay(removable[0]);
     }
-    const promise = execute(request, signal);
-    const entry = { fingerprint, promise, expires: now() + REPLAY_TTL_MS, pending: true };
-    cache.set(request.id, entry);
-    void promise.then(() => {
+    // Install the promise before entering app/adapter code, including reentrant ports.
+    const promise = Promise.resolve().then(() => execute(input, signal));
+    const entry = { fingerprint, promise, expires: now() + REPLAY_TTL_MS, pending: true, bytes: 0 };
+    cache.set(input.id, entry);
+    void promise.then((response) => {
       entry.pending = false;
       entry.expires = now() + REPLAY_TTL_MS;
+      entry.bytes = Buffer.byteLength(JSON.stringify(response));
+      replayBytes += entry.bytes;
+      while (replayBytes > REPLAY_MAX_BYTES) {
+        const removable = [...cache].find(([, cached]) => !cached.pending);
+        if (!removable) break;
+        removeReplay(removable[0]);
+      }
     });
-    return promise;
+    return ownedResponse(await promise);
   };
 }
 
