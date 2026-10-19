@@ -15,7 +15,7 @@ const sessions = createSessionFactory({ transport, secrets, clock });
 ## Implemented
 
 - Incremental bounded CRLF/UTF-8 codec, IRC tags, prefixes, numerics, parameter validation, byte-budgeted serialization and injection rejection.
-- CAP LS 302 continuation/REQ/ACK/NAK/DEL, optional basic-IRC timeout fallback, TLS-only credentials, SASL PLAIN including 400-byte chunks, required-auth registration gate, alternate nicknames, PING/PONG and stale-connection detection.
+- CAP LS 302 continuation/REQ/ACK/NAK/DEL, optional basic-IRC timeout fallback, TLS-only credentials (including channel keys, before secret resolution), SASL PLAIN including 400-byte chunks, required-auth registration gate, alternate nicknames, PING/PONG and stale-connection detection.
 - ISUPPORT casemapping/prefix/channel modes, JOIN/PART/QUIT/NICK/KICK, NAMES reconciliation with live deltas, privilege modes, topics, accounts, away state, channel/DM chat, NOTICE and CTCP ACTION.
 - Bounded paced outgoing queue, UTF-8 splitting, written/failed/uncertain states; reliable echo only with ACKed message-tags + batch + labeled-response + echo-message. No text-equality matching. A split logical echo is aggregated without inventing one fragment's server ID.
 - Serialized WHOIS and LIST with typed results, timeout quarantine and explicit directory limit errors.

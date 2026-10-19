@@ -1183,6 +1183,8 @@ class Attempt {
       case "topic":
         if (!atom(command.channel) || !this.support.channelTypes.includes(command.channel[0]!))
           return failure("invalid-input", "Invalid IRC channel.");
+        if (command.type === "join" && command.key && !this.secure)
+          return failure("authentication", "Channel keys require a verified TLS connection.");
         if (command.type === "part" && command.reason !== undefined && !content(command.reason))
           return failure("invalid-input", "Invalid part reason.");
         if (command.type === "topic" && command.text !== undefined && !content(command.text))
@@ -1330,6 +1332,8 @@ class Attempt {
       case "join": {
         let key: string | undefined;
         if (command.key) {
+          if (!this.secure)
+            return failure("authentication", "Channel keys require a verified TLS connection.");
           const result = await this.options.secrets.resolve(command.key, this.controller.signal);
           if (!result.ok || !atom(result.value))
             return failure("authentication", "Channel key is unavailable or invalid.");

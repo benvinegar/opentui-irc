@@ -64,6 +64,8 @@ async function harness(
   options: {
     capabilities?: string;
     sasl?: NetworkProfile["sasl"];
+    tls?: boolean;
+    secretProvider?: SecretProvider;
     policy?: Partial<SessionPolicy>;
     autoConsume?: boolean;
     onWrite?: (
@@ -129,12 +131,19 @@ async function harness(
         return { ok: true, value: connection };
       },
     },
-    secrets,
+    secrets: options.secretProvider ?? secrets,
     clock,
     policy: { floodIntervalMs: 0, ...options.policy },
   });
   const opened = await factory.open(
-    { ...profile, ...(options.sasl ? { sasl: options.sasl } : {}) },
+    {
+      ...profile,
+      endpoints: profile.endpoints.map((endpoint) => ({
+        ...endpoint,
+        tls: options.tls ?? endpoint.tls,
+      })),
+      ...(options.sasl ? { sasl: options.sasl } : {}),
+    },
     { networkId, generation: 7 },
     parent.signal,
   );
@@ -249,6 +258,29 @@ describe("one-attempt session", () => {
     await fixture.consumption;
     expect(hasReady(fixture.events)).toBe(false);
     expect(fixture.written.some((frame) => frame.command === "JOIN")).toBe(false);
+  });
+  test("plaintext keyed JOIN fails before resolving or transmitting the secret", async () => {
+    let resolutions = 0;
+    const fixture = await harness({
+      tls: false,
+      secretProvider: {
+        ...secrets,
+        async resolve() {
+          resolutions++;
+          return { ok: true, value: "must-never-resolve" };
+        },
+      },
+    });
+    await until(() => hasReady(fixture.events));
+    const result = await fixture.session.execute(
+      { type: "join", channel: "#room", key: entityId<"secret-ref">("env:CHANNEL_KEY") },
+      op("keyed-join"),
+      signal(),
+    );
+    expect(!result.ok && result.error.code).toBe("authentication");
+    expect(resolutions).toBe(0);
+    expect(fixture.written.some((frame) => frame.command === "JOIN")).toBe(false);
+    expect(JSON.stringify(fixture.events)).not.toContain("must-never-resolve");
   });
   test("SASL rejection terminates required auth with no credentials in events", async () => {
     const fixture = await harness({
