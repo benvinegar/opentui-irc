@@ -454,7 +454,12 @@ function Shell(props: UiOptions) {
       return;
     }
     if (modal()) {
-      if (event.name === "return" && focusId() === "dialog-input") {
+      if (event.name === "pageup" || event.name === "pagedown") {
+        event.preventDefault();
+        const viewport = renderer.root.findDescendantById("modal-scroll");
+        if (viewport instanceof ScrollBoxRenderable)
+          viewport.scrollBy(event.name === "pageup" ? -1 : 1, "viewport");
+      } else if (event.name === "return" && focusId() === "dialog-input") {
         event.preventDefault();
         if (modal() === "search") void search();
         else if (modal() === "join" || modal() === "query") void submitTarget();

@@ -17,3 +17,5 @@
 ### Changed
 
 ### Fixed
+
+- Page Up/Down now scroll the active dialog instead of leaving long help/settings content unreachable from the keyboard.

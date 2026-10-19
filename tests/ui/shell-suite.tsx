@@ -40,6 +40,37 @@ async function click(view: TestRendererSetup, id: string) {
 }
 
 describe("real Solid/OpenTUI shell", () => {
+  test("Page Up/Down scroll dialogs without moving the conversation or editing a field", async () => {
+    const { view } = await mount();
+    const transcript = view.renderer.root.findDescendantById("transcript");
+    expect(transcript).toBeInstanceOf(ScrollBoxRenderable);
+    const transcriptTop = transcript instanceof ScrollBoxRenderable ? transcript.scrollTop : -1;
+    await view.mockInput.pressKey("F1");
+    await tick();
+    await view.renderOnce();
+    const dialog = view.renderer.root.findDescendantById("modal-scroll");
+    expect(dialog).toBeInstanceOf(ScrollBoxRenderable);
+    if (!(dialog instanceof ScrollBoxRenderable)) throw new Error("Missing dialog viewport");
+    expect(dialog.scrollTop).toBe(0);
+    await view.mockInput.pressKey("\x1b[6~");
+    await view.renderOnce();
+    expect(dialog.scrollTop).toBeGreaterThan(0);
+    await view.mockInput.pressKey("\x1b[5~");
+    await view.renderOnce();
+    expect(dialog.scrollTop).toBe(0);
+    for (let index = 0; index < 5; index++) await view.mockInput.pressKey("\x1b[6~");
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("/quit");
+    expect(transcript instanceof ScrollBoxRenderable && transcript.scrollTop).toBe(transcriptTop);
+    await click(view, "dialog-close");
+    await click(view, "add-network");
+    await click(view, "network-name");
+    await view.mockInput.typeText("paging preserves this");
+    await view.mockInput.pressKey("\x1b[6~");
+    await view.mockInput.pressKey("\x1b[5~");
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("paging preserves this");
+  });
   test("channel directory opens from /list, streams bounded/filterable results, and joins the pinned network", async () => {
     const { fake, view } = await mount();
     await view.mockInput.typeText("/list");
