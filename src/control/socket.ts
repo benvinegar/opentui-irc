@@ -535,7 +535,12 @@ export async function createControlServer(options: {
       socket.destroy();
     });
     socket.on("end", () => {
-      if (!accepted && !responding) invalid();
+      if (!accepted && !responding) {
+        // A payload-free liveness probe has no request to reject. Writing an error
+        // to its disconnected peer can retain the slot until the idle timeout.
+        if (socket.bytesRead === 0) socket.destroy();
+        else invalid();
+      }
     });
     socket.on("close", () => {
       clearTimeout(timer);

@@ -454,6 +454,24 @@ describe("bounded control NDJSON transport", () => {
       expect(cancelledAfter.error).toMatchObject({ code: "cancelled", outcome: "unknown" });
   });
 
+  test("payload-free probes release connection slots before the idle timeout", async () => {
+    const config = await profile();
+    let calls = 0;
+    await start(config, {
+      limits: { maxConnections: 2, timeoutMs: 2000 },
+      handler: async (input, abort) => {
+        calls++;
+        return handler(input, abort);
+      },
+    });
+    const client = createControlClient({ configDirectory: config });
+    for (let index = 0; index < 8; index++) {
+      expect(value(await probeControlServer(config, signal()))).toBe("live");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(value(await client.request(request(`probe-${index}`), signal())).ok).toBe(true);
+    }
+    expect(calls).toBe(8);
+  });
   test("server timeout cancels handlers, bounds idle connections, and close unblocks clients", async () => {
     const config = await profile();
     let aborted = false;

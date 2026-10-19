@@ -24,3 +24,4 @@
 - Servers without a message of the day no longer leave a misleading connection error after successful registration.
 - Conditional credential fields retain their visual Tab order; new dialogs no longer inherit stale acceptance messages.
 - Disconnected and connecting networks no longer claim an active plaintext or TLS connection.
+- Repeated agent status polling no longer exhausts control-socket slots with disconnected liveness probes.
