@@ -14,6 +14,18 @@ describe("message policy", () => {
     expect(mentionsNick("nicknames nick_other", "nick", "rfc1459")).toBe(false);
     expect(mentionsNick("Hi nick!", "nick", "ascii")).toBe(true);
   });
+  it("uses deterministic SQLite-compatible binary ID ties, not locale sorting", () => {
+    const ids = ["z", "_", "Z", "a", "\u{10000}", "\ue000"];
+    const messages = ids.map((id) => ({ ...welcomeMessage, id: entityId<"message">(id) }));
+    expect(mergeWindow([], messages, 10).map((message) => message.id)).toEqual([
+      "Z",
+      "_",
+      "a",
+      "z",
+      "\ue000",
+      "\u{10000}",
+    ]);
+  });
   it("merges by identity instead of body and bounds windows", () => {
     const second = {
       ...welcomeMessage,

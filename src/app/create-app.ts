@@ -25,7 +25,7 @@ import type { IrcSession, SessionCommand, SessionEvent } from "../contracts/sess
 import type { NetworkProfile, SettingsDocument } from "../contracts/settings";
 import type { ConversationRecord, ReadPosition } from "../contracts/storage";
 import { foldIdentifier } from "../domain/irc-identifiers";
-import { mergeWindow, mentionsNick, plainText } from "../domain/message-policy";
+import { compareMessageIds, mergeWindow, mentionsNick, plainText } from "../domain/message-policy";
 import { admitSessionEvent, startSessionCursor } from "../domain/session-cursor";
 import type { SessionCursor } from "../domain/session-cursor";
 import { createReadModel } from "./read-model";
@@ -45,6 +45,8 @@ const MAX_HOT_MESSAGES = 5000;
 const MAX_CONVERSATIONS = 1000;
 const MAX_MEMBERS = 10000;
 const MAX_OPERATIONS = 256;
+const MAX_QUEUED_INTENTS = 256;
+const RETENTION_INTERVAL_MS = 86400000;
 const PAGE_SIZE = 100;
 const MAX_INPUT = 65536;
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
@@ -66,9 +68,18 @@ function requireResult<T>(result: Result<T>): T {
   return result.value;
 }
 
+interface UnreadEntry {
+  readonly id: MessageId;
+  readonly time: number;
+  readonly mention: boolean;
+}
+const comparePosition = (left: { id: string; time: number }, right: { id: string; time: number }) =>
+  left.time - right.time || compareMessageIds(left.id, right.id);
 interface Conversation {
   view: ConversationView;
-  readonly model: ReadModel<TimelineSnapshot>;
+  model: ReadModel<TimelineSnapshot>;
+  readonly unread: Map<MessageId, UnreadEntry>;
+  unreadOverflow?: { through: UnreadEntry; count: number; mentions: number };
   loaded: boolean;
   closed: boolean;
   recent: readonly Message[];
@@ -86,6 +97,10 @@ interface Attempt {
 export const createApp: CreateApp = async (deps, rootSignal) => {
   const lifetime = new AbortController();
   let stopping = false;
+  let initializing = true;
+  let durabilityFailure: AppError | undefined;
+  let queuedIntents = 0;
+  const retentionController = new AbortController();
   let shutdownPromise: Promise<Result<void>> | undefined;
   let tail: Promise<unknown> = Promise.resolve();
   let revision = 0;
@@ -95,6 +110,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
   let settings: SettingsDocument;
   const networks = new Map<NetworkId, NetworkView>();
   const conversations = new Map<ConversationId, Conversation>();
+  const dirtyConversations = new Set<ConversationId>();
   const attempts = new Map<NetworkId, Attempt>();
   const generations = new Map<NetworkId, number>();
   const retryCounts = new Map<NetworkId, number>();
@@ -122,6 +138,27 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     const next = tail.then(work);
     tail = next.catch(() => {});
     return next;
+  };
+  const serialIntent = <T>(
+    signal: AbortSignal,
+    work: () => Promise<Result<T>>,
+  ): Promise<Result<T>> => {
+    if (stopping)
+      return Promise.resolve({
+        ok: false,
+        error: error("unavailable", "OpenIRC is shutting down."),
+      });
+    if (signal.aborted)
+      return Promise.resolve({ ok: false, error: error("cancelled", "Operation cancelled.") });
+    if (queuedIntents >= MAX_QUEUED_INTENTS)
+      return Promise.resolve({
+        ok: false,
+        error: error("rate-limited", "Too many actions are queued; wait before trying again."),
+      });
+    queuedIntents++;
+    return serial(work).finally(() => {
+      queuedIntents--;
+    });
   };
   const safeError = (cause: unknown): AppError =>
     cause instanceof Rejected ? cause.detail : error("internal", "An internal operation failed.");
@@ -212,8 +249,20 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       loaded: false,
       closed: false,
       recent: [],
+      unread: new Map(),
     };
     conversations.set(record.id, c);
+    dirtyConversations.add(record.id);
+    return c;
+  };
+  const reopenConversation = (c: Conversation) => {
+    if (c.closed) {
+      c.model = createReadModel(
+        { ...timeline(c), messages: c.recent, members: [], typing: [], loadingOlder: false },
+        modelError,
+      );
+      c.closed = false;
+    }
     return c;
   };
   const ensureConversation = (
@@ -221,7 +270,12 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     kind: ConversationView["kind"],
     name: string,
   ): Conversation => {
-    let c = findConversation(networkId, name, kind);
+    let c =
+      kind === "status"
+        ? [...conversations.values()].find(
+            (value) => value.view.networkId === networkId && value.view.kind === "status",
+          )
+        : findConversation(networkId, name, kind);
     if (!c)
       c = createConversation({
         id: deps.ids.next<"conversation">(),
@@ -229,8 +283,11 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         kind,
         name: plainText(name),
       });
-    c.closed = false;
-    return c;
+    if (kind === "status" && c.view.name !== plainText(name)) {
+      c.view = { ...c.view, name: plainText(name) };
+      dirtyConversations.add(c.view.id);
+    }
+    return reopenConversation(c);
   };
   const canPersist = (c: Conversation) =>
     settings.user.history.enabled &&
@@ -250,9 +307,10 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     messages: readonly Message[] = [],
     positions: readonly ReadPosition[] = [],
   ) => {
+    const dirty = [...dirtyConversations];
     const result = await deps.history.commit(
       {
-        conversations: [...conversations.values()].map(record),
+        conversations: dirty.map((id) => record(conversations.get(id)!)),
         messages: messages.filter((message) => {
           const c = conversations.get(message.conversationId);
           return c && canPersist(c);
@@ -265,12 +323,17 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       lifetime.signal,
     );
     if (!result.ok) {
+      durabilityFailure ??= result.error;
       report(result.error);
       publish();
-    }
+    } else for (const id of dirty) dirtyConversations.delete(id);
     return result;
   };
   const saveWorkspace = async () => {
+    if (dirtyConversations.size) {
+      const registered = await persist();
+      if (!registered.ok) return registered;
+    }
     const result = await deps.history.saveWorkspace(
       {
         ...(active ? { activeConversationId: active } : {}),
@@ -288,8 +351,39 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       },
       lifetime.signal,
     );
-    if (!result.ok) report(result.error);
+    if (!result.ok) {
+      durabilityFailure ??= result.error;
+      report(result.error);
+    }
     return result;
+  };
+  const pruneHistory = async (signal: AbortSignal) => {
+    const days = settings.user.history.retentionDays;
+    if (days === null) return ok(0);
+    const result = await deps.history.prune(
+      Math.max(0, deps.clock.now() - days * RETENTION_INTERVAL_MS),
+      signal,
+    );
+    if (!result.ok) {
+      durabilityFailure ??= result.error;
+      report(result.error);
+      if (boot === "ready") publish();
+    }
+    return result;
+  };
+  const startRetention = () => {
+    void (async () => {
+      try {
+        while (!retentionController.signal.aborted) {
+          await deps.clock.sleep(RETENTION_INTERVAL_MS, retentionController.signal);
+          await serial(async () => {
+            if (!stopping) await pruneHistory(lifetime.signal);
+          });
+        }
+      } catch {
+        // Shutdown aborts the sole maintenance timer; no detached retry task survives it.
+      }
+    })();
   };
   const capHotWindows = () => {
     let total = [...conversations.values()].reduce(
@@ -309,6 +403,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     }
   };
   const putMessages = (c: Conversation, messages: readonly Message[]) => {
+    if (c.closed) return;
     c.recent = mergeWindow(c.recent, messages, WINDOW);
     const replacements = new Map(messages.map((message) => [message.id, message]));
     updateTimeline(c, {
@@ -327,19 +422,77 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       for (const id of reactions.keys()) if (!retained.has(id)) reactions.delete(id);
     }
   };
+  const trackUnread = (c: Conversation, message: Message, mention: boolean) => {
+    if (c.unread.has(message.id)) return;
+    const entry: UnreadEntry = {
+      id: message.id,
+      time: message.serverTime ?? message.receivedAt,
+      mention,
+    };
+    c.unread.set(message.id, entry);
+    if (c.unread.size > WINDOW) {
+      const oldest = [...c.unread.values()].sort(comparePosition)[0]!;
+      c.unread.delete(oldest.id);
+      const overflow = c.unreadOverflow;
+      c.unreadOverflow = {
+        through:
+          overflow && comparePosition(overflow.through, oldest) > 0 ? overflow.through : oldest,
+        count: (overflow?.count ?? 0) + 1,
+        mentions: (overflow?.mentions ?? 0) + (oldest.mention ? 1 : 0),
+      };
+    }
+    c.view = {
+      ...c.view,
+      unreadCount: c.view.unreadCount + 1,
+      mentionCount: c.view.mentionCount + (mention ? 1 : 0),
+    };
+    if (!c.unreadOverflow)
+      updateTimeline(c, { firstUnreadId: [...c.unread.values()].sort(comparePosition)[0]!.id });
+  };
   const loadRecent = async (c: Conversation) => {
     if (c.loaded) return;
+    if (dirtyConversations.has(c.view.id)) {
+      const registered = await persist();
+      if (!registered.ok) return;
+    }
     const result = await deps.history.page(c.view.id, { limit: PAGE_SIZE }, lifetime.signal);
     if (!result.ok) {
       report(result.error);
       return;
     }
+    const livePending = new Set([...pending.values()].map((entry) => entry.messageId));
     const restored = result.value.items.map((message) =>
-      message.sendState === "pending" || message.sendState === "written"
+      !livePending.has(message.id) &&
+      (message.sendState === "pending" || message.sendState === "written")
         ? { ...message, sendState: "uncertain" as const }
         : message,
     );
-    putMessages(c, restored);
+    // Disk can lag a failed write; loading must not downgrade newer in-memory enrichment.
+    putMessages(c, [...restored, ...c.recent]);
+    const previousRead = readPositions.get(c.view.id);
+    const ownNick = networks.get(c.view.networkId)?.nick ?? "";
+    for (const message of restored) {
+      if (
+        c.view.kind === "status" ||
+        message.sendState !== undefined ||
+        same(c.view.networkId, message.sender.nick, ownNick)
+      )
+        continue;
+      if (
+        previousRead
+          ? comparePosition(
+              { id: message.id, time: message.serverTime ?? message.receivedAt },
+              { id: previousRead.messageId, time: previousRead.readAt },
+            ) <= 0
+          : message.source !== "live"
+      )
+        continue;
+      trackUnread(
+        c,
+        message,
+        c.view.kind === "direct" || mentionsNick(message.text, ownNick, mapping(c.view.networkId)),
+      );
+    }
     const { olderCursor: _older, ...base } = timeline(c);
     c.model.publish({
       ...base,
@@ -381,8 +534,20 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
   };
   const findMessage = (id: MessageId): { c: Conversation; message: Message } | undefined => {
     for (const c of conversations.values()) {
-      const message = timeline(c).messages.find((item) => item.id === id);
+      const message =
+        timeline(c).messages.find((item) => item.id === id) ??
+        c.recent.find((item) => item.id === id);
       if (message) return { c, message };
+    }
+    return undefined;
+  };
+  const findServerMessage = (networkId: NetworkId, serverId: string): Message | undefined => {
+    for (const c of conversations.values()) {
+      if (c.view.networkId !== networkId) continue;
+      const message = [...c.recent, ...timeline(c).messages].find(
+        (item) => item.serverId === serverId,
+      );
+      if (message) return message;
     }
     return undefined;
   };
@@ -440,24 +605,47 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       }
     }
   };
-  const markRead = async (c: Conversation, lastId: MessageId) => {
-    const message = timeline(c).messages.find((entry) => entry.id === lastId);
-    if (!message) return;
+  const markRead = async (c: Conversation, lastId: MessageId, syncToServer = true) => {
+    const message = findMessage(lastId)?.message;
+    if (!message || message.conversationId !== c.view.id) return;
     const previous = readPositions.get(c.view.id);
     const readAt = message.serverTime ?? message.receivedAt;
-    if (
-      previous &&
-      (previous.readAt > readAt || (previous.messageId === message.id && c.view.unreadCount === 0))
-    )
+    const target = { id: message.id, time: readAt };
+    if (previous && comparePosition({ id: previous.messageId, time: previous.readAt }, target) >= 0)
       return;
     const position = { conversationId: c.view.id, messageId: message.id, readAt };
     readPositions.set(c.view.id, position);
-    c.view = { ...c.view, unreadCount: 0, mentionCount: 0 };
-    const { firstUnreadId: _unread, ...rest } = timeline(c);
-    c.model.publish(rest);
+    let removed = 0;
+    let mentions = 0;
+    for (const [id, entry] of c.unread)
+      if (comparePosition(entry, target) <= 0) {
+        c.unread.delete(id);
+        removed++;
+        if (entry.mention) mentions++;
+      }
+    if (c.unreadOverflow && comparePosition(c.unreadOverflow.through, target) <= 0) {
+      removed += c.unreadOverflow.count;
+      mentions += c.unreadOverflow.mentions;
+      delete c.unreadOverflow;
+    }
+    c.view = {
+      ...c.view,
+      unreadCount: Math.max(0, c.view.unreadCount - removed),
+      mentionCount: Math.max(0, c.view.mentionCount - mentions),
+    };
+    const first = [...c.unread.values()].sort(comparePosition)[0];
+    const { firstUnreadId: oldFirst, ...rest } = timeline(c);
+    c.model.publish({
+      ...rest,
+      ...(c.unreadOverflow && oldFirst
+        ? { firstUnreadId: oldFirst }
+        : first
+          ? { firstUnreadId: first.id }
+          : {}),
+    });
     await persist([], [position]);
     const network = networks.get(c.view.networkId);
-    if (network?.features.readMarkers && message.serverTime !== undefined) {
+    if (syncToServer && network?.features.readMarkers && message.serverTime !== undefined) {
       const id = deps.ids.next<"operation">();
       try {
         await execute(
@@ -577,23 +765,32 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         );
         const own = same(networkId, incoming.sender.nick, network.nick);
         const name = isChannel || own ? incoming.target : incoming.sender.nick;
-        const c = ensureConversation(networkId, isChannel ? "channel" : "direct", name);
+        const previousConversation = findConversation(
+          networkId,
+          name,
+          isChannel ? "channel" : "direct",
+        );
+        const reopened = !previousConversation || previousConversation.closed;
+        // In-flight traffic after PART must not undo an explicit channel close. DMs may reopen.
+        const c =
+          isChannel && previousConversation
+            ? previousConversation
+            : ensureConversation(networkId, isChannel ? "channel" : "direct", name);
         const local = incoming.operationId ? pending.get(incoming.operationId) : undefined;
         let existing = local && (findMessage(local.messageId)?.message ?? local.message);
         if (!existing && incoming.serverId) {
-          existing = timeline(c).messages.find(
-            (message) => message.networkId === networkId && message.serverId === incoming.serverId,
-          );
+          existing = findServerMessage(networkId, incoming.serverId);
           if (!existing) {
             const stored = await deps.history.findByServerId(
               networkId,
               incoming.serverId,
               lifetime.signal,
             );
-            if (stored.ok) existing = stored.value ?? undefined;
-            else report(stored.error);
+            existing = requireResult(stored) ?? undefined;
           }
         }
+        if (existing && (existing.conversationId !== c.view.id || existing.networkId !== networkId))
+          reject("conflict", "Server message identity belongs to a different conversation.");
         const sender = user(networkId, incoming.sender.nick);
         const message: Message = {
           ...existing,
@@ -618,6 +815,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         };
         putMessages(c, [message]);
         await persist([message]);
+        if (reopened && !c.closed) await saveWorkspace();
         if (local && incoming.operationId) {
           pending.delete(incoming.operationId);
           operation(incoming.operationId, "completed");
@@ -628,25 +826,25 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           visible?.focused &&
           visible.atBottom &&
           timeline(c).atLatest !== false;
+        const previousRead = readPositions.get(c.view.id);
         const isNew =
           !existing &&
           !own &&
-          (incoming.source === "live" ||
-            (readPositions.has(c.view.id) &&
-              (incoming.serverTime ?? incoming.receivedAt) > readPositions.get(c.view.id)!.readAt));
-        if (seen) await markRead(c, message.id);
-        else if (isNew) {
+          (previousRead
+            ? comparePosition(
+                { id: message.id, time: message.serverTime ?? message.receivedAt },
+                { id: previousRead.messageId, time: previousRead.readAt },
+              ) > 0
+            : incoming.source === "live");
+        // Focus/bottom observations can suppress notifications, not prove a new message rendered.
+        if (isNew) {
           const mention =
             c.view.kind === "direct" ||
             mentionsNick(message.text, network.nick, mapping(networkId));
-          c.view = {
-            ...c.view,
-            unreadCount: c.view.unreadCount + 1,
-            mentionCount: c.view.mentionCount + (mention ? 1 : 0),
-          };
-          if (!timeline(c).firstUnreadId) updateTimeline(c, { firstUnreadId: message.id });
+          trackUnread(c, message, mention);
           if (
             mention &&
+            !seen &&
             !c.view.muted &&
             incoming.source === "live" &&
             settings.user.notifications.desktop
@@ -666,7 +864,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           findConversation(networkId, payload.channel, "channel") ??
           ensureConversation(networkId, "channel", payload.channel);
         if (payload.change.kind === "join" && same(networkId, payload.change.nick, network.nick))
-          c.closed = false;
+          reopenConversation(c);
         const member = user(networkId, payload.change.nick);
         const remaining = timeline(c).members.filter((value) => value.id !== member.id);
         if (payload.change.kind !== "remove") {
@@ -714,8 +912,10 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
                 member.id === old.id ? { ...member, nick: renamed.nick } : member,
               ),
             });
-            if (c.view.kind === "direct" && same(networkId, c.view.name, payload.previous))
+            if (c.view.kind === "direct" && same(networkId, c.view.name, payload.previous)) {
               c.view = { ...c.view, name: renamed.nick };
+              dirtyConversations.add(c.view.id);
+            }
           }
         if (same(networkId, network.nick, payload.previous))
           networks.set(networkId, { ...network, nick: renamed.nick });
@@ -866,7 +1066,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       case "redaction": {
         const c = findConversation(networkId, payload.target);
         if (!c) break;
-        let message = timeline(c).messages.find((m) => m.serverId === payload.serverId);
+        let message = findServerMessage(networkId, payload.serverId);
         if (!message) {
           const found = await deps.history.findByServerId(
             networkId,
@@ -876,6 +1076,8 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           if (found.ok) message = found.value ?? undefined;
         }
         if (!message) break;
+        if (message.conversationId !== c.view.id)
+          reject("conflict", "Server message identity belongs to a different conversation.");
         if (payload.type === "redaction") {
           message = { ...message, redacted: true, text: "", reactions: [] };
           reactions.delete(message.id);
@@ -916,10 +1118,10 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         const c = findConversation(networkId, payload.target);
         const message =
           c &&
-          timeline(c)
-            .messages.filter((m) => (m.serverTime ?? m.receivedAt) <= payload.serverTime)
+          mergeWindow(c.recent, timeline(c).messages, WINDOW * 2)
+            .filter((m) => (m.serverTime ?? m.receivedAt) <= payload.serverTime)
             .at(-1);
-        if (c && message) await markRead(c, message.id);
+        if (c && message) await markRead(c, message.id, false);
         break;
       }
     }
@@ -1069,7 +1271,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
   };
 
   const dispatch = async (action: AppAction, signal: AbortSignal): Promise<Result<ActionReceipt>> =>
-    serial(async () => {
+    serialIntent(signal, async () => {
       let id: OperationId | undefined;
       const ephemeral =
         action.type === "draft.set" ||
@@ -1152,6 +1354,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
             c.recent = [];
             c.view = { ...c.view, joined: false };
             updateTimeline(c, { messages: [], members: [], typing: [] });
+            c.model.dispose();
             c.loaded = false;
             if (active === c.view.id)
               active = [...conversations.values()].find((value) => !value.closed)?.view.id;
@@ -1323,6 +1526,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
                 loadingOlder: false,
                 atLatest: false,
               });
+              capHotWindows();
               if (
                 !page.nextCursor &&
                 networks.get(c.view.networkId)?.features.history &&
@@ -1365,21 +1569,29 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
             if (!message) reject("unavailable", "Message is no longer stored.");
             const c = conversations.get(message.conversationId);
             if (!c) reject("unavailable", "Conversation is no longer configured.");
-            c.closed = false;
+            reopenConversation(c);
             active = c.view.id;
             updateTimeline(c, { messages: context, atLatest: false });
+            capHotWindows();
             c.loaded = true;
             result = { conversationId: c.view.id, messageId: message.id };
             break;
           }
           case "history.delete": {
             const c = getConversation(action.conversationId);
+            if ([...pending.values()].some((entry) => entry.conversationId === c.view.id))
+              reject(
+                "unavailable",
+                "Wait for pending sends before deleting this conversation's history.",
+              );
             requireResult(await deps.history.deleteConversation(c.view.id, lifetime.signal));
             readPositions.delete(c.view.id);
+            c.unread.clear();
+            delete c.unreadOverflow;
             c.view = { ...c.view, unreadCount: 0, mentionCount: 0 };
             const { firstUnreadId: _unread, olderCursor: _older, ...base } = timeline(c);
             c.recent = [];
-            c.model.publish({ ...base, messages: [], atLatest: true });
+            c.model.publish({ ...base, messages: [], draft: "", atLatest: true });
             break;
           }
           case "view.report": {
@@ -1433,7 +1645,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       return deps.history.search(query, signal);
     },
     saveSettings(change, expectedRevision, signal) {
-      return serial(async () => {
+      return serialIntent(signal, async () => {
         let id: OperationId | undefined;
         try {
           if (stopping) reject("unavailable", "OpenIRC is shutting down.");
@@ -1446,6 +1658,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
             }
           const saved = requireResult(await deps.settings.save(change, expectedRevision, signal));
           const previousIds = new Set(settings.user.networks.map((p) => p.id));
+          const previousRetention = settings.user.history.retentionDays;
           settings = saved;
           settingsModel.publish(saved);
           for (const id of previousIds)
@@ -1472,7 +1685,12 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
               const c = ensureConversation(p.id, "status", p.name);
               if (!active) active = c.view.id;
               if (p.autoConnect) startNetwork(p.id);
-            } else networks.set(p.id, { ...networks.get(p.id)!, name: p.name });
+            } else {
+              networks.set(p.id, { ...networks.get(p.id)!, name: p.name });
+              ensureConversation(p.id, "status", p.name);
+            }
+          if (saved.user.history.retentionDays !== previousRetention)
+            await pruneHistory(lifetime.signal);
           await persist();
           await saveWorkspace();
           operation(id, "completed");
@@ -1494,10 +1712,11 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     shutdown() {
       shutdownPromise ??= (async () => {
         stopping = true;
+        retentionController.abort();
         rootSignal.removeEventListener("abort", onAbort);
         for (const controller of typingControllers.values()) controller.abort();
         typingControllers.clear();
-        let failure: AppError | undefined;
+        let failure: AppError | undefined = durabilityFailure;
         const closing = [...attempts.values()];
         attempts.clear();
         for (const attempt of closing) attempt.controller.abort();
@@ -1517,6 +1736,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           const workspace = await saveWorkspace();
           if (!workspace.ok) failure = workspace.error;
         }
+        failure ??= durabilityFailure;
         lifetime.abort();
         try {
           const closed = await deps.history.close();
@@ -1534,13 +1754,19 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       return shutdownPromise;
     },
   };
+  function checkStartup() {
+    if (rootSignal.aborted || stopping) reject("cancelled", "Startup cancelled.");
+  }
   function onAbort() {
-    void api.shutdown();
+    // Boot owns cleanup until it unwinds; never close handles under an in-flight load/write.
+    if (initializing) lifetime.abort();
+    else void api.shutdown();
   }
   rootSignal.addEventListener("abort", onAbort, { once: true });
   try {
     if (rootSignal.aborted) reject("cancelled", "Startup cancelled.");
     settings = requireResult(await deps.settings.load(rootSignal));
+    checkStartup();
     settingsModel.publish(settings);
     for (const p of settings.user.networks)
       networks.set(p.id, {
@@ -1553,15 +1779,26 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         features: FEATURES,
       });
     const records = requireResult(await deps.history.loadConversations(rootSignal));
+    checkStartup();
     const workspace = requireResult(await deps.history.loadWorkspace(rootSignal));
-    for (const record of records)
+    checkStartup();
+    const orderedRecords = [...records].sort((left, right) => {
+      const leftIndex = workspace.conversationOrder.indexOf(left.id);
+      const rightIndex = workspace.conversationOrder.indexOf(right.id);
+      return (
+        (leftIndex === -1 ? Number.MAX_SAFE_INTEGER : leftIndex) -
+        (rightIndex === -1 ? Number.MAX_SAFE_INTEGER : rightIndex)
+      );
+    });
+    for (const record of orderedRecords)
       if (networks.has(record.networkId)) {
         const c = createConversation(record);
         c.closed = !workspace.conversationOrder.includes(record.id);
         c.view = { ...c.view, muted: workspace.mutedConversations.includes(record.id) };
       }
-    for (const position of requireResult(await deps.history.loadReadPositions(rootSignal)))
-      readPositions.set(position.conversationId, position);
+    const positions = requireResult(await deps.history.loadReadPositions(rootSignal));
+    checkStartup();
+    for (const position of positions) readPositions.set(position.conversationId, position);
     for (const p of settings.user.networks) ensureConversation(p.id, "status", p.name);
     for (const draft of workspace.drafts) {
       const c = conversations.get(draft.conversationId);
@@ -1572,22 +1809,24 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       workspace.activeConversationId && !conversations.get(workspace.activeConversationId)?.closed
         ? workspace.activeConversationId
         : [...conversations.values()].find((c) => !c.closed)?.view.id;
-    const retention = settings.user.history.retentionDays;
-    if (retention !== null) {
-      const pruned = await deps.history.prune(deps.clock.now() - retention * 86400000, rootSignal);
-      if (!pruned.ok) report(pruned.error);
-    }
+    await pruneHistory(rootSignal);
+    checkStartup();
     if (active && conversations.has(active)) await loadRecent(conversations.get(active)!);
-    if (rootSignal.aborted || stopping) reject("cancelled", "Startup cancelled.");
+    checkStartup();
+    requireResult(await persist());
+    checkStartup();
+    requireResult(await saveWorkspace());
+    checkStartup();
     boot = "ready";
-    await persist();
-    await saveWorkspace();
+    initializing = false;
     publish();
+    startRetention();
     for (const p of settings.user.networks) if (p.autoConnect) startNetwork(p.id);
     return ok(api);
   } catch (cause) {
     const detail = safeError(cause);
     boot = "failed";
+    initializing = false;
     await api.shutdown();
     return { ok: false, error: detail };
   }

@@ -36,10 +36,20 @@ export function mentionsNick(
   return false;
 }
 
+/** Unicode scalar order matches SQLite's UTF-8 BINARY collation, independent of locale. */
+export function compareMessageIds(left: string, right: string): number {
+  const a = Array.from(left);
+  const b = Array.from(right);
+  for (let index = 0; index < Math.min(a.length, b.length); index++) {
+    const difference = a[index]!.codePointAt(0)! - b[index]!.codePointAt(0)!;
+    if (difference) return difference;
+  }
+  return a.length - b.length;
+}
 export function compareMessages(left: Message, right: Message): number {
   return (
     (left.serverTime ?? left.receivedAt) - (right.serverTime ?? right.receivedAt) ||
-    left.id.localeCompare(right.id)
+    compareMessageIds(left.id, right.id)
   );
 }
 
