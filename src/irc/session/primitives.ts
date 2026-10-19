@@ -18,6 +18,8 @@ export function plain(value: string): string {
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)/g, "")
     .replace(/\x1b[P^_X][\s\S]*?(?:\x1b\\|$)/g, "")
     .replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x03(?:[0-9]{1,2}(?:,[0-9]{1,2})?)?/g, "")
+    .replace(/\x04(?:[0-9A-Fa-f]{6}(?:,[0-9A-Fa-f]{6})?)?/g, "")
     .replace(/[\x00-\x1f\x7f-\x9f]/g, "");
 }
 export const atom = (value: string) =>

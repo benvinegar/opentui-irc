@@ -20,10 +20,12 @@ import { atom, content, eventStream, failure, ok, plain, problem } from "./primi
 export interface SessionPolicy {
   readonly connectTimeoutMs: number;
   readonly registrationTimeoutMs: number;
+  readonly capTimeoutMs: number;
   readonly floodIntervalMs: number;
   readonly keepaliveMs: number;
   readonly staleTimeoutMs: number;
   readonly queryTimeoutMs: number;
+  readonly quitTimeoutMs: number;
   readonly maxEvents: number;
   readonly maxQueueCommands: number;
   readonly maxQueueBytes: number;
@@ -48,10 +50,12 @@ export const defaultProtocolLimits: ProtocolLimits = {
 export const defaultSessionPolicy: SessionPolicy = {
   connectTimeoutMs: 15_000,
   registrationTimeoutMs: 30_000,
+  capTimeoutMs: 5_000,
   floodIntervalMs: 750,
   keepaliveMs: 60_000,
   staleTimeoutMs: 120_000,
   queryTimeoutMs: 30_000,
+  quitTimeoutMs: 250,
   maxEvents: 2048,
   maxQueueCommands: 128,
   maxQueueBytes: 262_144,
@@ -117,7 +121,7 @@ export function createSessionFactory(options: SessionFactoryOptions): SessionFac
   }
   if (policy.staleTimeoutMs <= policy.keepaliveMs)
     throw new TypeError("Invalid IRC keepalive policy");
-  const limits = options.limits ?? defaultProtocolLimits;
+  const limits = { ...(options.limits ?? defaultProtocolLimits) };
   const codecFactory = options.codecFactory ?? createIrcCodec;
   return {
     async open(profile, identity, signal) {
@@ -138,7 +142,22 @@ export function createSessionFactory(options: SessionFactoryOptions): SessionFac
       if ((profile.sasl || profile.serverPassword) && !endpoint.tls)
         return failure("authentication", "Credentials require a verified TLS connection.");
       const codec = codecFactory(limits);
-      const attempt = new Attempt(options, policy, codec, limits, profile, { ...identity }, signal);
+      const ownedProfile: NetworkProfile = {
+        ...profile,
+        endpoints: profile.endpoints.map((entry) => ({ ...entry })),
+        identity: { ...profile.identity, alternateNicks: [...profile.identity.alternateNicks] },
+        autoJoin: profile.autoJoin.map((entry) => ({ ...entry })),
+        ...(profile.sasl ? { sasl: { ...profile.sasl } } : {}),
+      };
+      const attempt = new Attempt(
+        options,
+        policy,
+        codec,
+        limits,
+        ownedProfile,
+        { ...identity },
+        signal,
+      );
       queueMicrotask(() => {
         void attempt.start();
       });
@@ -153,6 +172,8 @@ class Attempt {
   private readonly stream;
   private connection: ByteConnection | undefined;
   private stopped = false;
+  private shuttingDown = false;
+  private closing: Promise<Result<void>> | undefined;
   private ready = false;
   private secure: boolean;
   private authenticated = false;
@@ -175,6 +196,7 @@ class Attempt {
   private readonly requested = new Set<string>();
   private capEnded = false;
   private capLsComplete = false;
+  private capStartedAt: number | undefined;
   private saslStarted = false;
   private saslSent = false;
   private support: ProtocolSupport = {
@@ -212,10 +234,7 @@ class Attempt {
       identity,
       events: this.stream.events,
       execute: (command, operationId, signal) => this.execute(command, operationId, signal),
-      close: async () => {
-        this.stop();
-        return ok();
-      },
+      close: (reason) => this.close(reason),
     };
   }
   private emit(payload: SessionPayload) {
@@ -234,6 +253,36 @@ class Attempt {
   private publishSupport() {
     this.support = { ...this.support, capabilities: Object.fromEntries(this.capabilities) };
     this.emit({ type: "support", support: { ...this.support }, features });
+  }
+  private close(reason?: string): Promise<Result<void>> {
+    if (this.closing) return this.closing;
+    if (this.stopped) return Promise.resolve(ok());
+    this.shuttingDown = true;
+    this.ready = false;
+    this.closing = (async () => {
+      const timeout = new AbortController();
+      try {
+        if (this.connection && this.phase === "ready") {
+          const quit = this.codec.encode(
+            frame("QUIT", [
+              reason && content(reason) && byteLength(reason) <= 200 ? reason : "OpenIRC",
+            ]),
+          );
+          if (quit.ok)
+            await Promise.race([
+              this.connection.write(quit.value, this.controller.signal).catch(() => {}),
+              this.options.clock.sleep(this.policy.quitTimeoutMs, timeout.signal).catch(() => {}),
+            ]);
+        }
+      } catch {
+        /* QUIT is best effort and must not prevent cleanup. */
+      } finally {
+        timeout.abort();
+        this.stop();
+      }
+      return ok();
+    })();
+    return this.closing;
   }
   private stop(error?: AppError, overflow = false) {
     if (this.stopped) return;
@@ -344,6 +393,7 @@ class Attempt {
         }
         if (!(await this.control("PASS", [password.value]))) return;
       }
+      this.capStartedAt = this.options.clock.now();
       if (!(await this.control("CAP", ["LS", "302"]))) return;
       if (!(await this.control("NICK", [this.nick]))) return;
       if (
@@ -381,14 +431,32 @@ class Attempt {
     try {
       while (!signal.aborted) {
         await this.options.clock.sleep(
-          Math.min(1000, this.policy.keepaliveMs, this.policy.registrationTimeoutMs),
+          Math.min(
+            1000,
+            this.policy.keepaliveMs,
+            this.policy.registrationTimeoutMs,
+            this.policy.capTimeoutMs,
+          ),
           signal,
         );
-        if (signal.aborted) return;
+        if (signal.aborted || this.shuttingDown) return;
         const now = this.options.clock.now();
         if (!this.ready && now - this.startedAt >= this.policy.registrationTimeoutMs) {
           this.stop(problem("network", "IRC registration timed out."));
           return;
+        }
+        if (
+          !this.capEnded &&
+          !this.saslStarted &&
+          this.capStartedAt !== undefined &&
+          now - this.capStartedAt >= this.policy.capTimeoutMs
+        ) {
+          this.emit({
+            type: "notice",
+            text: "Capability negotiation timed out; trying basic IRC registration.",
+          });
+          await this.endCap();
+          if (this.stopped) return;
         }
         if (
           this.pingSentAt !== undefined &&
@@ -462,6 +530,7 @@ class Attempt {
   private async cap(input: IrcFrame) {
     const sub = input.params[1];
     const list = input.params.at(-1) ?? "";
+    if (this.capEnded && sub !== "DEL") return;
     if (sub === "LS") {
       for (const token of list.split(" ").filter(Boolean)) {
         if (this.advertised.size >= 128) {
@@ -516,6 +585,16 @@ class Attempt {
         else this.capabilities.delete(name);
       }
       if (!this.requested.size && this.capLsComplete) {
+        if (
+          this.capabilities.has("echo-message") &&
+          !["message-tags", "batch", "labeled-response"].every((name) =>
+            this.capabilities.has(name),
+          )
+        ) {
+          // Do not expose/use echo until reliable correlation dependencies are ACKed.
+          this.capabilities.delete("echo-message");
+          await this.control("CAP", ["REQ", "-echo-message"]);
+        }
         if (this.profile.sasl && this.capabilities.has("sasl") && !this.saslStarted) {
           this.saslStarted = true;
           this.state("authenticating");
@@ -524,6 +603,13 @@ class Attempt {
       }
     } else if (sub === "DEL") {
       for (const name of list.split(" ")) this.capabilities.delete(name);
+      if (
+        this.capabilities.has("echo-message") &&
+        !["message-tags", "batch", "labeled-response"].every((name) => this.capabilities.has(name))
+      ) {
+        this.capabilities.delete("echo-message");
+        await this.control("CAP", ["REQ", "-echo-message"]);
+      }
       this.publishSupport();
     }
   }
@@ -559,6 +645,25 @@ class Attempt {
     const sender = input.prefix?.split("!")[0] ?? "";
     if (input.prefix?.includes("!") && this.self(sender))
       this.ownPrefixBytes = byteLength(input.prefix) + 2;
+    if (/^[45][0-9]{2}$/.test(input.command)) {
+      const label =
+        input.tags.label ??
+        (input.tags.batch ? this.batches.get(input.tags.batch)?.label : undefined);
+      const rejected = label ? this.labels.get(label) : undefined;
+      if (rejected) {
+        this.emit({
+          type: "send-state",
+          operationId: rejected.operationId,
+          state: "failed",
+          error: problem(
+            "unavailable",
+            `Server rejected a message fragment (${input.command}); other fragments may already have been written.`,
+          ),
+        });
+        this.forgetSend(rejected);
+        return;
+      }
+    }
     switch (input.command) {
       case "PING":
         await this.control("PONG", p);
@@ -587,6 +692,7 @@ class Attempt {
         await this.saslFailed();
         return;
       case "001":
+        if (!this.capEnded && !this.profile.sasl && !this.saslStarted) await this.endCap();
         if (!this.capEnded || (this.profile.sasl?.required && !this.authenticated)) {
           this.stop(
             problem(
@@ -632,7 +738,10 @@ class Attempt {
       case "JOIN":
         if (p[0] && atom(sender)) {
           const channel = this.channel(p[0]);
-          if (channel) this.member(channel, sender, [], "join");
+          if (channel) {
+            if (this.self(sender) && !channel.names) channel.names = new Map();
+            this.member(channel, sender, [], "join");
+          }
           if (this.capabilities.has("extended-join") && p[1])
             this.emit({
               type: "account",
@@ -682,6 +791,10 @@ class Attempt {
       case "306":
         this.emit({ type: "away", nick: plain(this.nick), away: input.command === "306" });
         return;
+      case "INVITE":
+        if (p[1])
+          this.emit({ type: "notice", text: `${plain(sender)} invited you to ${plain(p[1])}.` });
+        return;
       case "ACCOUNT":
         if (p[0])
           this.emit({
@@ -707,10 +820,26 @@ class Attempt {
         this.whoisReply(input.command, p);
         return;
     }
+    const rejection: Readonly<Record<string, string>> = {
+      "403": "The channel does not exist.",
+      "404": "You cannot send to this channel.",
+      "405": "You have joined too many channels.",
+      "432": "The nickname is invalid.",
+      "442": "You are not joined to this channel.",
+      "471": "The channel is full.",
+      "473": "The channel requires an invitation.",
+      "474": "You are banned from this channel.",
+      "475": "A valid channel key is required.",
+      "477": "The channel requires an authenticated account.",
+      "482": "You do not have permission to change this channel.",
+    };
     if (/^[45][0-9]{2}$/.test(input.command))
       this.emit({
         type: "error",
-        error: problem("unavailable", `IRC server rejected a request (${input.command}).`),
+        error: problem(
+          "unavailable",
+          rejection[input.command] ?? `IRC server rejected a request (${input.command}).`,
+        ),
       });
     else if (/^[0-9]{3}$/.test(input.command))
       this.emit({ type: "notice", text: `IRC server response ${input.command}.` });
@@ -768,6 +897,10 @@ class Attempt {
   private chat(input: IrcFrame, sender: string) {
     const [target, body] = input.params;
     if (!target || body === undefined) return;
+    if (!atom(target) || !atom(sender)) {
+      this.stop(problem("network", "Malformed IRC chat envelope."));
+      return;
+    }
     let text = body;
     let kind: ChatEnvelope["kind"] = input.command === "NOTICE" ? "notice" : "text";
     if (body.startsWith("\x01ACTION ") && body.endsWith("\x01")) {
@@ -1127,7 +1260,7 @@ class Attempt {
   private async pacedWrite(output: IrcFrame, send?: Send) {
     const delay = this.nextWriteAt - this.options.clock.now();
     if (delay > 0) await this.options.clock.sleep(delay, this.controller.signal);
-    if (this.stopped) return failure<void>("cancelled", "Connection closed.");
+    if (this.stopped || this.shuttingDown) return failure<void>("cancelled", "Connection closed.");
     if (send) send.started = true;
     const result = await this.write(output);
     this.nextWriteAt = this.options.clock.now() + this.policy.floodIntervalMs;
@@ -1137,7 +1270,7 @@ class Attempt {
     if (this.draining || this.stopped) return;
     this.draining = true;
     try {
-      while (this.queue.length && !this.stopped) {
+      while (this.queue.length && !this.stopped && !this.shuttingDown) {
         const item = this.queue[0]!;
         const result = await this.perform(item);
         if (this.stopped) return;
@@ -1260,6 +1393,7 @@ class Attempt {
       if (!encoded.ok) return encoded;
     }
     for (const output of outputs) {
+      if (!this.sends.has(operationId)) return ok();
       const result = await this.pacedWrite(output, send);
       if (!result.ok) return result;
       send.written++;

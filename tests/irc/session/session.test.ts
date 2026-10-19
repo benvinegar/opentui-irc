@@ -464,6 +464,140 @@ describe("one-attempt session", () => {
     ).toBe(true);
     expect((await fixture.session.close()).ok).toBe(true);
   });
+  test("CAP timeout falls back only when authentication is not required", async () => {
+    const fixture = await harness({
+      policy: { capTimeoutMs: 10 },
+      onWrite(frame) {
+        if (frame.command === "CAP" && frame.params[0] === "LS")
+          return { ok: true, value: undefined };
+      },
+    });
+    await until(() => hasReady(fixture.events));
+    expect(
+      fixture.events.some(
+        (event) => event.payload.type === "notice" && event.payload.text.includes("timed out"),
+      ),
+    ).toBe(true);
+    const required = await harness({
+      capabilities: "sasl",
+      sasl: {
+        mechanism: "PLAIN",
+        account: "fixture",
+        password: entityId<"secret-ref">("env:FIXTURE"),
+        required: true,
+      },
+      policy: { capTimeoutMs: 10 },
+      onWrite(frame) {
+        if (frame.command === "CAP" && frame.params[0] === "LS")
+          return { ok: true, value: undefined };
+      },
+    });
+    await required.consumption;
+    expect(hasReady(required.events)).toBe(false);
+    expect(
+      required.events.some(
+        (event) => event.payload.type === "error" && event.payload.error.code === "authentication",
+      ),
+    ).toBe(true);
+  });
+  test("partial capability rejection disables unsafe echo correlation and publishes ACKs only", async () => {
+    const fixture = await harness({
+      capabilities: "message-tags batch labeled-response echo-message draft/future",
+      onWrite(frame, send) {
+        if (frame.command === "CAP" && frame.params[0] === "REQ") {
+          if (frame.params[1]?.startsWith("-")) send(":s CAP me ACK :-echo-message");
+          else {
+            send(":s CAP me ACK :message-tags echo-message");
+            send(":s CAP me NAK :batch labeled-response");
+          }
+          return { ok: true, value: undefined };
+        }
+      },
+    });
+    await until(() => hasReady(fixture.events));
+    const support = fixture.events.find((event) => event.payload.type === "support")?.payload;
+    expect(support?.type === "support" && support.support.capabilities).toEqual({
+      "message-tags": null,
+    });
+    expect(
+      fixture.written.some(
+        (frame) => frame.command === "CAP" && frame.params[1] === "-echo-message",
+      ),
+    ).toBe(true);
+  });
+  test("registration timeout and missing keepalive PONG terminate attempts", async () => {
+    const registration = await harness({
+      policy: { registrationTimeoutMs: 10, capTimeoutMs: 5 },
+      onWrite(frame) {
+        if (frame.command === "CAP" && frame.params[0] === "END")
+          return { ok: true, value: undefined };
+      },
+    });
+    await registration.consumption;
+    expect(hasReady(registration.events)).toBe(false);
+    expect(
+      registration.events.some(
+        (event) =>
+          event.payload.type === "error" &&
+          event.payload.error.message.includes("registration timed out"),
+      ),
+    ).toBe(true);
+    const stale = await harness({ policy: { keepaliveMs: 10, staleTimeoutMs: 30 } });
+    await stale.consumption;
+    expect(stale.written.some((frame) => frame.command === "PING")).toBe(true);
+    expect(
+      stale.events.some(
+        (event) =>
+          event.payload.type === "error" &&
+          event.payload.error.message.includes("keepalive timed out"),
+      ),
+    ).toBe(true);
+  });
+  test("query timeouts quarantine late replies; limits fail explicitly; unknown numerics stay safe", async () => {
+    const fixture = await harness({
+      policy: { queryTimeoutMs: 5, keepaliveMs: 10, staleTimeoutMs: 1000, maxDirectoryItems: 1 },
+    });
+    await until(() => hasReady(fixture.events));
+    await fixture.session.execute({ type: "whois", nick: "alice" }, op("who-timeout"), signal());
+    await until(() =>
+      fixture.events.some(
+        (event) =>
+          event.payload.type === "error" && event.payload.operationId === op("who-timeout"),
+      ),
+    );
+    expect(
+      (await fixture.session.execute({ type: "whois", nick: "bob" }, op("late-whois"), signal()))
+        .ok,
+    ).toBe(false);
+    fixture.send(":s 311 me alice user host * :late");
+    fixture.send(":s 318 me alice :done");
+    fixture.send(":s 799 me :secret-ish raw reply");
+    await fixture.session.execute({ type: "list" }, op("limit-list"), signal());
+    fixture.send(":s 322 me #a 1 :A");
+    fixture.send(":s 322 me #b 2 :B");
+    fixture.send(":s 323 me :done");
+    await until(() =>
+      fixture.events.some(
+        (event) => event.payload.type === "error" && event.payload.operationId === op("limit-list"),
+      ),
+    );
+    expect(fixture.events.some((event) => event.payload.type === "user-details")).toBe(false);
+    expect(fixture.events.filter((event) => event.payload.type === "directory-item")).toHaveLength(
+      1,
+    );
+    expect(JSON.stringify(fixture.events)).not.toContain("secret-ish");
+  });
+  test("close is idempotent, emits best-effort QUIT and ends pending iterator", async () => {
+    const fixture = await harness();
+    await until(() => hasReady(fixture.events));
+    const first = fixture.session.close("bye");
+    const second = fixture.session.close("ignored");
+    expect((await first).ok).toBe(true);
+    expect((await second).ok).toBe(true);
+    await fixture.consumption;
+    expect(fixture.written.filter((frame) => frame.command === "QUIT")).toHaveLength(1);
+    expect(fixture.events.at(-1)?.payload).toMatchObject({ type: "state", phase: "disconnected" });
+  });
   test("disconnect during write is uncertain, never auto-replayed", async () => {
     let count = 0;
     const fixture = await harness({
