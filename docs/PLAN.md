@@ -26,13 +26,13 @@ The primary audience is **newcomers**. Design mouse-driven, discoverable workflo
 
 This is a capability/positioning map from official project documentation, not an exhaustive tested compatibility matrix. Features can be built in, optional, scripted, or server-dependent; absence from a row is not a claim that a client lacks something.
 
-| Client | Documented strengths | Implication for OpenIRC |
-|---|---|---|
-| [WeeChat][weechat] | Multi-server IRC, TLS, SASL, proxy, nick lists, anti-flood, mouse, split windows, dynamic filtering, incremental search, logging and extensibility, relay, DCC | Match daily IRC reliability and navigation. Adopt mouse/filter/search ergonomics. Defer relay, plugins, and DCC. |
-| [Irssi][irssi] / [manual][irssi-manual] | Modular text client; rich theming and scripting; window-oriented workflow and IRC command help | Keep fast keyboard operation, commands, and predictable conversation switching. Avoid making scripts necessary for basic usability. |
-| [HexChat][hexchat] | Approachable customizable GUI; multiple networks, auto-connect/join/identify, SASL, proxies, scripting, spellcheck, DCC | Borrow easy network setup and sensible defaults. Use as a historical usability reference: its maintainer announced the final release in February 2024. |
-| [Halloy][halloy] | Modern desktop client; configurable panes, themes, shortcuts, notifications; extensive IRCv3 capabilities including history, account tracking, read markers, replies, and reactions | Use as a modern interaction/protocol reference, but do not copy its whole extension surface into v1. |
-| [The Lounge][lounge] | Self-hosted web client; always-connected service, multi-device continuity, push notifications, previews, uploads, IRCv3 | Borrow continuity and readable conversation UX. Use existing bouncers for offline collection rather than building a server product. |
+| Client                                  | Documented strengths                                                                                                                                                                | Implication for OpenIRC                                                                                                                                |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [WeeChat][weechat]                      | Multi-server IRC, TLS, SASL, proxy, nick lists, anti-flood, mouse, split windows, dynamic filtering, incremental search, logging and extensibility, relay, DCC                      | Match daily IRC reliability and navigation. Adopt mouse/filter/search ergonomics. Defer relay, plugins, and DCC.                                       |
+| [Irssi][irssi] / [manual][irssi-manual] | Modular text client; rich theming and scripting; window-oriented workflow and IRC command help                                                                                      | Keep fast keyboard operation, commands, and predictable conversation switching. Avoid making scripts necessary for basic usability.                    |
+| [HexChat][hexchat]                      | Approachable customizable GUI; multiple networks, auto-connect/join/identify, SASL, proxies, scripting, spellcheck, DCC                                                             | Borrow easy network setup and sensible defaults. Use as a historical usability reference: its maintainer announced the final release in February 2024. |
+| [Halloy][halloy]                        | Modern desktop client; configurable panes, themes, shortcuts, notifications; extensive IRCv3 capabilities including history, account tracking, read markers, replies, and reactions | Use as a modern interaction/protocol reference, but do not copy its whole extension surface into v1.                                                   |
+| [The Lounge][lounge]                    | Self-hosted web client; always-connected service, multi-device continuity, push notifications, previews, uploads, IRCv3                                                             | Borrow continuity and readable conversation UX. Use existing bouncers for offline collection rather than building a server product.                    |
 
 ### Scope conclusions
 
@@ -54,67 +54,67 @@ This is a capability/positioning map from official project documentation, not an
 
 ### Connections and identity
 
-| ID | Feature | Priority |
-|---|---|---|
-| NET-01 | Saved network profiles: name, host/port, TLS, nick/alternate nick, username, real name, server password | A |
-| NET-02 | Multiple concurrent networks; network-specific status/error buffer | A |
-| NET-03 | Direct TCP/TLS, hostname/certificate verification, IPv4/IPv6; explicit warning for plaintext | A |
-| NET-04 | SASL PLAIN over TLS; visible authentication status and actionable failures | A |
-| NET-05 | Require-auth option; do not autojoin protected channels before authentication succeeds | A |
-| NET-06 | Auto-connect, autojoin with channel keys, reconnect with exponential backoff/jitter and cancel | A |
-| NET-07 | Registration timeout, keepalive PING/PONG, stale connection detection, connection states | A |
-| NET-08 | Nick collision fallback and user-directed nickname changes | A |
-| NET-09 | Flood-safe outgoing queue; visible disconnect/send failures; never silently replay uncertain sends | A |
-| NET-10 | SASL EXTERNAL and TLS client certificates | L |
-| NET-11 | NickServ identify fallback with secret redaction and safe timing; network-specific, not universal | V |
-| NET-12 | Ordered fallback server endpoints; manual reconnect/disconnect; optional rejoin after kick | V |
-| NET-13 | Existing ZNC/soju-style bouncer connection profiles; server-time/playback handling | V |
-| NET-14 | SOCKS5 proxy and credentials, including remote DNS behavior; show unsupported combinations clearly | L |
-| NET-15 | IRC/IRCS URI handling with confirmation; never auto-execute commands from a URI | V |
-| NET-16 | Lag/status indicator and sanitized protocol diagnostics | V |
-| NET-17 | HTTP CONNECT proxy, SCRAM authentication, legacy encodings | L |
-| NET-18 | Bundled bouncer, detached daemon, remote-client protocol, multi-device service | X |
+| ID     | Feature                                                                                                 | Priority |
+| ------ | ------------------------------------------------------------------------------------------------------- | -------- |
+| NET-01 | Saved network profiles: name, host/port, TLS, nick/alternate nick, username, real name, server password | A        |
+| NET-02 | Multiple concurrent networks; network-specific status/error buffer                                      | A        |
+| NET-03 | Direct TCP/TLS, hostname/certificate verification, IPv4/IPv6; explicit warning for plaintext            | A        |
+| NET-04 | SASL PLAIN over TLS; visible authentication status and actionable failures                              | A        |
+| NET-05 | Require-auth option; do not autojoin protected channels before authentication succeeds                  | A        |
+| NET-06 | Auto-connect, autojoin with channel keys, reconnect with exponential backoff/jitter and cancel          | A        |
+| NET-07 | Registration timeout, keepalive PING/PONG, stale connection detection, connection states                | A        |
+| NET-08 | Nick collision fallback and user-directed nickname changes                                              | A        |
+| NET-09 | Flood-safe outgoing queue; visible disconnect/send failures; never silently replay uncertain sends      | A        |
+| NET-10 | SASL EXTERNAL and TLS client certificates                                                               | L        |
+| NET-11 | NickServ identify fallback with secret redaction and safe timing; network-specific, not universal       | V        |
+| NET-12 | Ordered fallback server endpoints; manual reconnect/disconnect; optional rejoin after kick              | V        |
+| NET-13 | Existing ZNC/soju-style bouncer connection profiles; server-time/playback handling                      | V        |
+| NET-14 | SOCKS5 proxy and credentials, including remote DNS behavior; show unsupported combinations clearly      | L        |
+| NET-15 | IRC/IRCS URI handling with confirmation; never auto-execute commands from a URI                         | V        |
+| NET-16 | Lag/status indicator and sanitized protocol diagnostics                                                 | V        |
+| NET-17 | HTTP CONNECT proxy, SCRAM authentication, legacy encodings                                              | L        |
+| NET-18 | Bundled bouncer, detached daemon, remote-client protocol, multi-device service                          | X        |
 
 ### Channels, people, and ordinary IRC
 
-| ID | Feature | Priority |
-|---|---|---|
-| IRC-01 | Join/part channels, channel keys, channel tabs/buffers, channel-specific errors | A |
-| IRC-02 | Channel messages, private messages, NOTICE, CTCP ACTION (`/me`) | A |
-| IRC-03 | Channel topic display; user list with privilege prefixes and stable nick colors | A |
-| IRC-04 | Correct JOIN/PART/QUIT/NICK/KICK/MODE/TOPIC state updates | A |
-| IRC-05 | NAMES, WHOIS, WHO; readable user information panel and server replies | A |
-| IRC-06 | Away/back state and away replies; own nick/account/connection status | A |
-| IRC-07 | Handle invites, join errors, bans, full/keyed/invite-only channels intelligibly | A |
-| IRC-08 | Channel browser: LIST results, incremental rendering, search/filter, join action | V |
-| IRC-09 | Topic editor, channel info and mode display | V |
-| IRC-10 | Basic moderation: kick, ban/unban, kickban, op/deop, voice/devoice, invite; permission-aware controls | L |
-| IRC-11 | Ban-list viewer/editor and server-advertised mode interpretation; avoid assuming quiet/extban syntax | L |
-| IRC-12 | Ignore/mute by nick/hostmask and account where available; distinguish local ignore from server bans | V |
-| IRC-13 | Favorites/autojoin manager; channel/user quick actions | V |
-| IRC-14 | Rate-limited CTCP PING/VERSION handling with privacy controls; no arbitrary CTCP execution | V |
-| IRC-15 | MONITOR-based online watch list, with honest unsupported-network fallback | L |
-| IRC-16 | Full IRC operator administration and network-services management UI | X |
-| IRC-17 | DCC chat, DCC/SEND/XDCC file transfer, automatic file acceptance | X |
+| ID     | Feature                                                                                               | Priority |
+| ------ | ----------------------------------------------------------------------------------------------------- | -------- |
+| IRC-01 | Join/part channels, channel keys, channel tabs/buffers, channel-specific errors                       | A        |
+| IRC-02 | Channel messages, private messages, NOTICE, CTCP ACTION (`/me`)                                       | A        |
+| IRC-03 | Channel topic display; user list with privilege prefixes and stable nick colors                       | A        |
+| IRC-04 | Correct JOIN/PART/QUIT/NICK/KICK/MODE/TOPIC state updates                                             | A        |
+| IRC-05 | NAMES, WHOIS, WHO; readable user information panel and server replies                                 | A        |
+| IRC-06 | Away/back state and away replies; own nick/account/connection status                                  | A        |
+| IRC-07 | Handle invites, join errors, bans, full/keyed/invite-only channels intelligibly                       | A        |
+| IRC-08 | Channel browser: LIST results, incremental rendering, search/filter, join action                      | V        |
+| IRC-09 | Topic editor, channel info and mode display                                                           | V        |
+| IRC-10 | Basic moderation: kick, ban/unban, kickban, op/deop, voice/devoice, invite; permission-aware controls | L        |
+| IRC-11 | Ban-list viewer/editor and server-advertised mode interpretation; avoid assuming quiet/extban syntax  | L        |
+| IRC-12 | Ignore/mute by nick/hostmask and account where available; distinguish local ignore from server bans   | V        |
+| IRC-13 | Favorites/autojoin manager; channel/user quick actions                                                | V        |
+| IRC-14 | Rate-limited CTCP PING/VERSION handling with privacy controls; no arbitrary CTCP execution            | V        |
+| IRC-15 | MONITOR-based online watch list, with honest unsupported-network fallback                             | L        |
+| IRC-16 | Full IRC operator administration and network-services management UI                                   | X        |
+| IRC-17 | DCC chat, DCC/SEND/XDCC file transfer, automatic file acceptance                                      | X        |
 
 ### Composer and commands
 
-| ID | Feature | Priority |
-|---|---|---|
-| INPUT-01 | Unicode-aware text editing, wrapping, undo/redo and familiar editing shortcuts | A |
-| INPUT-02 | Per-buffer drafts and per-buffer/session input history | A |
-| INPUT-03 | Tab completion for nicks, channels, and slash commands; predictable cycling | A |
-| INPUT-04 | Core slash commands and contextual `/help`; literal slash escape (`//`) | A |
-| INPUT-05 | Safe paste: never auto-send; preview/confirm multiline or large paste; pasted commands remain inert text | A |
-| INPUT-06 | UTF-8-byte-aware message splitting respecting IRC framing/target overhead; paced multiline fallback | A |
-| INPUT-07 | Failed/pending/echo-observed send states without implying delivery or read receipts | A |
-| INPUT-08 | Multiline composer with clear send/newline keys and a compatible fallback for terminals lacking modifier detail | V |
-| INPUT-09 | Command suggestions/argument help and searchable command palette | V |
-| INPUT-10 | Simple aliases with bounded expansion; no shell execution or script engine | L |
-| INPUT-11 | Basic IRC formatting insertion and preview; optional outgoing formatting | V |
-| INPUT-12 | Negotiated IRCv3 multiline where supported; honor advertised limits | V |
-| INPUT-13 | Spellcheck, external-editor integration, advanced snippet/template engine | L |
-| INPUT-14 | Embedded shell, arbitrary executable hooks, full plugin ecosystem | X |
+| ID       | Feature                                                                                                         | Priority |
+| -------- | --------------------------------------------------------------------------------------------------------------- | -------- |
+| INPUT-01 | Unicode-aware text editing, wrapping, undo/redo and familiar editing shortcuts                                  | A        |
+| INPUT-02 | Per-buffer drafts and per-buffer/session input history                                                          | A        |
+| INPUT-03 | Tab completion for nicks, channels, and slash commands; predictable cycling                                     | A        |
+| INPUT-04 | Core slash commands and contextual `/help`; literal slash escape (`//`)                                         | A        |
+| INPUT-05 | Safe paste: never auto-send; preview/confirm multiline or large paste; pasted commands remain inert text        | A        |
+| INPUT-06 | UTF-8-byte-aware message splitting respecting IRC framing/target overhead; paced multiline fallback             | A        |
+| INPUT-07 | Failed/pending/echo-observed send states without implying delivery or read receipts                             | A        |
+| INPUT-08 | Multiline composer with clear send/newline keys and a compatible fallback for terminals lacking modifier detail | V        |
+| INPUT-09 | Command suggestions/argument help and searchable command palette                                                | V        |
+| INPUT-10 | Simple aliases with bounded expansion; no shell execution or script engine                                      | L        |
+| INPUT-11 | Basic IRC formatting insertion and preview; optional outgoing formatting                                        | V        |
+| INPUT-12 | Negotiated IRCv3 multiline where supported; honor advertised limits                                             | V        |
+| INPUT-13 | Spellcheck, external-editor integration, advanced snippet/template engine                                       | L        |
+| INPUT-14 | Embedded shell, arbitrary executable hooks, full plugin ecosystem                                               | X        |
 
 **Alpha command set:** `/connect`, `/disconnect`, `/reconnect`, `/join`, `/part`, `/query`, `/msg`, `/notice`, `/me`, `/nick`, `/away`, `/back`, `/whois`, `/who`, `/names`, `/topic`, `/mode`, `/invite`, `/kick`, `/close`, `/clear`, `/quit`, `/help`.
 
@@ -122,67 +122,67 @@ This is a capability/positioning map from official project documentation, not an
 
 ### Transcript, attention, and history
 
-| ID | Feature | Priority |
-|---|---|---|
-| CHAT-01 | Wrapped timestamped messages, readable system events, day separators, nick colors | A |
-| CHAT-02 | Scrollback with mouse wheel, draggable scrollbar, Page Up/Down, jump to latest | A |
-| CHAT-03 | Stable scroll anchor while receiving messages or resizing; never force a reader back to bottom | A |
-| CHAT-04 | Unread and mention counts, first-unread marker, next unread/mention navigation | A |
-| CHAT-05 | Nick-boundary-aware mention detection; DMs distinguished from ordinary activity | A |
-| CHAT-06 | Safe IRC formatting renderer; strip arbitrary terminal controls, support no-color mode | A |
-| CHAT-07 | URL detection and selectable/copyable messages; confirm opening external links | A |
-| CHAT-08 | Durable local history with retention controls and opt-out/per-buffer exclusions | V |
-| CHAT-09 | Fast local search across conversations, scoped by network/buffer/sender/time; jump to context | V |
-| CHAT-10 | Reload recent history after restart, restore read positions, explicit older-history loading | V |
-| CHAT-11 | Supported server/bouncer playback: ordering, provenance, IDs, deduplication, bounded pagination | V |
-| CHAT-12 | Join/part/quit noise filters and collapsed bursts; filtering must not corrupt membership state | V |
-| CHAT-13 | Custom highlight words, per-buffer mute/notification settings, mentions/activity view | V |
-| CHAT-14 | Terminal bell/urgency; optional desktop notification adapter with focus checks and private preview controls | V |
-| CHAT-15 | Plain-text export, delete local history, predictable retention cleanup | V |
-| CHAT-16 | Persist drafts across restarts with an explicit privacy setting | V |
-| CHAT-17 | Replies, reactions, typing indicators, synchronized read markers and redactions, negotiated with server support and pinned draft versions where applicable | V |
-| CHAT-18 | Automatic URL unfurling, inline images/video, uploads/paste hosting, rich metadata/avatar system | X |
+| ID      | Feature                                                                                                                                                    | Priority |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| CHAT-01 | Wrapped timestamped messages, readable system events, day separators, nick colors                                                                          | A        |
+| CHAT-02 | Scrollback with mouse wheel, draggable scrollbar, Page Up/Down, jump to latest                                                                             | A        |
+| CHAT-03 | Stable scroll anchor while receiving messages or resizing; never force a reader back to bottom                                                             | A        |
+| CHAT-04 | Unread and mention counts, first-unread marker, next unread/mention navigation                                                                             | A        |
+| CHAT-05 | Nick-boundary-aware mention detection; DMs distinguished from ordinary activity                                                                            | A        |
+| CHAT-06 | Safe IRC formatting renderer; strip arbitrary terminal controls, support no-color mode                                                                     | A        |
+| CHAT-07 | URL detection and selectable/copyable messages; confirm opening external links                                                                             | A        |
+| CHAT-08 | Durable local history with retention controls and opt-out/per-buffer exclusions                                                                            | V        |
+| CHAT-09 | Fast local search across conversations, scoped by network/buffer/sender/time; jump to context                                                              | V        |
+| CHAT-10 | Reload recent history after restart, restore read positions, explicit older-history loading                                                                | V        |
+| CHAT-11 | Supported server/bouncer playback: ordering, provenance, IDs, deduplication, bounded pagination                                                            | V        |
+| CHAT-12 | Join/part/quit noise filters and collapsed bursts; filtering must not corrupt membership state                                                             | V        |
+| CHAT-13 | Custom highlight words, per-buffer mute/notification settings, mentions/activity view                                                                      | V        |
+| CHAT-14 | Terminal bell/urgency; optional desktop notification adapter with focus checks and private preview controls                                                | V        |
+| CHAT-15 | Plain-text export, delete local history, predictable retention cleanup                                                                                     | V        |
+| CHAT-16 | Persist drafts across restarts with an explicit privacy setting                                                                                            | V        |
+| CHAT-17 | Replies, reactions, typing indicators, synchronized read markers and redactions, negotiated with server support and pinned draft versions where applicable | V        |
+| CHAT-18 | Automatic URL unfurling, inline images/video, uploads/paste hosting, rich metadata/avatar system                                                           | X        |
 
 Read state must depend on the active visible conversation, scroll position, and terminal focus when detectable—not just receipt. History replay must not trigger a storm of new-message notifications. Unknown extensions should degrade to readable ordinary IRC.
 
 ### Full-screen TUI and usability
 
-| ID | Feature | Priority |
-|---|---|---|
-| UI-01 | Slack-like sidebar grouped by network with Channels and Direct Messages sections, unread badges and clear add/join actions; one active transcript, optional member list, topic/header, composer, status/footer | A |
-| UI-02 | Click to select conversations/users; scrollable lists; visible focus and selection | A |
-| UI-03 | Complete keyboard navigation, focus traversal, next/previous buffer, fuzzy quick switcher | A |
-| UI-04 | Responsive layout: hide optional panels in small terminals; resize without losing drafts/anchors | A |
-| UI-05 | Setup flow for network/auth/autojoin; errors explained without needing protocol knowledge | A |
-| UI-06 | Help/keybinding overlay; keyboard equivalents for every essential pointer action | A |
-| UI-07 | Correct terminal restoration on exit/error; sensible Ctrl+C behavior and quit confirmation when needed | A |
-| UI-08 | Context/action menus for conversations, users, and messages; keyboard menu invocation | V |
-| UI-09 | Toggleable/resizable side panels; saved widths, order, and active conversation | V |
-| UI-10 | Theme tokens, dark/light/high-contrast presets, configurable timestamps and density | V |
-| UI-11 | Remappable shortcuts with conflict detection; settings forms and config-file parity | V |
-| UI-12 | Clipboard via terminal/OS integration where available; explicit copy fallback over SSH/tmux | V |
-| UI-13 | Non-color unread/status cues, reduced-motion defaults, no emoji dependency, mouse-off mode | V |
-| UI-14 | Multiple simultaneous transcript panes, drag-reorder, extensive layout customization | L |
-| UI-15 | Full localization, independently verified screen-reader workflow | L |
+| ID    | Feature                                                                                                                                                                                                        | Priority |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| UI-01 | Slack-like sidebar grouped by network with Channels and Direct Messages sections, unread badges and clear add/join actions; one active transcript, optional member list, topic/header, composer, status/footer | A        |
+| UI-02 | Click to select conversations/users; scrollable lists; visible focus and selection                                                                                                                             | A        |
+| UI-03 | Complete keyboard navigation, focus traversal, next/previous buffer, fuzzy quick switcher                                                                                                                      | A        |
+| UI-04 | Responsive layout: hide optional panels in small terminals; resize without losing drafts/anchors                                                                                                               | A        |
+| UI-05 | Setup flow for network/auth/autojoin; errors explained without needing protocol knowledge                                                                                                                      | A        |
+| UI-06 | Help/keybinding overlay; keyboard equivalents for every essential pointer action                                                                                                                               | A        |
+| UI-07 | Correct terminal restoration on exit/error; sensible Ctrl+C behavior and quit confirmation when needed                                                                                                         | A        |
+| UI-08 | Context/action menus for conversations, users, and messages; keyboard menu invocation                                                                                                                          | V        |
+| UI-09 | Toggleable/resizable side panels; saved widths, order, and active conversation                                                                                                                                 | V        |
+| UI-10 | Theme tokens, dark/light/high-contrast presets, configurable timestamps and density                                                                                                                            | V        |
+| UI-11 | Remappable shortcuts with conflict detection; settings forms and config-file parity                                                                                                                            | V        |
+| UI-12 | Clipboard via terminal/OS integration where available; explicit copy fallback over SSH/tmux                                                                                                                    | V        |
+| UI-13 | Non-color unread/status cues, reduced-motion defaults, no emoji dependency, mouse-off mode                                                                                                                     | V        |
+| UI-14 | Multiple simultaneous transcript panes, drag-reorder, extensive layout customization                                                                                                                           | L        |
+| UI-15 | Full localization, independently verified screen-reader workflow                                                                                                                                               | L        |
 
 Do not claim browser-style accessibility: OpenTUI does not expose a browser accessibility tree. Keyboard operation and high contrast are requirements, but do not establish screen-reader compatibility.
 
 ### Configuration, security, and distribution
 
-| ID | Feature | Priority |
-|---|---|---|
-| SYS-01 | Typed validated config, documented paths, actionable config errors, safe defaults | A |
-| SYS-02 | No committed secrets; credential references; restrictive file permissions and diagnostic redaction | A |
-| SYS-03 | Bound memory, input sizes, batches, search results, outgoing queue and protocol timeouts | A |
-| SYS-04 | Version/help CLI, clean shutdown, debug logging opt-in; no telemetry by default | A |
-| SYS-05 | SQLite persistence/migrations, atomic config writes, backups before migration, recovery errors | V |
-| SYS-06 | Secret retrieval from environment or platform keychain where supported; no claim of encrypted storage otherwise | V |
-| SYS-07 | Config import/export with secrets excluded; sample profiles and first-run documentation | V |
-| SYS-08 | Versioned releases, checksums, tested install/uninstall, target-platform smoke tests | V |
-| SYS-09 | Credential/config/history threat-model documentation; no automatic network fetches for message content | V |
-| SYS-10 | Selective settings reload without reconnect; reconnect-required settings explained | V |
-| SYS-11 | Full-disk/app-managed history encryption and competing-client config migration tools | L |
-| SYS-12 | Automatic self-updates, cloud sync, analytics backend | X |
+| ID     | Feature                                                                                                         | Priority |
+| ------ | --------------------------------------------------------------------------------------------------------------- | -------- |
+| SYS-01 | Typed validated config, documented paths, actionable config errors, safe defaults                               | A        |
+| SYS-02 | No committed secrets; credential references; restrictive file permissions and diagnostic redaction              | A        |
+| SYS-03 | Bound memory, input sizes, batches, search results, outgoing queue and protocol timeouts                        | A        |
+| SYS-04 | Version/help CLI, clean shutdown, debug logging opt-in; no telemetry by default                                 | A        |
+| SYS-05 | SQLite persistence/migrations, atomic config writes, backups before migration, recovery errors                  | V        |
+| SYS-06 | Secret retrieval from environment or platform keychain where supported; no claim of encrypted storage otherwise | V        |
+| SYS-07 | Config import/export with secrets excluded; sample profiles and first-run documentation                         | V        |
+| SYS-08 | Versioned releases, checksums, tested install/uninstall, target-platform smoke tests                            | V        |
+| SYS-09 | Credential/config/history threat-model documentation; no automatic network fetches for message content          | V        |
+| SYS-10 | Selective settings reload without reconnect; reconnect-required settings explained                              | V        |
+| SYS-11 | Full-disk/app-managed history encryption and competing-client config migration tools                            | L        |
+| SYS-12 | Automatic self-updates, cloud sync, analytics backend                                                           | X        |
 
 Local history and drafts may contain private material. Deleting them locally cannot delete server/bouncer records, exported logs, filesystem snapshots, or other users' copies.
 

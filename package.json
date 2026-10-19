@@ -1,0 +1,34 @@
+{
+  "name": "openirc",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A newcomer-friendly IRC client built with OpenTUI, SolidJS, and Bun",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint . --deny-warnings",
+    "lint:fix": "oxlint . --fix",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run test",
+    "prepare": "simple-git-hooks"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.3",
+    "oxfmt": "^0.73.0",
+    "oxlint": "^1.88.0",
+    "simple-git-hooks": "^2.14.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "bun run format:check && bun run lint"
+  },
+  "engines": {
+    "bun": ">=1.3.14"
+  },
+  "packageManager": "bun@1.3.14"
+}
