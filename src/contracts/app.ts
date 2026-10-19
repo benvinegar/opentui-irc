@@ -112,6 +112,11 @@ export interface AppApi {
     expectedRevision: ConfigRevision,
     signal: AbortSignal,
   ): Promise<Result<OperationId>>;
+  /** Reload validated disk settings only if its revision still equals the inspected revision. */
+  reloadSettings(
+    expectedRevision: ConfigRevision,
+    signal: AbortSignal,
+  ): Promise<Result<OperationId>>;
   /** Sole secret-string ingress from secure input. Never observable or logged; clear UI input afterward. */
   storeSecret(value: string, signal: AbortSignal): Promise<Result<SecretRef>>;
   /** Idempotent; rejects new work, disconnects, flushes persistence and disposes adapters. */

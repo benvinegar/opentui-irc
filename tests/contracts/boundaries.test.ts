@@ -14,6 +14,7 @@ const layers: Readonly<
   storage: { local: ["storage", "contracts"], external: ["bun", "bun:", "node:", "jsonc-parser"] },
   services: { local: ["services", "domain", "contracts"], external: ["node:"] },
   ui: { local: ["ui", "contracts"], external: ["solid-js", "@opentui/"] },
+  control: { local: ["control", "contracts", "storage"], external: ["node:"] },
 };
 
 /** Lightweight literal-import guard, not a security sandbox or full dependency analyzer. */

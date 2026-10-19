@@ -1753,6 +1753,49 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       }
     });
 
+  const applySettingsDocument = async (saved: SettingsDocument) => {
+    const previousIds = new Set(settings.user.networks.map((p) => p.id));
+    const previousRetention = settings.user.history.retentionDays;
+    settings = saved;
+    settingsModel.publish(saved);
+    for (const id of previousIds)
+      if (!saved.user.networks.some((p) => p.id === id)) {
+        await disconnect(id);
+        networks.delete(id);
+        for (const c of conversations.values())
+          if (c.view.networkId === id) {
+            cancelTyping(c.view.id);
+            updateTimeline(c, { messages: [], members: [], typing: [], draft: "" });
+            c.model.dispose();
+            c.recent = [];
+            c.loaded = false;
+            c.closed = true;
+            if (active === c.view.id) active = undefined;
+          }
+      }
+    for (const p of saved.user.networks)
+      if (!networks.has(p.id)) {
+        networks.set(p.id, {
+          id: p.id,
+          name: p.name,
+          phase: "disconnected",
+          nick: p.identity.nick,
+          secure: false,
+          authenticated: false,
+          features: FEATURES,
+        });
+        const c = ensureConversation(p.id, "status", p.name);
+        if (!active) active = c.view.id;
+        if (p.autoConnect) startNetwork(p.id);
+      } else {
+        networks.set(p.id, { ...networks.get(p.id)!, name: p.name });
+        ensureConversation(p.id, "status", p.name);
+      }
+    if (saved.user.history.retentionDays !== previousRetention) await pruneHistory(lifetime.signal);
+    await persist();
+    await saveWorkspace();
+  };
+
   const api: AppApi = {
     state: state.readable,
     settings: settingsModel.readable,
@@ -1786,47 +1829,31 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
                 reject("invalid-input", "Authentication requires verified TLS for every endpoint.");
             }
           const saved = requireResult(await deps.settings.save(change, expectedRevision, signal));
-          const previousIds = new Set(settings.user.networks.map((p) => p.id));
-          const previousRetention = settings.user.history.retentionDays;
-          settings = saved;
-          settingsModel.publish(saved);
-          for (const id of previousIds)
-            if (!saved.user.networks.some((p) => p.id === id)) {
-              await disconnect(id);
-              networks.delete(id);
-              for (const c of conversations.values())
-                if (c.view.networkId === id) {
-                  cancelTyping(c.view.id);
-                  updateTimeline(c, { messages: [], members: [], typing: [], draft: "" });
-                  c.model.dispose();
-                  c.recent = [];
-                  c.loaded = false;
-                  c.closed = true;
-                  if (active === c.view.id) active = undefined;
-                }
-            }
-          for (const p of saved.user.networks)
-            if (!networks.has(p.id)) {
-              networks.set(p.id, {
-                id: p.id,
-                name: p.name,
-                phase: "disconnected",
-                nick: p.identity.nick,
-                secure: false,
-                authenticated: false,
-                features: FEATURES,
-              });
-              const c = ensureConversation(p.id, "status", p.name);
-              if (!active) active = c.view.id;
-              if (p.autoConnect) startNetwork(p.id);
-            } else {
-              networks.set(p.id, { ...networks.get(p.id)!, name: p.name });
-              ensureConversation(p.id, "status", p.name);
-            }
-          if (saved.user.history.retentionDays !== previousRetention)
-            await pruneHistory(lifetime.signal);
-          await persist();
-          await saveWorkspace();
+          await applySettingsDocument(saved);
+          operation(id, "completed");
+          publish();
+          return ok(id);
+        } catch (cause) {
+          const detail = safeError(cause);
+          if (id) operation(id, "failed", detail);
+          report(detail);
+          publish();
+          return { ok: false, error: detail };
+        }
+      });
+    },
+    reloadSettings(expectedRevision, signal) {
+      return serialIntent(signal, async () => {
+        let id: OperationId | undefined;
+        try {
+          if (stopping) reject("unavailable", "OpenIRC is shutting down.");
+          if (signal.aborted) reject("cancelled", "Operation cancelled.");
+          id = newOperation();
+          const loaded = requireResult(await deps.settings.load(signal));
+          if (loaded.revision !== expectedRevision)
+            reject("conflict", "Settings changed after inspection; inspect and plan again.");
+          if (signal.aborted) reject("cancelled", "Operation cancelled.");
+          await applySettingsDocument(loaded);
           operation(id, "completed");
           publish();
           return ok(id);

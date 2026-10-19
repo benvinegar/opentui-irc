@@ -10,6 +10,8 @@ describe("CLI paths and options", () => {
         mode: "run",
         configDirectory: "/home/test/.config/openirc",
         dataDirectory: "/home/test/.local/share/openirc",
+        controlEnabled: true,
+        controlPermissions: ["inspect", "configure", "network"],
       },
     });
   });
@@ -24,6 +26,19 @@ describe("CLI paths and options", () => {
     expect(parsed.ok && parsed.value.dataDirectory).toBe(
       "/home/test/Library/Application Support/OpenIRC",
     );
+  });
+  it("grants extra control rights only through explicit launch options", () => {
+    const parsed = parseCli(["--control-allow", "read-messages,send-messages"]);
+    expect(parsed.ok && parsed.value.controlPermissions).toEqual([
+      "inspect",
+      "configure",
+      "network",
+      "read-messages",
+      "send-messages",
+    ]);
+    expect(parseCli(["--control-allow", "all"]).ok).toBe(false);
+    const disabled = parseCli(["--no-control"]);
+    expect(disabled.ok && disabled.value.controlEnabled).toBe(false);
   });
   it("supports help/validation and rejects unknown or missing options", () => {
     const parsed = parseCli(["--check-config", "--config-dir", "/tmp/openirc-config"]);

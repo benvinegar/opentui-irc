@@ -208,6 +208,14 @@ export function createFakeApp(initial: AppSnapshot = appSnapshot) {
       );
       return { ok: true, value: entityId<"operation">(`fake-settings-${sequence}`) };
     },
+    async reloadSettings(expectedRevision) {
+      if (settings.getSnapshot()?.revision !== expectedRevision)
+        return {
+          ok: false,
+          error: { code: "conflict", message: "Settings changed externally.", retryable: false },
+        };
+      return { ok: true, value: entityId<"operation">(`fake-reload-${++sequence}`) };
+    },
     async search(query) {
       return {
         ok: true,

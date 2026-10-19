@@ -357,6 +357,24 @@ describe("application coordinator", () => {
     expect(messages).toHaveLength(2);
     expect(messages[0]?.sender.userId).not.toBe(messages[1]?.sender.userId);
   });
+  it("reloads externally changed settings only after revision inspection", async () => {
+    const h = await setup();
+    const before = h.app.settings.getSnapshot()!;
+    const external = value(
+      await h.deps.settings.save(
+        { section: "tui", value: { ...before.tui, theme: "light" } },
+        before.revision,
+        signal(),
+      ),
+    );
+    expect(h.app.settings.getSnapshot()?.tui.theme).toBe("dark");
+    const stale = await h.app.reloadSettings(before.revision, signal());
+    expect(stale.ok).toBe(false);
+    expect(h.app.settings.getSnapshot()?.tui.theme).toBe("dark");
+    value(await h.app.reloadSettings(external.revision, signal()));
+    expect(h.app.settings.getSnapshot()?.revision).toBe(external.revision);
+    expect(h.app.settings.getSnapshot()?.tui.theme).toBe("light");
+  });
   it("surfaces optimistic settings conflicts without applying changes", async () => {
     const h = await setup();
     const original = h.app.settings.getSnapshot()!;
