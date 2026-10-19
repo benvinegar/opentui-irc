@@ -38,7 +38,7 @@ Status: implemented early daily-driver alpha. `src/main.ts` composes the real UI
 * Link/clipboard adapters are UI-shell dependencies, not domain behavior.
 ```
 
-All arrows are in-process interfaces, not RPC or remote services. One application process, one repo, one dependency graph. Avoid worker threads until profiling gives us a reason.
+The core arrows above are in-process interfaces. Agent control adds a short-lived JSON CLI → private Unix socket → permission-checked AppApi adapter; it is not a remote service or background bouncer. The foreground UI remains the sole live state owner. Offline CLI writes hold the same profile lease and never instantiate IRC/history/UI. See CONTROL.md and AGENT_GUIDE.md. One live application process per configuration profile, one repo, one dependency graph. Avoid worker threads until profiling gives us a reason.
 
 ## 3. Module ownership and dependency rules
 
@@ -53,6 +53,8 @@ All arrows are in-process interfaces, not RPC or remote services. One applicatio
 | `app/`               | Lifecycle, orchestration, read models              | Contracts, domain                 | Concrete adapter construction, Solid/OpenTUI |
 | `ui/`                | Components, local interaction state, Solid bridge  | Contracts, Solid/OpenTUI          | SQL, sockets, wire codec, concrete storage   |
 | `main.ts` / `cli.ts` | Composition and terminal startup/shutdown          | All adapters and public factories | Product rules duplicated from app            |
+
+`control/` owns untrusted JSON validation, CLI mapping, configuration schemas/plans, permission checks, replay bounds and Unix IPC. It consumes contracts and the AppApi, plus settings/default/validation adapters for provably offline configuration. It must not open history or create IRC sessions; only the composition root creates the live application.
 
 Use direct imports from specific contract files. Avoid barrel exports hiding cycles. Contracts are the only shared modification hotspot; implementation agents should own disjoint directories.
 
@@ -161,7 +163,7 @@ Read positions and persisted metadata survive restarts; transient typing state, 
 
 ### Settings and secrets
 
-Settings UI edits a section, then submits expected revision via `saveSettings()`. App validates semantics, repository validates schema and compares both file fingerprints/revision before replacing one file atomically. Detectable external edits cause `conflict`. Serialize cooperating writers with an advisory lock and recheck fingerprints immediately before replacement; an arbitrary editor can still race the final check/rename. Document that filesystem limitation rather than promising a cross-process atomic compare-and-swap. Apply safe appearance values live; explain network reconnect requirements. Do not write two files as if the filesystem offers a cross-file atomic transaction.
+Settings UI or an agent edits a section, then submits expected revision via `saveSettings()`. App validates semantics, repository validates schema and compares both file fingerprints/revision before replacing one file atomically. Detectable external edits cause `conflict`. Serialize cooperating writers with an advisory lock and recheck fingerprints immediately before replacement; an arbitrary editor can still race the final check/rename. Document that filesystem limitation rather than promising a cross-process atomic compare-and-swap. Apply safe appearance values live; explain network reconnect requirements. `reloadSettings(expectedDiskRevision, expectedLiveRevision)` reuses the same application reconciliation after runtime-validating disk files and checking both the inspected disk revision and planned live base at serial admission; it does not blindly overwrite files. The agent control service plans and permission-checks reload effects before admission. Do not write two files as if the filesystem offers a cross-file atomic transaction.
 
 Only `storeSecret()` accepts secret strings from secure UI input. It returns a reference; failures are visible. Passwords are never put in settings, read models, domain events or diagnostics. Initially allow environment references; secure interactive storage requires a functioning keychain adapter or an explicit unsupported result. Do not silently fall back to plaintext.
 

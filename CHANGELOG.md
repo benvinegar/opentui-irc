@@ -11,6 +11,9 @@
 - Optional Libera.Chat/OFTC setup presets, channel browsing, WHOIS details, and explicit link/clipboard actions.
 - Contract-first architecture, component handoffs, local integration/UI tests, and opt-in real Ergo interoperability checks.
 
+- Agent-first JSON control CLI with complete setting schemas, defaults, dry-run plans, revision-checked offline/live changes, profile management, and live external-file reload.
+- Private Unix control socket and exclusive profile ownership; separate explicit permissions for message reads, sends and destructive work, stdin-only secret ingress, and bounded request replay protection.
+
 ### Changed
 
 ### Fixed

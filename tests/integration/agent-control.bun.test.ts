@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import type { AppApi } from "../../src/contracts/app";
 import type { ControlHandler, ControlPermission } from "../../src/contracts/control";
 import { ALL_CONTROL_PERMISSIONS } from "../../src/contracts/control";
+import { entityId } from "../../src/contracts/common";
 import { createApp } from "../../src/app/create-app";
 import { createHistoryRepository } from "../../src/storage/history";
 import { createSettingsRepository } from "../../src/storage/settings";
@@ -306,6 +307,42 @@ describe("real headless agent CLI", () => {
     ]);
     expect(timeline.response.ok).toBe(true);
     expect(timeline.stdout).toContain("private test message");
+  });
+  test("real stdin and Unix IPC hand credentials only to secure ingress and return references", async () => {
+    const context = await live();
+    let received = "";
+    // Use a supported reference shape, never a live OS vault or real credential in tests.
+    context.h.deps.secrets.store = async (value) => {
+      received = value;
+      return { ok: true, value: entityId<"secret-ref">("env:AGENT_TEST") };
+    };
+    const stored = await run(
+      context.config,
+      ["secrets", "store", "--stdin"],
+      "synthetic-sensitive-password\n",
+    );
+    expect(received).toBe("synthetic-sensitive-password");
+    expect(stored.response).toMatchObject({ ok: true, result: { reference: "env:AGENT_TEST" } });
+    expect(stored.stdout + stored.stderr).not.toContain("synthetic-sensitive-password");
+    const updated = {
+      ...profile,
+      sasl: {
+        mechanism: "PLAIN",
+        account: "test-account",
+        password: "env:AGENT_TEST",
+        required: true,
+      },
+    };
+    const applied = await run(
+      context.config,
+      ["networks", "update", profile.id, "--stdin"],
+      JSON.stringify(updated),
+    );
+    expect(applied.response.ok).toBe(true);
+    const inspected = await run(context.config, ["config", "get"]);
+    expect(inspected.stdout).toContain("env:AGENT_TEST");
+    expect(inspected.stdout).not.toContain("synthetic-sensitive-password");
+    expect(context.h.sessions).toHaveLength(0);
   });
   test("external settings reload is inspected then applied to the live app", async () => {
     const context = await live();

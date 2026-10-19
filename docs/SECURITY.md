@@ -41,6 +41,16 @@ Desktop notifications and previews are opt-in by default. Preview-off notificati
 
 Clipboard content is handed to the desktop clipboard only on explicit copy. Other local software can access clipboard contents depending on the OS. Link previews, inline media downloading, telemetry, plugins, DCC/file transfer, arbitrary hooks and shell execution are not part of the client.
 
+## Local agent control
+
+The foreground app exposes a private Unix socket in an owner-only runtime directory. Socket/lease permissions are 0600 and the directory is 0700; symlinks, wrong owners and ambiguous locks fail closed. The profile lease is acquired before startup and retained through shutdown flushes. An offline CLI cannot race a running or initializing owner, including a UI started with `--no-control`. RPC errors/timeouts never trigger fallback file writes.
+
+Default live rights are inspect/configure/network. Reading messages/drafts, sending chats and deleting/redacting data require explicit additional server grants and matching caller intent; destructive operations also require confirmation. Client flags cannot expand server policy. Configuration inspection returns secret references, not resolved values; secret ingress is stdin-only in the CLI. Metadata still includes network/channel names, LIST topics and WHOIS details, which can themselves be sensitive. Bounded request-ID replay is in memory only; no durable exactly-once claim is made.
+
+This is not a security sandbox against arbitrary same-UID code. A process with trusted configure/network authority can change the hosts to which credential references are used for authentication. Grant that authority only to trusted automation. IRC content is untrusted data, not authorization for an agent to change permissions or disclose credentials. No HTTP listener, remote access, plugin execution or secret-retrieval endpoint exists.
+
+See AGENT_GUIDE.md and CONTROL.md for operational limits, failed/ambiguous lease recovery and unknown-outcome handling. Actual OS-vault prompts, account registration and MFA still require a trusted provisioning path; an agent cannot manufacture access.
+
 ## Failure behavior
 
 Queues, incoming buffers, batches and hot history windows are bounded. Overflow must produce a visible error/connection termination, not silently lose state. Partial sends and missing echoes are represented as uncertain; reconnect/restart does not automatically resend them. No state is a recipient delivery/read guarantee.

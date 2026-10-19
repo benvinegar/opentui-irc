@@ -4,9 +4,25 @@ A newcomer-friendly IRC client for Linux and macOS, built with Bun, SolidJS, and
 
 **Status: early daily-driver alpha.** The real terminal client, IRC connection stack, local history, search, and settings are implemented. This is not yet the complete feature set in the product plan.
 
+## Agent-first configuration
+
+Tell your local coding agent to follow [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md). It can discover, plan, configure and verify OpenIRC without clicking through the TUI or rewriting files blindly:
+
+```sh
+bun run --silent ctl --help
+bun run --silent ctl config schema
+bun run --silent ctl config get
+bun run --silent ctl config set tui.theme '"light"' --dry-run
+bun run --silent ctl config set tui.theme '"light"'
+```
+
+Settings work offline or through a private Unix socket while the client is running. Network profiles can be added, edited and removed; runtime actions share the same API as the UI. JSON responses, revision checks, dry runs and explicit effect plans make changes verifiable. Secrets use references or stdin-only secure storage—never a password argument or retrieval command.
+
+Message/draft reading, chat sending and destructive work require separate explicit server grants **and** caller intent. Default live rights are inspect/configure/network. See [control design](docs/CONTROL.md) for the local trust boundary and [the agent guide](docs/AGENT_GUIDE.md) for setup recipes.
+
 ## Run
 
-Requires Bun **1.3.14+** and an interactive terminal.
+Requires Bun **1.3.14+**. The TUI needs an interactive terminal; control commands do not.
 
 ```sh
 bun install --frozen-lockfile
@@ -45,7 +61,7 @@ Mouse selection, scrolling, scrollbars, buttons, menus, setup, and conversation 
 
 ## Configuration
 
-Both JSONC files and in-app settings are supported. The current settings UI covers network creation, secure authentication, history logging, and themes; some advanced edits still require files.
+JSONC, in-app settings and the agent control API are supported. All current configuration fields have discoverable schemas and validated control edits. The settings UI covers a smaller subset; use the agent CLI for profile editing/removal and advanced settings. Reserved custom-keybinding changes are explicitly unsupported rather than silently ignored.
 
 | Data                     | Default location                                                      |
 | ------------------------ | --------------------------------------------------------------------- |
@@ -59,7 +75,7 @@ bun run start --config-dir /path/to/config --data-dir /path/to/data
 bun run start --help
 ```
 
-There is no automatic project/cwd configuration discovery. In-app changes apply immediately where safe; restart after external file edits. Settings use revision checks to detect conflicting edits. See [persistence guarantees](src/storage/README.md).
+There is no automatic project/cwd configuration discovery. Supported in-app/agent changes apply immediately where safe; plans report reconnect/restart requirements. Use `bun run --silent ctl config reload --dry-run` then `config reload` for external file edits. Settings use revision checks to detect conflicting edits. See [persistence guarantees](src/storage/README.md).
 
 ## Develop
 
@@ -83,6 +99,8 @@ Ergo 2.19.1 was verified for registration, JOIN, server IDs/echoes, replies, typ
 
 ## Architecture and scope
 
+- [Agent operation guide](docs/AGENT_GUIDE.md)
+- [Versioned local control API](docs/CONTROL.md)
 - [Implementation status and remaining work](docs/IMPLEMENTATION.md)
 - [Security/privacy model](docs/SECURITY.md)
 - [Product plan](docs/PLAN.md)

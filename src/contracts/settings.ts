@@ -30,7 +30,7 @@ export interface UserSettings {
   readonly networks: readonly NetworkProfile[];
   readonly history: {
     readonly enabled: boolean;
-    /** null means retain indefinitely; zero is invalid. Product default still to choose. */
+    /** null means retain indefinitely; zero is invalid. The current default is 30 days. */
     readonly retentionDays: number | null;
     /** Exact target names using the network's IRC casemapping; no wildcard language in revision 1. */
     readonly excludedConversations: readonly {

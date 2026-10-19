@@ -22,7 +22,7 @@ One bounded NDJSON request/response per Unix connection. `src/contracts/control.
 - `config.schema`: JSON Schemas, defaults, descriptions, constraints and runtime effects for all current fields.
 - `config.get`: current SettingsDocument (secret references, never resolved values).
 - `config.plan` / `config.apply`: `{ edit, expectedRevision }`. `edit` is `{section, value}` or `{section, patch, unset?}`. Deep object patches preserve unspecified fields, arrays replace, null is literal; unset uses dot paths. Reject prototype keys and invalid paths. Exactly one section per atomic save. `confirm:true` required for destructive plans.
-- `config.reload`: inspect disk changes (`dryRun:true`) or apply a revision-checked reload to a running app. Reload is not permission escalation; changes are planned/checked first.
+- `config.reload`: inspect disk changes (`dryRun:true`) or apply a revision-checked reload to a running app. Reload is not permission escalation; changes are planned/checked first. The app checks both the plan's live base revision and inspected disk revision inside its serial admission queue, including when an editor restores identical disk bytes.
 - `networks.list`, `conversations.list`, `operations.list`: metadata only; no error bodies/message text.
 - `action.dispatch`: `{action, confirm?}`; runtime-validate every existing AppAction and require its capability. All actual behavior goes through AppApi.dispatch.
 - `timeline.get`: `{conversationId}`; requires read-messages, includes bounded messages/draft.

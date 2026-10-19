@@ -17,6 +17,8 @@ OpenIRC is a runnable early daily-driver alpha, not completion of every A/V item
 | Discovery      | Channel-directory filtering/join, WHOIS details, start DM, message actions and capability-aware modern controls                                                                     |
 | OS effects     | Explicit safe link opening/copy, opt-in desktop notifications with platform helper fallbacks                                                                                        |
 
+Agent configuration/control is implemented: `bun run --silent ctl --help` discovers schemas, defaults, effect plans and commands. All current settings have validated offline/live edits; a private Unix socket and exclusive profile lease protect active ownership. Network/conversation actions use AppApi, while reading/sending/deleting needs separate authority. External file reload is revision-checked. See [AGENT_GUIDE.md](AGENT_GUIDE.md) and [CONTROL.md](CONTROL.md).
+
 There are no production imports from fake/test implementations. Fakes exist for deterministic UI/unit development only.
 
 ## Validation actually performed
@@ -27,7 +29,7 @@ There are no production imports from fake/test implementations. Fakes exist for 
 | Pure unit/contract tests     | Vitest under Node: domain/app/services/codec/session/config/secret policies, typed boundaries                                                                               |
 | Bun integration              | Real SQLite files, TCP/TLS fixtures, CLI, full core/server composition, real headless OpenTUI interactions                                                                  |
 | Real UI + core + persistence | Mouse setup → real JSONC save → connect via fake session → DM → native composer → real app → SQLite search                                                                  |
-| Linux real-terminal smoke    | Production entrypoint in a pseudo-terminal, first screen renders, SIGTERM exits 0 and restores terminal                                                                     |
+| Linux real-terminal smoke    | Production TUI plus live agent theme changes, server-permission denials, authorized agent shutdown and SIGTERM cleanup in a pseudo-terminal                                 |
 | Real IRC server              | `bun run test:ergo`: official pinned Ergo 2.19.1 container, loopback only, three real apps; registration/JOIN, msgid/echo, replies, typing, reactions, CHATHISTORY playback |
 | macOS                        | CI job configured, not run in this local session; real manual validation outstanding                                                                                        |
 | Credential vault             | Dispatch/readback/failure tested with injected vault; actual user's Secret Service/Keychain not exercised                                                                   |
@@ -40,7 +42,7 @@ No public IRC networks, personal credentials, account registration, or personal 
 - Expand real server/bouncer coverage, including same-account read-marker synchronization, server redaction and reconnect/playback edge cases.
 - Design durable peer/account-bound DM archives. Current threads are nickname-address based (with a visible reuse warning), not verified-person histories. Persisted reaction aggregates also lack authoritative actor membership; unknown restored actor deltas are handled conservatively rather than guessed.
 - Native macOS, SSH, tmux, clipboard and OS-vault smoke validation with real users.
-- Editing/removing existing network profiles through forms; retention controls, broader settings parity, external-file reload without restart, and configurable keybindings.
+- Broader settings **form** parity: editing/removing existing profiles and retention already work through the agent API, not all through forms. Custom keybindings remain reserved/unsupported and are reported honestly by the schema/planner.
 - Full local search performance/indexing work: current literal substring search prioritizes correctness, not million-message latency guarantees.
 - Rich IRC formatting annotations, customizable highlight/noise/ignore policies, broader notification controls and other remaining planned v1 polish.
 - Negotiated IRCv3 multiline, additional history query shapes, vendor-specific ZNC playback, WHO/WHOX and network-specific services fallback.

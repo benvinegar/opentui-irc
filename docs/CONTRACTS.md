@@ -132,6 +132,14 @@ No text-equality echo matching. A missing echo does not prove rejection. A succe
 - Notification sink receives already-filtered payloads. Desktop unavailable returns unsupported/unavailable and never breaks chat; any terminal-bell fallback is chosen by app policy.
 - External URL actions revalidate an explicit scheme allowlist (initially http/https), avoid shell interpolation and honor cancellation. Clipboard absence has a visible fallback; do not silently claim copy succeeded.
 
+## Agent control adapter
+
+`src/contracts/control.ts` defines version-1 JSON envelopes and permission vocabulary. See CONTROL.md for private socket/lease lifecycle, request/reply limits, offline routing and confirmation rules. The CLI dispatches existing typed AppActions and saves through AppApi while live; it never serializes raw sockets/IRC/SQL or wraps the whole application object.
+
+Control `config.plan` is side-effect-free. Apply pins an expected revision; new connections/removals and destructive retention changes require their declared rights. Reload pins an inspected disk revision and shares the application's settings reconciliation. Caller flags express intent and are intersected with immutable launch grants. No read/sending/deletion authority is implied merely by configuration access.
+
+Metadata responses exclude message/draft text and raw error bodies. Message reads/writes and history deletion require explicit separate rights. Resolved credentials are never returned; CLI secret strings enter only via bounded stdin. Mutation replay caches are bounded and process-local, never a guarantee across restart or permission to blindly retry an unknown outcome.
+
 ## Contract changes
 
 1. Propose the producer/consumer change, fallback and migration implications.
