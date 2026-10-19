@@ -71,6 +71,7 @@ export type AppAction =
       readonly conversationId: ConversationId;
       readonly cursor?: Cursor;
     }
+  | { readonly type: "history.latest"; readonly conversationId: ConversationId }
   | { readonly type: "history.reveal"; readonly messageId: MessageId }
   | { readonly type: "history.delete"; readonly conversationId: ConversationId }
   | {

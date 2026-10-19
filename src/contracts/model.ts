@@ -92,6 +92,8 @@ export interface TimelineSnapshot {
   readonly firstUnreadId?: MessageId;
   readonly olderCursor?: Cursor;
   readonly loadingOlder: boolean;
+  /** False for an older/search window; absent means latest for revision-1 consumers. */
+  readonly atLatest?: boolean;
   readonly draft: string;
 }
 
