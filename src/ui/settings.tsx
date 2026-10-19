@@ -137,7 +137,9 @@ export function SettingsForm(props: {
     if (!result.ok) {
       setError(
         result.error.message +
-          (result.error.code === "conflict" ? " Close and reopen Settings to reload changes." : ""),
+          (result.error.code === "conflict"
+            ? " Reopen Settings for in-app changes; restart OpenIRC after external file edits."
+            : ""),
       );
       return;
     }

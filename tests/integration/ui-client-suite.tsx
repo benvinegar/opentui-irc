@@ -94,6 +94,7 @@ test("real UI -> application -> JSONC/SQLite onboarding and send journey", async
     await until(() => app!.state.getSnapshot().conversations.some((c) => c.kind === "direct"));
     await Bun.sleep(20);
     await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("Nicknames can be reused");
     await view.mockInput.typeText("hello through the real application");
     await view.mockInput.pressEnter();
     await until(() => h.session(network.id).commands.some((item) => item.command.type === "send"));

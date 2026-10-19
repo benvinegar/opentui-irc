@@ -37,6 +37,7 @@ Mouse selection, scrolling, scrollbars, buttons, menus, setup, and conversation 
 
 - Local message history is **plaintext**, enabled by default with **30-day retention**. Settings can disable future logging; deleting existing history is a separate explicit action.
 - Closing the client disconnects. Use an existing IRC bouncer for offline collection; OpenIRC does not run a background service.
+- Nicknames can be reused. DMs are nickname-addressed, not verified-person archives; check account details before sharing private information.
 - Reconnects restore open channels. Server playback and modern interactions depend on negotiated server capabilities.
 - Multiline drafts use a bounded, paced ordinary-IRC fallback. Negotiated IRCv3 multiline is not implemented yet.
 - Written or echoed messages are not recipient-delivery/read receipts. Uncertain sends are never automatically resent.
@@ -58,7 +59,7 @@ bun run start --config-dir /path/to/config --data-dir /path/to/data
 bun run start --help
 ```
 
-There is no automatic project/cwd configuration discovery. Settings use revision checks to detect conflicting edits. See [persistence guarantees](src/storage/README.md).
+There is no automatic project/cwd configuration discovery. In-app changes apply immediately where safe; restart after external file edits. Settings use revision checks to detect conflicting edits. See [persistence guarantees](src/storage/README.md).
 
 ## Develop
 
@@ -75,6 +76,7 @@ Tests use local fake IRC servers and temporary files—not public networks or pe
 
 ```sh
 bun run test:ergo    # requires Docker; may download the pinned official image
+bun run test:terminal # requires Python 3; real production TTY startup/shutdown
 ```
 
 Ergo 2.19.1 was verified for registration, JOIN, server IDs/echoes, replies, typing, reactions, and CHATHISTORY playback. Read-marker and redaction protocol tests do not establish every server/bouncer's interoperability. Installation configures a format/lint pre-commit hook. Source execution is the supported development path; standalone binaries are not packaged yet.

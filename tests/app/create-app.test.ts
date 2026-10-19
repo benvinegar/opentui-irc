@@ -327,6 +327,36 @@ describe("application coordinator", () => {
       false,
     );
   });
+  it("keeps nickname-addressed DM history while distinguishing recycled sender identities", async () => {
+    const h = await connected();
+    const direct = (serverId: string): SessionPayload => ({
+      type: "chat",
+      message: {
+        target: "newcomer",
+        sender: { nick: "peer" },
+        kind: "text",
+        text: "hello",
+        receivedAt: 1_700_000_002_000,
+        serverId,
+        source: "live",
+      },
+    });
+    h.session.emit(direct("first-peer"));
+    await settle();
+    const first = h.app.state
+      .getSnapshot()
+      .conversations.find((c) => c.kind === "direct" && c.name === "peer")!;
+    h.session.emit({ type: "quit", nick: "peer", reason: "left" });
+    h.session.emit(direct("recycled-peer"));
+    await settle();
+    const second = h.app.state
+      .getSnapshot()
+      .conversations.find((c) => c.kind === "direct" && c.name === "peer")!;
+    const messages = timeline(h.app, second.id).messages;
+    expect(second.id).toBe(first.id); // ADR-008: address history, not a verified-person archive.
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.sender.userId).not.toBe(messages[1]?.sender.userId);
+  });
   it("surfaces optimistic settings conflicts without applying changes", async () => {
     const h = await setup();
     const original = h.app.settings.getSnapshot()!;

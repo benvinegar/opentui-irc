@@ -93,7 +93,7 @@ Contracts are **revision 1, internal and evolvable**, not semver-stable public A
 - Every server message ID is scoped by network. Every user and channel lookup uses negotiated IRC casemapping, not Unicode `toLowerCase()`.
 - Conversation records are persisted before their history/read positions become durable. Restore the registry on boot before history windows.
 - Network status is a conversation too, but not a message target. Reject sends to status conversations.
-- A direct conversation follows nick changes for a currently tracked user. Do not merge different users merely because a nickname was recycled or an account string matches.
+- A direct conversation follows nick changes for a currently tracked user. User IDs are never merged merely because a nickname/account string matches. Current DM conversation history is **nickname-address based**, not a verified-person archive: a nickname reused after QUIT/reconnect can share the existing conversation while sender IDs differ. The UI warns about nickname reuse. Durable peer/account-bound archives need a coordinated registry/API change; see ADR-008 in DECISIONS.md.
 - On casemapping changes, rebuild lookup indexes; collisions need an explicit reconciliation policy. Do not silently drop conversations.
 
 ### Read models

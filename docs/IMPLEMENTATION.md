@@ -38,8 +38,9 @@ No public IRC networks, personal credentials, account registration, or personal 
 ## Important remaining work
 
 - Expand real server/bouncer coverage, including same-account read-marker synchronization, server redaction and reconnect/playback edge cases.
+- Design durable peer/account-bound DM archives. Current threads are nickname-address based (with a visible reuse warning), not verified-person histories. Persisted reaction aggregates also lack authoritative actor membership; unknown restored actor deltas are handled conservatively rather than guessed.
 - Native macOS, SSH, tmux, clipboard and OS-vault smoke validation with real users.
-- Editing/removing existing network profiles through forms; retention controls, broader settings parity and configurable keybindings.
+- Editing/removing existing network profiles through forms; retention controls, broader settings parity, external-file reload without restart, and configurable keybindings.
 - Full local search performance/indexing work: current literal substring search prioritizes correctness, not million-message latency guarantees.
 - Rich IRC formatting annotations, customizable highlight/noise/ignore policies, broader notification controls and other remaining planned v1 polish.
 - Negotiated IRCv3 multiline, additional history query shapes, vendor-specific ZNC playback, WHO/WHOX and network-specific services fallback.

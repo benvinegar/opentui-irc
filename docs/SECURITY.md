@@ -20,6 +20,10 @@ The OS-vault adapter uses Bun's Secret Service/macOS Keychain integration and ve
 
 The UI clears password entry at handoff/disposal, but JavaScript cannot guarantee zeroization. If a credential was stored successfully and a later settings write failed, an unused vault record can remain; automatic vault-entry deletion is not currently implemented.
 
+## Nicknames are addresses, not verified identities
+
+SASL authenticates your connection to the server; it does not make every displayed nickname a verified person. IRC nicknames can be reused. Current direct-conversation history is keyed by network/nickname address and can contain messages from different observed users after a nickname is recycled; their sender IDs remain distinct. The DM header warns about reuse. Check account information via WHOIS and independently verify identity before sharing private information. A future person/account-bound archive requires an explicit identity and migration design; no such guarantee is made today.
+
 ## Local history and filesystem
 
 History is local **plaintext SQLite**, enabled for 30 days by default. New private directories/files use restrictive permissions. This is access control, not encryption. Database/WAL files, filesystem snapshots, backups, crash dumps and an account with access to your user can expose message bodies and metadata.

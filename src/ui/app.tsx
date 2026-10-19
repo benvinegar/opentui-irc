@@ -870,6 +870,9 @@ function Shell(props: UiOptions) {
                     ? `${network()?.name ?? ""} · ${network()?.phase ?? "disconnected"}`
                     : "Add a network, connect securely, and join a channel.")}
               </text>
+              <Show when={active()?.kind === "direct"}>
+                <text fg={colors.muted}>Nicknames can be reused. Verify accounts.</text>
+              </Show>
             </box>
             <Show
               when={active()}

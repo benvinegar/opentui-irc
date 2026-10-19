@@ -64,4 +64,14 @@ These decisions are accepted for the foundation, not irrevocable commitments. Ch
 
 **Why:** fast repeatable foundation with truthful runtime coverage. A Node unit-test pass is not evidence that Bun TCP/SQLite works.
 
-**Tradeoff:** development currently requires Node for Vitest as well as Bun; CI installs both. Actual terminal rendering/runtime packaging remains a spike, not a completed feature.
+**Tradeoff:** development currently requires Node for Vitest as well as Bun; CI installs both. Actual terminal rendering is now implemented and smoke-tested on Linux; standalone runtime packaging remains future work.
+
+## ADR-008 — Initial DM threads are nickname-address based
+
+**Decision:** for this alpha, a direct conversation targets a network/nickname address, following a currently observed user's nick changes. Message sender IDs distinguish observed users, but a later owner of the same nickname can share the address's existing history. Do not describe these threads as verified-person identities. The UI displays a nickname-reuse warning and WHOIS/account details are available.
+
+**Why:** IRC messaging is nickname-addressed and account identity is optional/network-specific. A runtime-only peer flag would not survive restarts and could create ambiguous duplicate-name histories or send from an archived thread to the wrong current user. The initial architecture's stronger prose guarantee was not supported by the durable registry and has been corrected explicitly.
+
+**Tradeoff:** this differs from Slack's account-bound identity model. Account/nickname verification is required before sharing private information. This is a known product limitation, not a claim that nickname recycling has been eliminated.
+
+**Revisit when:** designing durable peer/account bindings, inactive/archive send rules, routing on nick reuse, and migration of existing conversation records together. Do not bolt on guessed identity merges.
