@@ -13,12 +13,13 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "bun run format:check && bun run lint && bun run typecheck && bun run test",
+    "test:bun": "bun run scripts/test-bun.ts",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run test && bun run test:bun",
     "prepare": "simple-git-hooks"
   },
   "dependencies": {
-    "@opentui/core": "^0.6.6",
-    "@opentui/solid": "^0.6.6",
+    "@opentui/core": "0.6.6",
+    "@opentui/solid": "0.6.6",
     "jsonc-parser": "^3.3.1",
     "solid-js": "1.9.12"
   },
