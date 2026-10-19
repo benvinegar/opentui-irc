@@ -1,0 +1,1016 @@
+/* oxlint-disable no-control-regex -- Explicit terminal control rejection is a security boundary. */
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  onCleanup,
+  onMount,
+  Show,
+  untrack,
+} from "solid-js";
+import {
+  onBlur,
+  onFocus,
+  useKeyboard,
+  usePaste,
+  useRenderer,
+  useTerminalDimensions,
+} from "@opentui/solid";
+import type { Renderable, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
+import type { AppAction, AppApi } from "../contracts/app";
+import type { ConversationId, MessageId } from "../contracts/common";
+import type { Message, TimelineSnapshot } from "../contracts/model";
+import type { CommandService, ExternalActions, InputContext } from "../contracts/services";
+import { useReadable } from "./bridge";
+import { Button, Dialog, Field, FocusContext, ThemeContext, usePalette } from "./primitives";
+import { SettingsForm } from "./settings";
+
+export interface UiOptions {
+  readonly app: AppApi;
+  readonly commands: CommandService;
+  readonly external: ExternalActions;
+  readonly onQuit?: () => void | Promise<void>;
+}
+type Modal =
+  | "settings"
+  | "help"
+  | "join"
+  | "query"
+  | "switch"
+  | "search"
+  | "paste"
+  | "message"
+  | "quit"
+  | null;
+const cleanPaste = (value: string) =>
+  value.replace(/\r\n?/gu, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu, "");
+
+export function OpenIrc(props: UiOptions) {
+  const document = useReadable(props.app.settings);
+  return (
+    <ThemeContext.Provider value={() => document()?.tui.theme ?? "dark"}>
+      <Shell {...props} />
+    </ThemeContext.Provider>
+  );
+}
+
+function Shell(props: UiOptions) {
+  const colors = usePalette();
+  const renderer = useRenderer();
+  const dimensions = useTerminalDimensions();
+  const state = useReadable(props.app.state);
+  const settings = useReadable(props.app.settings);
+  const operations = useReadable(props.app.operations);
+  const abort = new AbortController();
+  onCleanup(() => abort.abort());
+  const [focusId, setFocusId] = createSignal("composer");
+  const controls = new Map<string, { layer: string; control: Renderable }>();
+  const [modal, setModal] = createSignal<Modal>(null);
+  const [status, setStatus] = createSignal("");
+  const [formText, setFormText] = createSignal("");
+  const [helpCommand, setHelpCommand] = createSignal<string>();
+  const [paste, setPaste] = createSignal("");
+  const [literalDraft, setLiteralDraft] = createSignal(false);
+  const [selectedMessage, setSelectedMessage] = createSignal<Message>();
+  const [reply, setReply] = createSignal<MessageId>();
+  const [results, setResults] = createSignal<readonly Message[]>([]);
+  const [searching, setSearching] = createSignal(false);
+  const [atBottom, setAtBottom] = createSignal(true);
+  const [terminalFocused, setTerminalFocused] = createSignal(false);
+  const [reveal, setReveal] = createSignal<MessageId>();
+  let composer: TextareaRenderable | undefined;
+  let transcript: ScrollBoxRenderable | undefined;
+  let draftGuard = false;
+  let previousConversation: ConversationId | undefined;
+  let pasteConversation: ConversationId | undefined;
+  let sendBusy = false;
+  let lastReport = "";
+  let returnFocus = "composer";
+  const histories = new Map<ConversationId, string[]>();
+  const literalConversations = new Set<ConversationId>();
+  let historyIndex = -1;
+  const active = createMemo(() =>
+    state().conversations.find((item) => item.id === state().activeConversationId),
+  );
+  const network = createMemo(
+    () => state().networks.find((item) => item.id === active()?.networkId) ?? state().networks[0],
+  );
+  const context = (): InputContext => ({
+    ...(network() ? { networkId: network()!.id } : {}),
+    ...(active() ? { conversationId: active()!.id } : {}),
+  });
+  const [timeline, setTimeline] = createSignal<TimelineSnapshot>();
+  createEffect(() => {
+    const id = active()?.id;
+    setTimeline(undefined);
+    if (!id) return;
+    const model = props.app.timeline(id);
+    if (!model.ok) {
+      setStatus(model.error.message);
+      return;
+    }
+    setTimeline(model.value.getSnapshot());
+    onCleanup(model.value.subscribe(() => setTimeline(model.value.getSnapshot())));
+  });
+  // App windows are bounded; impose a second hard cap on mounted layout work.
+  const messages = createMemo(() => timeline()?.messages.slice(-300) ?? []);
+  const focus = (id: string) => {
+    setFocusId(id);
+    controls.get(id)?.control.focus();
+  };
+  const closeModal = () => {
+    setModal(null);
+    setPaste("");
+    queueMicrotask(() => focus(returnFocus));
+  };
+  const openModal = (value: Modal) => {
+    if (!modal()) returnFocus = focusId();
+    setFormText("");
+    setModal(value);
+    queueMicrotask(() => {
+      const target =
+        value === "settings"
+          ? "network-name"
+          : ["join", "query", "switch", "search"].includes(value ?? "")
+            ? "dialog-input"
+            : "dialog-close";
+      focus(target);
+    });
+  };
+  const run = async (action: AppAction) => {
+    const result = await props.app.dispatch(action, abort.signal);
+    if (!result.ok) setStatus(result.error.message);
+    return result;
+  };
+  const quit = async () => {
+    if (props.onQuit) await props.onQuit();
+    else {
+      const result = await props.app.shutdown();
+      if (!result.ok) setStatus(result.error.message);
+      renderer.destroy();
+    }
+  };
+  const activate = (id: ConversationId) => {
+    void run({ type: "conversation.activate", conversationId: id });
+    closeModal();
+    focus("composer");
+  };
+  createEffect(() => {
+    const value = timeline();
+    if (!value || !composer) return;
+    const changed = previousConversation !== value.conversationId;
+    if (changed) {
+      draftGuard = true;
+      composer.setText(value.draft);
+      composer.gotoBufferEnd();
+      draftGuard = false;
+    }
+    if (changed) {
+      previousConversation = value.conversationId;
+      setReply(undefined);
+      setLiteralDraft(literalConversations.has(value.conversationId));
+      historyIndex = -1;
+      transcript?.scrollTo(transcript.scrollHeight);
+      setAtBottom(true);
+    }
+  });
+  const syncDraft = () => {
+    if (draftGuard || !composer || !active()) return;
+    const text = composer.plainText;
+    if (text.length > 32_768) {
+      setStatus("Draft limit is 32,768 characters. Remove some text before sending.");
+      return;
+    }
+    void run({ type: "draft.set", conversationId: active()!.id, text });
+  };
+  const send = async () => {
+    if (sendBusy || !composer || !active()) return;
+    const text = composer.plainText;
+    if (!text.trim()) return;
+    if (text.length > 32_768) {
+      setStatus("Draft limit is 32,768 characters.");
+      return;
+    }
+    const conversationId = active()!.id;
+    const intent = literalDraft()
+      ? {
+          ok: true as const,
+          value: {
+            type: "action" as const,
+            action: { type: "message.send" as const, conversationId, text, kind: "text" as const },
+          },
+        }
+      : props.commands.parse(text, context());
+    if (!intent.ok) {
+      setStatus(intent.error.message);
+      return;
+    }
+    switch (intent.value.type) {
+      case "action": {
+        sendBusy = true;
+        const action = intent.value.action;
+        const replyTo = reply();
+        const result = await run(
+          action.type === "message.send" && replyTo ? { ...action, replyTo } : action,
+        );
+        sendBusy = false;
+        if (result.ok) {
+          const previous = histories.get(conversationId) ?? [];
+          histories.set(conversationId, [...previous.slice(-49), text]);
+          historyIndex = -1;
+          // Do not erase edits made while the acceptance promise was pending.
+          if (active()?.id === conversationId && composer.plainText === text) {
+            composer.clear();
+            void run({ type: "draft.set", conversationId, text: "" });
+            setLiteralDraft(false);
+            literalConversations.delete(conversationId);
+            setReply(undefined);
+          }
+          setStatus("Accepted locally. Socket write and server echo are not delivery receipts.");
+        }
+        break;
+      }
+      case "help":
+        setHelpCommand(intent.value.command);
+        openModal("help");
+        break;
+      case "settings":
+        openModal("settings");
+        break;
+      case "quit":
+        openModal("quit");
+        break;
+    }
+  };
+  const insertPaste = () => {
+    if (!composer || pasteConversation !== active()?.id) {
+      setStatus("Conversation changed; paste cancelled.");
+      closeModal();
+      return;
+    }
+    // Even a pasted /command is a literal message. This flag survives editing until send/switch.
+    composer.insertText(paste());
+    setLiteralDraft(true);
+    if (active()) literalConversations.add(active()!.id);
+    syncDraft();
+    closeModal();
+    focus("composer");
+  };
+  usePaste((event) => {
+    if (modal() || focusId() !== "composer") return;
+    event.preventDefault();
+    const text = cleanPaste(new TextDecoder().decode(event.bytes));
+    if (text.length + (composer?.plainText.length ?? 0) > 32_768) {
+      setStatus("Paste exceeds the draft limit (32,768 characters).");
+      return;
+    }
+    pasteConversation = active()?.id;
+    if (text.includes("\n") || text.length > 512 || text.trimStart().startsWith("/")) {
+      setPaste(text);
+      openModal("paste");
+    } else {
+      composer?.insertText(text);
+      setLiteralDraft(true);
+      if (active()) literalConversations.add(active()!.id);
+      syncDraft();
+    }
+  });
+  const jumpLatest = async () => {
+    if (active() && timeline()?.atLatest === false)
+      await run({ type: "history.latest", conversationId: active()!.id });
+    transcript?.scrollTo(transcript.scrollHeight);
+  };
+  const search = async () => {
+    if (searching() || !formText().trim()) return;
+    setSearching(true);
+    const result = await props.app.search({ text: formText(), limit: 50 }, abort.signal);
+    setSearching(false);
+    if (!result.ok) setStatus(result.error.message);
+    else setResults(result.value.items);
+  };
+  const complete = () => {
+    if (!composer) return;
+    // Native buffer offsets count cells; extracting the prefix converts safely to UTF-16.
+    const cursor = composer.getTextRange(0, composer.cursorOffset).length;
+    const completion = props.commands.complete(composer.plainText, cursor, context())[0];
+    if (!completion) {
+      setStatus("No completions. Try /help for commands.");
+      return;
+    }
+    const text = composer.plainText;
+    const prefix = text.slice(0, completion.replace.start) + completion.insertText;
+    composer.replaceText(prefix + text.slice(completion.replace.end));
+    composer.cursorOffset = composer.editBuffer.measureText(prefix);
+    syncDraft();
+  };
+  useKeyboard((event) => {
+    if (event.ctrl && (event.name === "q" || event.name === "c")) {
+      event.preventDefault();
+      openModal("quit");
+      return;
+    }
+    if (event.name === "escape") {
+      event.preventDefault();
+      if (modal()) closeModal();
+      else {
+        setReply(undefined);
+        focus("composer");
+      }
+      return;
+    }
+    if (event.name === "tab") {
+      event.preventDefault();
+      if (!modal() && focusId() === "composer" && !event.shift) {
+        complete();
+        return;
+      }
+      const layer = modal() ? "modal" : "main";
+      const ids = [...controls].filter(([, item]) => item.layer === layer).map(([id]) => id);
+      const current = ids.indexOf(focusId());
+      const next = ids[(current + (event.shift ? -1 : 1) + ids.length) % ids.length];
+      if (next) focus(next);
+      return;
+    }
+    if (modal()) {
+      if (event.name === "return" && focusId() === "dialog-input") {
+        event.preventDefault();
+        if (modal() === "search") void search();
+        else if (modal() === "join" || modal() === "query") void submitTarget();
+        else if (modal() === "switch") {
+          const item = matchingConversations()[0];
+          if (item) activate(item.id);
+        }
+      }
+      return;
+    }
+    if (event.name === "f1") {
+      event.preventDefault();
+      setHelpCommand(undefined);
+      openModal("help");
+    } else if (event.ctrl && event.name === "k") {
+      event.preventDefault();
+      openModal("switch");
+    } else if (event.ctrl && event.name === "f") {
+      event.preventDefault();
+      setResults([]);
+      openModal("search");
+    } else if (event.ctrl && event.name === "j") {
+      event.preventDefault();
+      openModal("join");
+    } else if (event.ctrl && event.name === ",") {
+      event.preventDefault();
+      openModal("settings");
+    } else if (event.meta && (event.name === "up" || event.name === "down")) {
+      event.preventDefault();
+      const all = state().conversations;
+      const index = all.findIndex((item) => item.id === active()?.id);
+      const next = all[(index + (event.name === "up" ? -1 : 1) + all.length) % all.length];
+      if (next) activate(next.id);
+    } else if (event.name === "pageup" || event.name === "pagedown") {
+      event.preventDefault();
+      transcript?.scrollBy(event.name === "pageup" ? -1 : 1, "viewport");
+    } else if (event.ctrl && event.name === "end") {
+      event.preventDefault();
+      void jumpLatest();
+    } else if (
+      event.ctrl &&
+      (event.name === "up" || event.name === "down") &&
+      composer &&
+      active()
+    ) {
+      event.preventDefault();
+      const items = histories.get(active()!.id) ?? [];
+      if (!items.length) return;
+      historyIndex = Math.min(
+        items.length,
+        Math.max(0, historyIndex + (event.name === "up" ? 1 : -1)),
+      );
+      composer.replaceText(
+        historyIndex ? items[items.length - historyIndex]! : (timeline()?.draft ?? ""),
+      );
+      composer.gotoBufferEnd();
+      syncDraft();
+    }
+  });
+  const submitTarget = async () => {
+    const intent = props.commands.parse(
+      `/${modal() === "query" ? "query" : "join"} ${formText()}`,
+      context(),
+    );
+    if (!intent.ok) {
+      setStatus(intent.error.message);
+      return;
+    }
+    if (intent.value.type === "action") {
+      const result = await run(intent.value.action);
+      if (result.ok) closeModal();
+    }
+  };
+  const matchingConversations = () =>
+    state().conversations.filter((item) =>
+      item.name.toLowerCase().includes(formText().toLowerCase()),
+    );
+  onFocus(() => setTerminalFocused(true));
+  onBlur(() => setTerminalFocused(false));
+  onMount(() => {
+    focus("composer");
+    const timer = setInterval(() => {
+      if (!transcript || !active()) return;
+      const bottom =
+        transcript.scrollTop + transcript.viewport.height >= transcript.scrollHeight - 1;
+      setAtBottom(bottom);
+      const last = messages().at(-1)?.id;
+      const key = `${active()!.id}:${terminalFocused()}:${bottom}:${last}:${modal()}`;
+      if (lastReport === key) return;
+      lastReport = key;
+      void run({
+        type: "view.report",
+        conversationId: active()!.id,
+        focused: terminalFocused() && !modal(),
+        atBottom: bottom && timeline()?.atLatest !== false,
+        ...(bottom && timeline()?.atLatest !== false && last ? { lastVisibleMessageId: last } : {}),
+      });
+    }, 250);
+    onCleanup(() => clearInterval(timer));
+  });
+  createEffect(() => {
+    const id = reveal();
+    const mounted = messages();
+    if (id && mounted.some((message) => message.id === id))
+      queueMicrotask(() => transcript?.scrollChildIntoView(`message-${id}`));
+  });
+  const messageActions = () => {
+    const message = selectedMessage();
+    if (!message) return null;
+    const links = message.text.match(/https?:\/\/[^\s<>]+/gu) ?? [];
+    return (
+      <>
+        <text fg={colors.muted}>
+          {message.sender.nick} ·{" "}
+          {new Date(message.serverTime ?? message.receivedAt).toLocaleString()}
+        </text>
+        <text selectable fg={colors.text}>
+          {message.redacted ? "[message removed]" : message.text}
+        </text>
+        <Button
+          id="copy-message"
+          layer="modal"
+          label="Copy message text"
+          onPress={() => {
+            void props.external
+              .copyText(message.text, abort.signal)
+              .then((result) => setStatus(result.ok ? "Copied." : result.error.message));
+          }}
+        />
+        <Show when={network()?.features.replies && message.serverId && !message.redacted}>
+          <Button
+            id="reply-message"
+            layer="modal"
+            label="Reply to this message"
+            onPress={() => {
+              setReply(message.id);
+              closeModal();
+              focus("composer");
+            }}
+          />
+        </Show>
+        <Show when={network()?.features.reactions && message.serverId && !message.redacted}>
+          <Button
+            id="react-message"
+            layer="modal"
+            label="React +1"
+            onPress={() => {
+              void run({
+                type: "message.react",
+                messageId: message.id,
+                value: "👍",
+                remove: false,
+              });
+            }}
+          />
+        </Show>
+        <For each={links.slice(0, 8)}>
+          {(url, index) => (
+            <Button
+              id={`url-${index()}`}
+              layer="modal"
+              label={`Open in browser: ${url}`}
+              onPress={() => {
+                void props.external
+                  .openUrl(url, abort.signal)
+                  .then((result) =>
+                    setStatus(result.ok ? "Opened browser." : result.error.message),
+                  );
+              }}
+            />
+          )}
+        </For>
+        <text fg={colors.muted}>
+          Opening a link shares it with your default browser. No automatic previews are fetched.
+        </text>
+      </>
+    );
+  };
+  return (
+    <FocusContext.Provider
+      value={{
+        current: focusId,
+        set: focus,
+        register(id, layer, control) {
+          controls.set(id, { layer, control });
+          return () => {
+            if (controls.get(id)?.control === control) controls.delete(id);
+          };
+        },
+      }}
+    >
+      <box width="100%" height="100%" flexDirection="column" backgroundColor={colors.bg}>
+        <box
+          height={3}
+          flexShrink={0}
+          paddingX={1}
+          flexDirection="row"
+          alignItems="center"
+          justifyContent="space-between"
+          backgroundColor={colors.panel}
+        >
+          <text fg={colors.accent}>
+            <b>OpenIRC</b> a little closer to your community
+          </text>
+          <box flexDirection="row">
+            <Button
+              id="search"
+              label="Search"
+              onPress={() => {
+                setResults([]);
+                openModal("search");
+              }}
+            />
+            <Button id="settings" label="Settings" onPress={() => openModal("settings")} />
+            <Button
+              id="help"
+              label="Help"
+              onPress={() => {
+                setHelpCommand(undefined);
+                openModal("help");
+              }}
+            />
+            <Button id="quit" label="Quit" onPress={() => openModal("quit")} />
+          </box>
+        </box>
+        <box flexDirection="row" flexGrow={1} minHeight={0}>
+          <scrollbox
+            width={dimensions().width < 65 ? 18 : (settings()?.tui.sidebarWidth ?? 26)}
+            flexShrink={0}
+            backgroundColor={colors.panel}
+            contentOptions={{ flexDirection: "column", paddingX: 1 }}
+            scrollX={false}
+          >
+            <For each={state().networks}>
+              {(net) => (
+                <>
+                  <box height={2} paddingTop={1} flexShrink={0}>
+                    <text fg={colors.accent}>
+                      <b>{net.name}</b>
+                    </text>
+                  </box>
+                  <text fg={net.phase === "ready" ? colors.green : colors.muted}>
+                    {net.secure ? "TLS" : "Plaintext"} · {net.phase}
+                  </text>
+                  <Show when={net.lastError}>
+                    <text fg={colors.error}>{net.lastError?.message}</text>
+                  </Show>
+                  <Button
+                    id={`connect-${net.id}`}
+                    label={net.phase === "disconnected" ? "Connect" : "Disconnect"}
+                    onPress={() => {
+                      void run({
+                        type:
+                          net.phase === "disconnected" ? "network.connect" : "network.disconnect",
+                        networkId: net.id,
+                      });
+                    }}
+                  />
+                  <For each={["channel", "direct", "status"] as const}>
+                    {(kind) => (
+                      <>
+                        <text fg={colors.muted}>
+                          {kind === "channel"
+                            ? "CHANNELS"
+                            : kind === "direct"
+                              ? "DIRECT MESSAGES"
+                              : "NETWORK"}
+                        </text>
+                        <For
+                          each={state().conversations.filter(
+                            (item) => item.networkId === net.id && item.kind === kind,
+                          )}
+                        >
+                          {(conversation) => (
+                            <Button
+                              id={`conversation-${conversation.id}`}
+                              label={`${conversation.name}${conversation.mentionCount ? ` !${conversation.mentionCount}` : conversation.unreadCount ? ` (${conversation.unreadCount})` : ""}${conversation.muted ? " [muted]" : ""}`}
+                              active={active()?.id === conversation.id}
+                              onPress={() => activate(conversation.id)}
+                            />
+                          )}
+                        </For>
+                      </>
+                    )}
+                  </For>
+                </>
+              )}
+            </For>
+            <box height={1} />
+            <Button id="join" label="+ Join channel" onPress={() => openModal("join")} />
+            <Button id="query" label="+ Message someone" onPress={() => openModal("query")} />
+            <Button id="add-network" label="+ Add network" onPress={() => openModal("settings")} />
+            <Button id="switch" label="Switch [Ctrl+K]" onPress={() => openModal("switch")} />
+          </scrollbox>
+          <box flexGrow={1} minWidth={0} flexDirection="column">
+            <box
+              height={4}
+              flexShrink={0}
+              paddingX={2}
+              paddingTop={1}
+              border={false}
+              backgroundColor={colors.raised}
+            >
+              <text fg={colors.text}>
+                <b>{active()?.name ?? "Welcome to OpenIRC"}</b>{" "}
+                {network()?.nick ? `as ${network()!.nick}` : ""}
+              </text>
+              <text fg={colors.muted}>
+                {active()?.topic ||
+                  (active()
+                    ? `${network()?.name ?? ""} · ${network()?.phase ?? "disconnected"}`
+                    : "Add a network, connect securely, and join a channel.")}
+              </text>
+            </box>
+            <Show
+              when={active()}
+              fallback={
+                <box flexGrow={1} padding={3} flexDirection="column" gap={1}>
+                  <text fg={colors.accent}>
+                    <b>Your next conversation starts here.</b>
+                  </text>
+                  <text fg={colors.text}>1. Add your IRC network in Settings.</text>
+                  <text fg={colors.text}>2. Choose Connect beside the network.</text>
+                  <text fg={colors.text}>3. Join a channel or message a nickname.</text>
+                  <text fg={colors.muted}>
+                    History is stored locally when enabled. Review retention and privacy in Settings
+                    before connecting.
+                  </text>
+                  <Button
+                    id="welcome-setup"
+                    label="Set up a network"
+                    onPress={() => openModal("settings")}
+                  />
+                </box>
+              }
+            >
+              <box height={1} flexShrink={0} flexDirection="row">
+                <Button
+                  id="older"
+                  label={timeline()?.loadingOlder ? "Loading…" : "Load older"}
+                  disabled={!!timeline()?.loadingOlder}
+                  onPress={() => {
+                    if (active())
+                      void run({
+                        type: "history.load-older",
+                        conversationId: active()!.id,
+                        ...(timeline()?.olderCursor ? { cursor: timeline()!.olderCursor } : {}),
+                      });
+                  }}
+                />
+                <Button
+                  id="mute"
+                  label={active()?.muted ? "Unmute" : "Mute"}
+                  onPress={() => {
+                    if (active())
+                      void run({
+                        type: "conversation.mute",
+                        conversationId: active()!.id,
+                        muted: !active()!.muted,
+                      });
+                  }}
+                />
+                <Button
+                  id="leave"
+                  label="Close conversation"
+                  onPress={() => {
+                    if (active())
+                      void run({ type: "conversation.close", conversationId: active()!.id });
+                  }}
+                />
+              </box>
+              <scrollbox
+                ref={(element) => (transcript = element)}
+                flexGrow={1}
+                minHeight={0}
+                scrollX={false}
+                stickyScroll
+                stickyStart="bottom"
+                contentOptions={{
+                  flexDirection: "column",
+                  paddingX: 2,
+                  gap: settings()?.tui.density === "compact" ? 0 : 1,
+                }}
+              >
+                <Show when={(timeline()?.messages.length ?? 0) > 300}>
+                  <text fg={colors.muted}>
+                    Showing the latest 300 messages to keep terminal layout bounded. Use Search to
+                    reveal older context.
+                  </text>
+                </Show>
+                <For each={messages()}>
+                  {(message) => (
+                    <box
+                      id={`message-${message.id}`}
+                      flexDirection="column"
+                      flexShrink={0}
+                      onMouseUp={() => {
+                        setSelectedMessage(message);
+                        openModal("message");
+                      }}
+                    >
+                      <Show when={timeline()?.firstUnreadId === message.id}>
+                        <text fg={colors.accent}>──────── New messages ────────</text>
+                      </Show>
+                      <text fg={colors.muted}>
+                        <b>{message.sender.nick}</b>{" "}
+                        {new Date(message.serverTime ?? message.receivedAt).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                        {message.source === "playback" ? " · history" : ""}
+                        {message.sendState ? ` · ${message.sendState}` : ""}
+                      </text>
+                      <Show when={message.replyTo}>
+                        <text fg={colors.muted}>
+                          ↳ reply to {message.replyTo?.localId ?? "earlier message"}
+                        </text>
+                      </Show>
+                      <text
+                        selectable
+                        fg={
+                          message.kind === "event"
+                            ? colors.muted
+                            : message.sendState === "failed" || message.sendState === "uncertain"
+                              ? colors.error
+                              : colors.text
+                        }
+                      >
+                        {message.redacted
+                          ? "[message removed]"
+                          : `${message.kind === "action" ? "* " : ""}${message.text}`}
+                      </text>
+                      <Show when={message.reactions.length}>
+                        <text fg={colors.accent}>
+                          {message.reactions
+                            .map((reaction) => `${reaction.value} ${reaction.count}`)
+                            .join("  ")}
+                        </text>
+                      </Show>
+                    </box>
+                  )}
+                </For>
+              </scrollbox>
+              <Show when={!atBottom() || timeline()?.atLatest === false}>
+                <Button
+                  id="latest"
+                  label="Jump to latest [Ctrl+End]"
+                  onPress={() => void jumpLatest()}
+                />
+              </Show>
+              <Show when={settings()?.tui.memberList && dimensions().width > 100}>
+                <text fg={colors.muted}>
+                  People:{" "}
+                  {timeline()
+                    ?.members.slice(0, 30)
+                    .map((member) => member.nick)
+                    .join(", ")}
+                </text>
+              </Show>
+              <Show when={timeline()?.typing.length}>
+                <text fg={colors.muted}>Someone is typing…</text>
+              </Show>
+              <Show when={reply()}>
+                <text fg={colors.accent}>Replying to a message · Esc to cancel</text>
+              </Show>
+              <box
+                height={6}
+                flexShrink={0}
+                paddingX={1}
+                paddingTop={1}
+                backgroundColor={colors.panel}
+                flexDirection="column"
+              >
+                <textarea
+                  ref={(element) => {
+                    composer = element;
+                    controls.set("composer", { layer: "main", control: element });
+                  }}
+                  height={3}
+                  flexGrow={1}
+                  focused={!modal() && focusId() === "composer"}
+                  onMouseDown={() => focus("composer")}
+                  initialValue={untrack(() => timeline()?.draft ?? "")}
+                  placeholder="Write a message… /help for commands"
+                  wrapMode="word"
+                  backgroundColor={colors.raised}
+                  focusedBackgroundColor={colors.raised}
+                  textColor={colors.text}
+                  onContentChange={syncDraft}
+                  keyBindings={[
+                    { name: "return", action: "submit" },
+                    { name: "return", shift: true, action: "newline" },
+                  ]}
+                  onSubmit={() => void send()}
+                />
+                <box height={1} flexDirection="row" justifyContent="space-between">
+                  <text fg={colors.muted}>
+                    {literalDraft() ? "Pasted text sends literally · " : ""}Enter send · Shift+Enter
+                    newline · Tab complete
+                  </text>
+                  <Button id="send" label="Send" onPress={() => void send()} />
+                </box>
+              </box>
+            </Show>
+          </box>
+        </box>
+        <box height={2} flexShrink={0} paddingX={1} backgroundColor={colors.panel}>
+          <text
+            fg={
+              status() || operations().some((operation) => operation.state === "failed")
+                ? colors.error
+                : colors.muted
+            }
+          >
+            {status() ||
+              [...operations()].reverse().find((operation) => operation.state === "failed")?.error
+                ?.message ||
+              state().error?.message ||
+              "Ctrl+K switch · Ctrl+F search · Ctrl+J join · F1 help · Ctrl+Q quit"}
+          </text>
+        </box>
+        <Show when={modal()}>
+          <Dialog
+            title={
+              modal() === "settings"
+                ? "Settings · Add network"
+                : modal() === "paste"
+                  ? "Review paste — nothing has been sent"
+                  : modal() === "message"
+                    ? "Message actions"
+                    : modal() === "quit"
+                      ? "Disconnect and quit?"
+                      : `${modal()?.toUpperCase()}`
+            }
+            width={dimensions().width}
+            height={dimensions().height}
+            onClose={closeModal}
+          >
+            <Show when={modal() === "settings"}>
+              <Show
+                when={settings()}
+                fallback={
+                  <text fg={colors.error}>
+                    Settings are unavailable. Check the startup error before adding a network.
+                  </text>
+                }
+              >
+                <SettingsForm
+                  app={props.app}
+                  document={settings()!}
+                  signal={abort.signal}
+                  focus={(id) => {
+                    closeModal();
+                    focus(id);
+                  }}
+                  status={setStatus}
+                />
+              </Show>
+            </Show>
+            <Show when={modal() === "help"}>
+              <text fg={colors.muted}>
+                Tab moves focus (in composer: complete; Shift+Tab leaves). Alt+Up/Down switches
+                conversation. Ctrl+Up/Down recalls sent inputs. PgUp/PgDown scrolls. Mouse: click a
+                message for copy, links, and supported actions.
+              </text>
+              <For each={props.commands.help(helpCommand())}>
+                {(entry) => (
+                  <text fg={colors.text}>
+                    <b>{entry.usage}</b> {entry.description}
+                  </text>
+                )}
+              </For>
+            </Show>
+            <Show when={modal() === "join" || modal() === "query"}>
+              <text fg={colors.muted}>
+                Network: {network()?.name ?? "add a network in Settings first"}
+              </text>
+              <Field
+                id="dialog-input"
+                label={modal() === "join" ? "Channel name" : "Nickname"}
+                value={formText()}
+                onInput={setFormText}
+                placeholder={modal() === "join" ? "#welcome" : "nickname"}
+              />
+              <Button
+                id="target-submit"
+                layer="modal"
+                label={modal() === "join" ? "Join channel" : "Start conversation"}
+                onPress={() => void submitTarget()}
+              />
+            </Show>
+            <Show when={modal() === "switch"}>
+              <Field
+                id="dialog-input"
+                label="Find a conversation"
+                value={formText()}
+                onInput={setFormText}
+              />
+              <For each={matchingConversations()}>
+                {(item) => (
+                  <Button
+                    id={`switch-${item.id}`}
+                    layer="modal"
+                    label={item.name}
+                    onPress={() => activate(item.id)}
+                  />
+                )}
+              </For>
+            </Show>
+            <Show when={modal() === "search"}>
+              <Field
+                id="dialog-input"
+                label="Search local history (all conversations)"
+                value={formText()}
+                onInput={setFormText}
+              />
+              <Button
+                id="search-submit"
+                layer="modal"
+                label={searching() ? "Searching…" : "Search"}
+                disabled={searching()}
+                onPress={() => void search()}
+              />
+              <text fg={colors.muted}>Up to 50 results. Select one to reveal context.</text>
+              <For each={results()}>
+                {(message) => (
+                  <Button
+                    id={`result-${message.id}`}
+                    layer="modal"
+                    label={`${message.sender.nick}: ${message.text}`}
+                    onPress={() => {
+                      void run({ type: "history.reveal", messageId: message.id }).then((result) => {
+                        if (result.ok) {
+                          setReveal(message.id);
+                          closeModal();
+                        }
+                      });
+                    }}
+                  />
+                )}
+              </For>
+            </Show>
+            <Show when={modal() === "paste"}>
+              <text fg={colors.muted}>
+                This paste will be inserted into the draft as literal text, not executed as slash
+                commands. You must still press Send.
+              </text>
+              <text selectable fg={colors.text}>
+                {paste().slice(0, 4_000)}
+                {paste().length > 4_000 ? "\n[preview truncated]" : ""}
+              </text>
+              <Button
+                id="paste-insert"
+                layer="modal"
+                label="Insert into draft (do not send)"
+                onPress={insertPaste}
+              />
+            </Show>
+            <Show when={modal() === "message"}>{messageActions()}</Show>
+            <Show when={modal() === "quit"}>
+              <text fg={colors.text}>
+                OpenIRC will close its connections and flush local history. It does not remain
+                connected in the background.
+              </text>
+              <Button
+                id="quit-confirm"
+                layer="modal"
+                label="Disconnect and quit"
+                onPress={() => void quit()}
+              />
+            </Show>
+            <Show when={status()}>
+              <text fg={colors.error}>{status()}</text>
+            </Show>
+          </Dialog>
+        </Show>
+      </box>
+    </FocusContext.Provider>
+  );
+}
