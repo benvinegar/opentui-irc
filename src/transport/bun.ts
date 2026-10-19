@@ -1,4 +1,7 @@
-import { checkServerIdentity } from "node:tls";
+import { connect as connectTcp, isIP } from "node:net";
+import type { Socket } from "node:net";
+import { checkServerIdentity, connect as connectTls } from "node:tls";
+import type { TLSSocket } from "node:tls";
 import type { AppError, Result } from "../contracts/common";
 import type { ByteConnection, TransportFactory } from "../contracts/transport";
 
@@ -11,7 +14,7 @@ const error = (code: AppError["code"], message: string): AppError => ({
   retryable: code === "network",
 });
 
-/** Bun's unbuffered partial writes are drained explicitly; no hidden reconnect or TLS bypass. */
+/** Uses Bun's Node-compatible sockets: unlike Bun.connect, these expose a cancellable socket before open. */
 export function createBunTransport(): TransportFactory {
   return {
     async connect(options, lifetime) {
@@ -28,23 +31,23 @@ export function createBunTransport(): TransportFactory {
         options.timeoutMs < 1 ||
         options.timeoutMs > 300_000 ||
         typeof options.tls !== "boolean"
-      ) {
+      )
         return {
           ok: false,
           error: error("invalid-input", "Invalid connection endpoint or timeout."),
         };
-      }
-      let socket: Bun.Socket | undefined;
+      let socket: Socket | undefined;
       let ended = false;
       let readError: AppError | undefined;
       let connected = false;
       let incomingBytes = 0;
       let pendingBytes = 0;
+      let activeWrite = false;
+      let blocked = false;
       let wake: (() => void) | undefined;
       const chunks: Uint8Array[] = [];
       const writes: {
         bytes: Uint8Array;
-        offset: number;
         resolve: (result: Result<void>) => void;
         signal: AbortSignal;
         abort: () => void;
@@ -78,11 +81,8 @@ export function createBunTransport(): TransportFactory {
             ok: false,
             error: failure ?? error("network", "Connection closed before opening."),
           });
-        try {
-          socket?.terminate();
-        } catch {
-          /* All consumers are already unblocked. */
-        }
+        // destroy also cancels the pre-open connect; late connect/secureConnect handlers cannot expose it.
+        socket?.destroy();
       }
       const abort = () => stop(error("cancelled", "Connection cancelled."));
       const timer = setTimeout(
@@ -91,26 +91,27 @@ export function createBunTransport(): TransportFactory {
       );
       lifetime.addEventListener("abort", abort, { once: true });
       function drain() {
-        if (!socket || ended) return;
-        while (writes.length) {
-          const write = writes[0]!;
-          let count: number;
-          try {
-            count = socket.write(write.bytes.subarray(write.offset));
-          } catch {
-            stop(error("network", "Socket write failed."));
-            return;
-          }
-          if (count < 0) {
-            stop(error("network", "Socket closed during write."));
-            return;
-          }
-          write.offset += count;
-          pendingBytes -= count;
-          if (write.offset !== write.bytes.length) return;
-          writes.shift();
-          write.signal.removeEventListener("abort", write.abort);
-          write.resolve(success());
+        if (!socket || ended || activeWrite || blocked || !writes.length) return;
+        const write = writes[0]!;
+        activeWrite = true;
+        try {
+          const accepted = socket.write(write.bytes, (failure?: Error | null) => {
+            if (ended) return;
+            if (failure) {
+              stop(error("network", "Socket write failed."));
+              return;
+            }
+            activeWrite = false;
+            writes.shift();
+            pendingBytes -= write.bytes.length;
+            write.signal.removeEventListener("abort", write.abort);
+            write.resolve(success());
+            // The write callback can run before drain. Never bypass the writable high-water mark.
+            queueMicrotask(drain);
+          });
+          if (!accepted) blocked = true;
+        } catch {
+          stop(error("network", "Socket write failed."));
         }
       }
       let consumed = false;
@@ -153,7 +154,7 @@ export function createBunTransport(): TransportFactory {
           if (!bytes.byteLength) return Promise.resolve(success());
           return new Promise<Result<void>>((resolve) => {
             const onAbort = () => stop(error("cancelled", "Write cancelled; connection closed."));
-            writes.push({ bytes: bytes.slice(), offset: 0, resolve, signal, abort: onAbort });
+            writes.push({ bytes: bytes.slice(), resolve, signal, abort: onAbort });
             pendingBytes += bytes.byteLength;
             signal.addEventListener("abort", onAbort, { once: true });
             drain();
@@ -164,99 +165,104 @@ export function createBunTransport(): TransportFactory {
           return success();
         },
       };
+      const opened = () => {
+        if (ended) {
+          socket?.destroy();
+          return;
+        }
+        clearTimeout(timer);
+        connected = true;
+        settleConnect({ ok: true, value: connection });
+        drain();
+      };
+      const onData = (data: Buffer) => {
+        if (ended) return;
+        if (data.byteLength > MAX_BYTES - incomingBytes || chunks.length >= 4096) {
+          stop(error("network", "Transport input buffer overflow."));
+          return;
+        }
+        const copy = new Uint8Array(data).slice();
+        chunks.push(copy);
+        incomingBytes += copy.length;
+        notify();
+      };
+      const onDrain = () => {
+        blocked = false;
+        drain();
+      };
+      const onEnd = () => stop();
+      const onError = (failure: NodeJS.ErrnoException) => {
+        const networkFailure = [
+          "ECONNREFUSED",
+          "ECONNRESET",
+          "ENOTFOUND",
+          "EAI_AGAIN",
+          "ETIMEDOUT",
+          "ENETUNREACH",
+          "EHOSTUNREACH",
+        ].includes(failure.code ?? "");
+        stop(
+          error(
+            options.tls && !connected && !networkFailure ? "tls" : "network",
+            options.tls && !connected && !networkFailure
+              ? "TLS verification or handshake failed."
+              : "Socket connection failed.",
+          ),
+        );
+      };
+      const onClose = () => {
+        stop();
+        socket?.removeListener("data", onData);
+        socket?.removeListener("drain", onDrain);
+        socket?.removeListener("end", onEnd);
+        socket?.removeListener("error", onError);
+        socket?.removeListener("close", onClose);
+        socket?.removeListener("connect", opened);
+        socket?.removeListener("secureConnect", secureOpened);
+      };
+      let tlsSocket: TLSSocket | undefined;
+      const secureOpened = () => {
+        if (ended) {
+          socket?.destroy();
+          return;
+        }
+        try {
+          if (
+            !tlsSocket?.authorized ||
+            checkServerIdentity(options.host, tlsSocket.getPeerCertificate())
+          ) {
+            stop(error("tls", "TLS certificate or hostname verification failed."));
+            return;
+          }
+          opened();
+        } catch {
+          stop(error("tls", "TLS certificate or hostname verification failed."));
+        }
+      };
       try {
-        void Bun.connect({
-          hostname: options.host,
-          port: options.port,
-          ...(options.tls ? { tls: { rejectUnauthorized: true, serverName: options.host } } : {}),
-          socket: {
-            open(opened) {
-              socket = opened;
-              if (ended) {
-                opened.terminate();
-                return;
-              }
-              if (!options.tls) {
-                clearTimeout(timer);
-                connected = true;
-                settleConnect({ ok: true, value: connection });
-                drain();
-              }
-            },
-            handshake(opened, authorized, authorizationError) {
-              socket = opened;
-              if (ended) {
-                opened.terminate();
-                return;
-              }
-              try {
-                if (
-                  !authorized ||
-                  authorizationError ||
-                  !opened.authorized ||
-                  checkServerIdentity(options.host, opened.getPeerCertificate())
-                ) {
-                  stop(error("tls", "TLS certificate or hostname verification failed."));
-                  return;
-                }
-                clearTimeout(timer);
-                connected = true;
-                settleConnect({ ok: true, value: connection });
-                drain();
-              } catch {
-                stop(error("tls", "TLS certificate or hostname verification failed."));
-              }
-            },
-            data(opened, data) {
-              socket = opened;
-              if (ended) return;
-              if (data.byteLength > MAX_BYTES - incomingBytes || chunks.length >= 4096) {
-                stop(error("network", "Transport input buffer overflow."));
-                return;
-              }
-              const copy = new Uint8Array(data).slice();
-              chunks.push(copy);
-              incomingBytes += copy.length;
-              notify();
-            },
-            drain() {
-              drain();
-            },
-            end() {
-              stop();
-            },
-            close() {
-              stop();
-            },
-            error() {
-              stop(
-                error(
-                  options.tls && !connected ? "tls" : "network",
-                  options.tls && !connected
-                    ? "TLS verification or handshake failed."
-                    : "Socket read failed.",
-                ),
-              );
-            },
-            connectError() {
-              stop(error("network", "Unable to connect to server."));
-            },
-          },
-        })
-          .then((opened) => {
-            socket = opened;
-            if (ended) opened.terminate();
-          })
-          .catch(() =>
-            stop(
-              error(
-                options.tls ? "tls" : "network",
-                options.tls
-                  ? "TLS verification or connection failed."
-                  : "Unable to connect to server.",
-              ),
-            ),
-          );
+        if (options.tls) {
+          tlsSocket = connectTls({
+            host: options.host,
+            port: options.port,
+            ...(isIP(options.host) === 0 ? { servername: options.host } : {}),
+            rejectUnauthorized: true,
+            checkServerIdentity,
+          });
+          socket = tlsSocket;
+          socket.once("secureConnect", secureOpened);
+        } else {
+          socket = connectTcp({ host: options.host, port: options.port });
+          socket.once("connect", opened);
+        }
+        socket.on("data", onData);
+        socket.on("drain", onDrain);
+        socket.once("end", onEnd);
+        socket.on("error", onError);
+        socket.once("close", onClose);
+        if (ended || lifetime.aborted) {
+          if (!ended) abort();
+          socket.destroy();
+        }
       } catch {
         stop(error("network", "Unable to create connection."));
       }
