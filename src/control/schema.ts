@@ -287,7 +287,10 @@ export function configurationSchema(): JsonObject {
           type: "object",
           maxProperties: 200,
           default: {},
-          propertyNames: identifier,
+          propertyNames: {
+            ...identifier,
+            not: { enum: ["__proto__", "prototype", "constructor"] },
+          },
           additionalProperties: array(identifier, 10, { uniqueItems: true }),
           "x-runtime-validation":
             "Global case-insensitive shortcut uniqueness; prototype-related keys are forbidden by control input validation.",

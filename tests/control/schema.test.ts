@@ -26,6 +26,7 @@ function resolve(root: JsonObject, shape: JsonObject): JsonObject {
 // Runtime-only relational/string constraints are explicitly documented, not pretended to be JSON Schema.
 function matches(root: JsonObject, value: unknown, shape: JsonObject): boolean {
   if (typeof shape.$ref === "string" && !matches(root, value, resolve(root, shape))) return false;
+  if (object(shape.not) && matches(root, value, shape.not)) return false;
   if (shape.const !== undefined && value !== shape.const) return false;
   if (Array.isArray(shape.enum) && !shape.enum.includes(value)) return false;
   const typeMatches = (type: unknown) =>
@@ -316,6 +317,10 @@ describe("configuration discovery schema", () => {
     expect(control.validation).toContain("UTF-16");
     expect(control.validation).toContain("foreign keys");
     expect(control.reconnect).toContain("never silently reconnect");
+    for (const key of ["__proto__", "prototype", "constructor"])
+      expect(
+        matches(schema, { ...settings.tui, keybindings: { [key]: [] } }, definition(schema, "tui")),
+      ).toBe(false);
     for (const value of ["env:SECRET\n", "env:SECRET\r", "env:SECRET\t"])
       expect(matches(schema, value, definition(schema, "secretReference"))).toBe(false);
   });
