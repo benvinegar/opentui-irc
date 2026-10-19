@@ -1,20 +1,41 @@
 import type {
   ControlError,
   ControlHandler,
+  ControlMethod,
   ControlRequest,
   ControlResponse,
 } from "../contracts/control";
+import { CONTROL_METHODS } from "../contracts/control";
 import type { SecretProvider, SettingsRepository } from "../contracts/settings";
 import { createSettingsRepository } from "../storage/settings";
 import { createControlService } from "./service";
-import { parseControlRequest } from "./protocol";
-import { acquireControlLease, createControlClient, probeControlServer } from "./socket";
+import { isJsonObject, parseControlRequest } from "./protocol";
+import {
+  acquireControlLease,
+  createControlClient,
+  DEFAULT_CONTROL_LIMITS,
+  probeControlServer,
+} from "./socket";
 
 export interface ControlExecutorOptions {
   readonly configDirectory: string;
   readonly secrets: SecretProvider;
+  /** RPC deadline only; an admitted offline save is always awaited while holding its lease. */
+  readonly timeoutMs?: number;
   readonly settingsFactory?: (directory: string) => SettingsRepository;
 }
+
+const OFFLINE_METHODS: readonly ControlMethod[] = [
+  "capabilities",
+  "status",
+  "config.schema",
+  "config.get",
+  "config.plan",
+  "config.apply",
+  "config.reload",
+  "networks.list",
+  "secrets.store",
+];
 
 /** Prefer the authoritative running app. Only provably offline profiles permit direct writes. */
 export function createControlExecutor(options: ControlExecutorOptions) {
@@ -24,16 +45,21 @@ export function createControlExecutor(options: ControlExecutorOptions) {
     signal: AbortSignal,
     context: { readonly configDirectory?: string } = {},
   ): Promise<ControlResponse> => {
+    let responseId = "invalid";
     const rejected = (error: ControlError): ControlResponse => ({
       version: 1,
-      id: request.id,
+      id: responseId,
       ok: false,
       error,
     });
     try {
       const parsed = parseControlRequest(request);
       if (!parsed.ok) return rejected(parsed.error);
-      if (Buffer.byteLength(JSON.stringify(request)) > 1048576)
+      responseId = parsed.value.id;
+      if (
+        Buffer.byteLength(JSON.stringify(parsed.value)) + 1 >
+        DEFAULT_CONTROL_LIMITS.maxRequestBytes
+      )
         return rejected({
           code: "invalid-input",
           message: "Control request exceeds the size limit.",
@@ -43,10 +69,10 @@ export function createControlExecutor(options: ControlExecutorOptions) {
       const probe = await probeControlServer(directory, signal);
       if (!probe.ok) return rejected(probe.error);
       if (probe.value === "live") {
-        const response = await createControlClient({ configDirectory: directory }).request(
-          request,
-          signal,
-        );
+        const response = await createControlClient({
+          configDirectory: directory,
+          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        }).request(parsed.value, signal);
         return response.ok ? response.value : rejected(response.error);
       }
       if (probe.value === "busy")
@@ -65,6 +91,12 @@ export function createControlExecutor(options: ControlExecutorOptions) {
             message: "Control request cancelled.",
             retryable: false,
           });
+        if (!OFFLINE_METHODS.includes(parsed.value.method))
+          return rejected({
+            code: "unavailable",
+            message: "This command needs a running OpenIRC instance. No offline changes were made.",
+            retryable: false,
+          });
         const cacheKey = acquired.value.paths.directory;
         let service = offline.get(cacheKey);
         if (!service) {
@@ -80,7 +112,40 @@ export function createControlExecutor(options: ControlExecutorOptions) {
             if (oldest) offline.delete(oldest);
           }
         }
-        return await service(request, signal);
+        const response = await service(parsed.value, signal);
+        if (
+          parsed.value.method === "capabilities" &&
+          response.ok &&
+          isJsonObject(response.result)
+        ) {
+          return {
+            ...response,
+            result: {
+              ...response.result,
+              methods: [...OFFLINE_METHODS],
+              liveOnlyMethods: CONTROL_METHODS.filter(
+                (method) => !OFFLINE_METHODS.includes(method),
+              ),
+            },
+          };
+        }
+        if (
+          (parsed.value.method === "config.plan" || parsed.value.method === "config.apply") &&
+          response.ok &&
+          isJsonObject(response.result)
+        ) {
+          // Plans describe live policy effects. Offline saves persist configuration
+          // only; they do not update a renderer, connect, prune history or clear drafts.
+          return {
+            ...response,
+            result: {
+              ...response.result,
+              mode: "offline",
+              runtimeEffectsApplied: false,
+            },
+          };
+        }
+        return response;
       } finally {
         await acquired.value.release();
       }
