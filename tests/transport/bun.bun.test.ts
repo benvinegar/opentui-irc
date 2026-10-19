@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createBunTransport } from "../../src/transport/bun";
+import { createServer } from "node:net";
+import type { Socket } from "node:net";
 
 const transport = createBunTransport();
 const connect = (port: number, signal = new AbortController().signal) =>
@@ -90,6 +92,58 @@ describe("Bun TCP transport (local only)", () => {
         )
       ).ok,
     ).toBe(false);
+  });
+  test("backpressure bounds concurrent partial writes and abort releases pending writers", async () => {
+    const sockets = new Set<Socket>();
+    const server = createServer((socket) => {
+      sockets.add(socket);
+      socket.pause();
+      socket.on("error", () => {});
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Local fixture missing port");
+    const controller = new AbortController();
+    try {
+      const result = await connect(address.port);
+      if (!result.ok) throw new Error("Local connection failed");
+      const pending = Array.from({ length: 256 }, () =>
+        result.value.write(new Uint8Array(65536), controller.signal),
+      );
+      controller.abort();
+      const outcomes = await Promise.all(pending);
+      expect(outcomes.some((outcome) => !outcome.ok && outcome.error.code === "rate-limited")).toBe(
+        true,
+      );
+      expect(outcomes.some((outcome) => !outcome.ok && outcome.error.code === "cancelled")).toBe(
+        true,
+      );
+      expect((await result.value.close()).ok).toBe(true);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+  test("TLS handshake cancellation/timeout close a stalled local socket", async () => {
+    const listener = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+    try {
+      const controller = new AbortController();
+      const pending = transport.connect(
+        { host: "127.0.0.1", port: listener.port, tls: true, timeoutMs: 1000 },
+        controller.signal,
+      );
+      await Bun.sleep(5);
+      controller.abort();
+      const aborted = await pending;
+      expect(!aborted.ok && aborted.error.code).toBe("cancelled");
+      const timed = await transport.connect(
+        { host: "127.0.0.1", port: listener.port, tls: true, timeoutMs: 10 },
+        new AbortController().signal,
+      );
+      expect(!timed.ok && timed.error.message).toContain("timed out");
+    } finally {
+      listener.stop(true);
+    }
   });
   test("rejects excess queued bytes without retaining caller memory", async () => {
     const listener = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });

@@ -1,7 +1,7 @@
 /* eslint-disable no-control-regex -- Validate wire identifiers before publishing sanitized semantic events. */
 import type { AppError, Clock, OperationId, Result } from "../../contracts/common";
 import type { UserDetails } from "../../contracts/discovery";
-import type { ConnectionPhase, FeatureSet } from "../../contracts/model";
+import type { ConnectionPhase } from "../../contracts/model";
 import type { IrcCodec, IrcFrame, ProtocolLimits, ProtocolSupport } from "../../contracts/protocol";
 import type {
   IrcSession,
@@ -16,8 +16,16 @@ import type { ByteConnection, TransportFactory } from "../../contracts/transport
 import { foldIdentifier } from "../../domain/irc-identifiers";
 import { createIrcCodec } from "../codec";
 import { atom, content, eventStream, failure, ok, plain, problem } from "./primitives";
+import {
+  ModernSession,
+  modernCapabilities,
+  modernPolicyDefaults,
+  modernProtocol,
+  validServerId,
+} from "./modern";
+import type { ModernPolicy } from "./modern";
 
-export interface SessionPolicy {
+export interface SessionPolicy extends ModernPolicy {
   readonly connectTimeoutMs: number;
   readonly registrationTimeoutMs: number;
   readonly capTimeoutMs: number;
@@ -48,6 +56,7 @@ export const defaultProtocolLimits: ProtocolLimits = {
   maxBufferedBytes: 16_384,
 };
 export const defaultSessionPolicy: SessionPolicy = {
+  ...modernPolicyDefaults,
   connectTimeoutMs: 15_000,
   registrationTimeoutMs: 30_000,
   capTimeoutMs: 5_000,
@@ -63,15 +72,6 @@ export const defaultSessionPolicy: SessionPolicy = {
   maxChannels: 128,
   maxMembers: 20_000,
   maxDirectoryItems: 5000,
-};
-const features: FeatureSet = {
-  history: false,
-  replies: false,
-  reactions: false,
-  typing: false,
-  readMarkers: false,
-  redaction: false,
-  multiline: false,
 };
 const frame = (
   command: string,
@@ -98,6 +98,7 @@ type Send = {
   labels: Set<string>;
   updatedAt: number;
   expectsEcho: boolean;
+  replyToServerId?: string;
 };
 type Queued = { command: SessionCommand; operationId: OperationId; bytes: number };
 type Whois = {
@@ -135,7 +136,10 @@ export function createSessionFactory(options: SessionFactoryOptions): SessionFac
         !atom(profile.identity.username) ||
         !profile.identity.alternateNicks.every(atom) ||
         !content(profile.identity.realname) ||
-        (profile.sasl && (!content(profile.sasl.account) || !profile.sasl.account))
+        (profile.sasl &&
+          (profile.sasl.mechanism !== "PLAIN" ||
+            !content(profile.sasl.account) ||
+            !profile.sasl.account))
       )
         return failure("invalid-input", "Invalid IRC profile or attempt identity.");
       const endpoint = profile.endpoints[0]!;
@@ -189,7 +193,7 @@ class Attempt {
   private labelSequence = 0;
   // Conservative until the server reveals our complete nick!ident@host prefix.
   private ownPrefixBytes = 128;
-  private readonly batches = new Map<string, { label?: string; started: number }>();
+  private readonly modern: ModernSession;
   private readonly channels = new Map<string, Channel>();
   private readonly advertised = new Map<string, string | null>();
   private readonly capabilities = new Map<string, string | null>();
@@ -228,6 +232,19 @@ class Attempt {
     this.stream = eventStream(identity, policy.maxEvents, () =>
       this.stop(problem("unavailable", "Session event buffer overflow."), true),
     );
+    this.modern = new ModernSession({
+      policy,
+      capabilities: () => this.capabilities,
+      now: () => options.clock.now(),
+      fold: (value) => this.fold(value),
+      self: (value) => this.self(value),
+      emit: (payload) => {
+        if (this.stopped) this.stream.emit(payload, true);
+        else this.emit(payload);
+      },
+      changed: () => this.publishSupport(),
+      fatal: (error) => this.stop(error),
+    });
     this.abortParent = () => this.stop(problem("cancelled", "Connection cancelled."));
     parent.addEventListener("abort", this.abortParent, { once: true });
     this.session = {
@@ -252,7 +269,7 @@ class Attempt {
   }
   private publishSupport() {
     this.support = { ...this.support, capabilities: Object.fromEntries(this.capabilities) };
-    this.emit({ type: "support", support: { ...this.support }, features });
+    this.emit({ type: "support", support: { ...this.support }, features: this.modern.features() });
   }
   private close(reason?: string): Promise<Result<void>> {
     if (this.closing) return this.closing;
@@ -327,7 +344,7 @@ class Attempt {
     }
     this.sends.clear();
     this.labels.clear();
-    this.batches.clear();
+    this.modern.close(!overflow);
     this.queue.length = 0;
     this.queueBytes = 0;
     this.channels.clear();
@@ -465,7 +482,11 @@ class Attempt {
           this.stop(problem("network", "IRC keepalive timed out."));
           return;
         }
-        if (now - this.lastReceived >= this.policy.keepaliveMs && this.pingSentAt === undefined) {
+        if (
+          this.connection &&
+          now - this.lastReceived >= this.policy.keepaliveMs &&
+          this.pingSentAt === undefined
+        ) {
           this.pingSentAt = now;
           await this.control("PING", [`openirc-${now}`]);
         }
@@ -483,6 +504,7 @@ class Attempt {
           }
         for (const send of this.sends.values())
           if (
+            send.fragments > 0 &&
             send.written === send.fragments &&
             now - send.updatedAt >= this.policy.queryTimeoutMs
           ) {
@@ -495,11 +517,7 @@ class Attempt {
               });
             this.forgetSend(send);
           }
-        for (const batch of this.batches.values())
-          if (now - batch.started >= this.policy.queryTimeoutMs) {
-            this.stop(problem("network", "IRC response batch timed out."));
-            return;
-          }
+        this.modern.tick(now);
       }
     } catch {
       if (!signal.aborted) this.stop(problem("internal", "IRC clock failed."));
@@ -566,6 +584,7 @@ class Attempt {
           this.advertised.get("sasl")?.split(",").includes("PLAIN"))
       )
         wanted.push("sasl");
+      wanted.push(...modernCapabilities(this.advertised));
       for (const name of wanted) if (this.advertised.has(name)) this.requested.add(name);
       if (this.profile.sasl?.required && !this.requested.has("sasl")) {
         this.stop(
@@ -645,10 +664,8 @@ class Attempt {
     const sender = input.prefix?.split("!")[0] ?? "";
     if (input.prefix?.includes("!") && this.self(sender))
       this.ownPrefixBytes = byteLength(input.prefix) + 2;
-    if (/^[45][0-9]{2}$/.test(input.command)) {
-      const label =
-        input.tags.label ??
-        (input.tags.batch ? this.batches.get(input.tags.batch)?.label : undefined);
+    if (input.command === "FAIL" || /^[45][0-9]{2}$/.test(input.command)) {
+      const label = this.modern.label(input);
       const rejected = label ? this.labels.get(label) : undefined;
       if (rejected) {
         this.emit({
@@ -664,6 +681,7 @@ class Attempt {
         return;
       }
     }
+    if (this.modern.handle(input, sender) || this.stopped) return;
     switch (input.command) {
       case "PING":
         await this.control("PONG", p);
@@ -728,9 +746,6 @@ class Attempt {
       case "ERROR":
         this.stop(problem("network", "Server terminated the IRC connection."));
         return;
-      case "BATCH":
-        this.batch(input);
-        return;
       case "PRIVMSG":
       case "NOTICE":
         this.chat(input, sender);
@@ -757,6 +772,7 @@ class Attempt {
         if (p[0] && p[1]) this.remove(p[0], p[1], p[2] ?? "");
         return;
       case "QUIT":
+        this.modern.clearTyping(sender);
         for (const channel of this.channels.values()) {
           channel.members.delete(this.fold(sender));
           this.touch(channel, this.fold(sender));
@@ -845,6 +861,7 @@ class Attempt {
       this.emit({ type: "notice", text: `IRC server response ${input.command}.` });
   }
   private isupport(tokens: readonly string[]) {
+    this.modern.isupport(tokens);
     let support = this.support;
     for (const token of tokens) {
       const [name, value = ""] = token.split("=");
@@ -878,22 +895,6 @@ class Attempt {
     this.support = support;
     this.publishSupport();
   }
-  private batch(input: IrcFrame) {
-    const id = input.params[0];
-    if (!id) return;
-    if (id.startsWith("+")) {
-      if (this.batches.size >= 128) {
-        this.stop(problem("network", "Too many IRC batches."));
-        return;
-      }
-      const parent = input.tags.batch ? this.batches.get(input.tags.batch) : undefined;
-      const label = input.tags.label ?? parent?.label;
-      this.batches.set(id.slice(1), {
-        ...(label ? { label } : {}),
-        started: this.options.clock.now(),
-      });
-    } else if (id.startsWith("-")) this.batches.delete(id.slice(1));
-  }
   private chat(input: IrcFrame, sender: string) {
     const [target, body] = input.params;
     if (!target || body === undefined) return;
@@ -908,10 +909,10 @@ class Attempt {
       text = body.slice(8, -1);
     } else if (body.includes("\x01")) return; // No CTCP execution or automatic privacy-leaking replies.
     const serverTime = input.tags.time ? Date.parse(input.tags.time) : NaN;
-    const label =
-      input.tags.label ??
-      (input.tags.batch ? this.batches.get(input.tags.batch)?.label : undefined);
+    this.modern.observeChat(input, sender, target);
+    const label = this.modern.playback(input) ? undefined : this.modern.label(input);
     const send = label ? this.labels.get(label) : undefined;
+    const reply = input.tags[modernProtocol.reply];
     const message: ChatEnvelope = {
       target: plain(target),
       sender: {
@@ -923,9 +924,12 @@ class Attempt {
       kind,
       text: plain(text),
       receivedAt: this.options.clock.now(),
-      source: "live",
+      source: this.modern.playback(input) ? "playback" : "live",
       ...(Number.isFinite(serverTime) ? { serverTime } : {}),
-      ...(input.tags.msgid ? { serverId: plain(input.tags.msgid) } : {}),
+      ...(input.tags.msgid && validServerId(input.tags.msgid)
+        ? { serverId: input.tags.msgid }
+        : {}),
+      ...(reply && validServerId(reply) ? { replyToServerId: reply } : {}),
     };
     if (send && label && this.self(sender) && this.fold(target) === this.fold(send.target)) {
       send.echoes.set(label, message);
@@ -942,6 +946,7 @@ class Attempt {
                 receivedAt: message.receivedAt,
                 source: "live",
                 operationId: send.operationId,
+                ...(send.replyToServerId ? { replyToServerId: send.replyToServerId } : {}),
               };
         this.emit({ type: "chat", message: logical });
         this.emit({ type: "send-state", operationId: send.operationId, state: "echo-observed" });
@@ -990,6 +995,7 @@ class Attempt {
   private remove(name: string, nick: string, reason: string) {
     const channel = this.channels.get(this.fold(name));
     if (!channel) return;
+    this.modern.clearTyping(nick, name);
     channel.members.delete(this.fold(nick));
     this.touch(channel, this.fold(nick));
     this.emit({
@@ -1008,6 +1014,7 @@ class Attempt {
     channel.touched.add(key);
   }
   private rename(previous: string, next: string) {
+    this.modern.clearTyping(previous);
     for (const channel of this.channels.values()) {
       const current = channel.members.get(this.fold(previous));
       const member = current ?? channel.names?.get(this.fold(previous));
@@ -1161,13 +1168,12 @@ class Attempt {
   ): Promise<Result<void>> {
     if (signal.aborted) return failure("cancelled", "Operation cancelled.");
     if (!this.ready || this.stopped) return failure("unavailable", "IRC connection is not ready.");
-    if (["typing", "reaction", "redact", "mark-read", "history"].includes(command.type))
-      return failure("unsupported", "This IRC feature is not implemented by this session.");
     if (
       this.sends.has(operationId) ||
       this.queue.some((item) => item.operationId === operationId) ||
       this.whois?.operationId === operationId ||
-      this.directory?.operationId === operationId
+      this.directory?.operationId === operationId ||
+      this.modern.hasOperation(operationId)
     )
       return failure("conflict", "Operation is already active.");
     let bytes = 32;
@@ -1198,8 +1204,15 @@ class Attempt {
           command.text.includes("\x01")
         )
           return failure("invalid-input", "Invalid message target or content.");
-        if (command.replyToServerId)
-          return failure("unsupported", "IRC replies are not implemented.");
+        if (command.replyToServerId !== undefined) {
+          if (!this.modern.features().replies)
+            return failure(
+              "unsupported",
+              "Replies require permitted message tags and observed server message IDs.",
+            );
+          if (!validServerId(command.replyToServerId))
+            return failure("invalid-input", "Invalid reply message reference.");
+        }
         if (this.sends.size >= this.policy.maxPendingSends)
           return failure("rate-limited", "Too many unresolved message sends.");
         bytes += byteLength(command.target) + byteLength(command.text);
@@ -1220,6 +1233,8 @@ class Attempt {
       case "list":
         if (this.directory) return failure("conflict", "Another LIST request is still active.");
         break;
+      default:
+        bytes += byteLength(JSON.stringify(command));
     }
     if (
       this.queue.length >= this.policy.maxQueueCommands ||
@@ -1227,17 +1242,22 @@ class Attempt {
     )
       return failure("rate-limited", "IRC outgoing queue is full.");
     // Admission owns a detached immutable command. In particular, caller abort never unsends it.
-    const owned = { ...command };
+    const modernAdmission = this.modern.admit(command, operationId);
+    if (!modernAdmission.ok) return modernAdmission;
+    const owned: SessionCommand =
+      command.type === "history" && command.before
+        ? { ...command, before: { ...command.before } }
+        : { ...command };
     if (command.type === "whois")
       this.whois = {
         operationId,
         nick: command.nick,
         details: { nick: plain(command.nick), channels: [] },
-        started: this.options.clock.now(),
+        started: Infinity,
         expired: false,
       };
     if (command.type === "list")
-      this.directory = { operationId, count: 0, started: this.options.clock.now(), expired: false };
+      this.directory = { operationId, count: 0, started: Infinity, expired: false };
     if (command.type === "send")
       this.sends.set(operationId, {
         operationId,
@@ -1251,6 +1271,7 @@ class Attempt {
         labels: new Set(),
         updatedAt: this.options.clock.now(),
         expectsEcho: false,
+        ...(command.replyToServerId ? { replyToServerId: command.replyToServerId } : {}),
       });
     this.queue.push({ command: owned, operationId, bytes });
     this.queueBytes += bytes;
@@ -1261,6 +1282,8 @@ class Attempt {
     const delay = this.nextWriteAt - this.options.clock.now();
     if (delay > 0) await this.options.clock.sleep(delay, this.controller.signal);
     if (this.stopped || this.shuttingDown) return failure<void>("cancelled", "Connection closed.");
+    const available = this.modern.validateFrame(output);
+    if (!available.ok) return available;
     if (send) send.started = true;
     const result = await this.write(output);
     this.nextWriteAt = this.options.clock.now() + this.policy.floodIntervalMs;
@@ -1341,7 +1364,7 @@ class Attempt {
       case "send":
         return this.send(item.operationId, command);
       default:
-        return failure("unsupported", "IRC feature is unavailable.");
+        return this.modern.perform(command, item.operationId, (output) => this.pacedWrite(output));
     }
   }
   private async send(
@@ -1385,7 +1408,10 @@ class Attempt {
         send.labels.add(label);
         this.labels.set(label, send);
       }
-      return frame(ircCommand, [command.target, wrap(text)], label ? { label } : {});
+      return frame(ircCommand, [command.target, wrap(text)], {
+        ...(label ? { label } : {}),
+        ...(command.replyToServerId ? { [modernProtocol.reply]: command.replyToServerId } : {}),
+      });
     });
     for (const output of outputs) {
       // Prevalidate all fragments before writing any of a logical operation.

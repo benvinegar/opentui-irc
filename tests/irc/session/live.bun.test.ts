@@ -73,13 +73,17 @@ test("real Bun TCP -> codec -> session: register, join, names race, labeled batc
           if (frame.command === "CAP" && p[0] === "LS") {
             // Exercise CAP continuation across independently delivered frames.
             send(":fixture CAP me LS * :message-tags server-time multi-prefix");
-            send(":fixture CAP me LS :batch labeled-response echo-message");
+            send(
+              ":fixture CAP me LS :batch labeled-response echo-message draft/chathistory draft/read-marker draft/message-redaction",
+            );
           }
           if (frame.command === "CAP" && p[0] === "REQ") send(`:fixture CAP me ACK :${p[1]}`);
           if (frame.command === "CAP" && p[0] === "END") {
             send("PING :initial");
             send(":fixture 001 me :Welcome");
-            send(":fixture 005 me CASEMAPPING=ascii PREFIX=(ov)@+ CHANTYPES=#& :supported");
+            send(
+              ":fixture 005 me CASEMAPPING=ascii PREFIX=(ov)@+ CHANTYPES=#& CHATHISTORY=20 MSGREFTYPES=timestamp,msgid :supported",
+            );
           }
           if (frame.command === "JOIN") {
             send(":me!u@localhost JOIN #room");
@@ -93,9 +97,31 @@ test("real Bun TCP -> codec -> session: register, join, names race, labeled batc
           }
           if (frame.command === "PRIVMSG") {
             send(`@label=${frame.tags.label} :fixture BATCH +reply labeled-response`);
-            send(`@batch=reply;msgid=echo-1 :me!u@localhost PRIVMSG ${p[0]} :${p[1]}`);
+            send(
+              `@batch=reply;msgid=echo-1${frame.tags["+reply"] ? `;+reply=${frame.tags["+reply"]}` : ""} :me!u@localhost PRIVMSG ${p[0]} :${p[1]}`,
+            );
             send(":fixture BATCH -reply");
           }
+          if (frame.command === "CHATHISTORY") {
+            send(
+              `@label=${frame.tags.label};draft/chathistory-end :fixture BATCH +past chathistory ${p[1]}`,
+            );
+            send(
+              `@batch=past;msgid=past-1;time=2025-12-31T00:00:00.000Z :bob!u@localhost PRIVMSG ${p[1]} :earlier history`,
+            );
+            send(":fixture BATCH -past");
+          }
+          if (frame.command === "TAGMSG") {
+            const tags = Object.entries(frame.tags)
+              .map(([key, value]) => (value === null ? key : `${key}=${value}`))
+              .join(";");
+            send(`@${tags} :me!u@localhost TAGMSG ${p[0]}`);
+            send(`@label=${frame.tags.label} :fixture ACK`);
+          }
+          if (frame.command === "MARKREAD")
+            send(`@label=${frame.tags.label} :fixture MARKREAD ${p[0]} ${p[1]}`);
+          if (frame.command === "REDACT")
+            send(`@label=${frame.tags.label} :me!u@localhost REDACT ${p[0]} ${p[1]}`);
           if (frame.command === "WHOIS") {
             send(":fixture 311 me bob user localhost * :Bob User");
             send(":fixture 319 me bob :#room");
@@ -198,6 +224,88 @@ test("real Bun TCP -> codec -> session: register, join, names race, labeled batc
       ),
     ).toBe(false);
     expect(accepted).toContain("PONG");
+    expect(
+      (
+        await session.execute(
+          { type: "history", target: "#room", limit: 2 },
+          entityId<"operation">("history"),
+          controller.signal,
+        )
+      ).ok,
+    ).toBe(true);
+    await until(() => events.some((event) => event.payload.type === "history-complete"));
+    expect(
+      events.find(
+        (event) => event.payload.type === "chat" && event.payload.message.serverId === "past-1",
+      )?.payload,
+    ).toMatchObject({ message: { source: "playback", text: "earlier history" } });
+    expect(
+      (
+        await session.execute(
+          {
+            type: "send",
+            target: "#room",
+            text: "a real tagged reply",
+            kind: "text",
+            replyToServerId: "remote-1",
+          },
+          entityId<"operation">("reply"),
+          controller.signal,
+        )
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await session.execute(
+          { type: "typing", target: "#room", active: true },
+          entityId<"operation">("typing"),
+          controller.signal,
+        )
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await session.execute(
+          { type: "reaction", target: "#room", serverId: "remote-1", value: "🐈", remove: false },
+          entityId<"operation">("reaction"),
+          controller.signal,
+        )
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await session.execute(
+          {
+            type: "mark-read",
+            target: "#room",
+            serverTime: Date.parse("2026-01-01T00:00:00.000Z"),
+          },
+          entityId<"operation">("read"),
+          controller.signal,
+        )
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await session.execute(
+          { type: "redact", target: "#room", serverId: "echo-1" },
+          entityId<"operation">("redact"),
+          controller.signal,
+        )
+      ).ok,
+    ).toBe(true);
+    await until(
+      () =>
+        events.some((event) => event.payload.type === "reaction") &&
+        events.some((event) => event.payload.type === "read-marker") &&
+        events.some((event) => event.payload.type === "redaction"),
+    );
+    expect(
+      events.find(
+        (event) => event.payload.type === "chat" && event.payload.message.operationId === "reply",
+      )?.payload,
+    ).toMatchObject({ message: { replyToServerId: "remote-1", text: "a real tagged reply" } });
+    expect(accepted).toContain("TAGMSG");
     controller.abort();
     await consume;
     expect(events.at(-1)?.payload).toMatchObject({ type: "state", phase: "disconnected" });

@@ -210,7 +210,7 @@ describe("one-attempt session", () => {
     ).toMatchObject({ authenticated: true, secure: true });
     expect(JSON.stringify(fixture.events)).not.toContain("fixture-password");
     expect(fixture.events.find((event) => event.payload.type === "support")?.payload).toMatchObject(
-      { features: { history: false, typing: false, reactions: false } },
+      { features: { history: false, typing: true, reactions: false } },
     );
   });
   test("rejects plaintext credentials and never becomes ready when required SASL unavailable", async () => {
@@ -463,6 +463,92 @@ describe("one-attempt session", () => {
       ),
     ).toBe(true);
     expect((await fixture.session.close()).ok).toBe(true);
+  });
+  test("modern history, replies, typing, reactions and draft state updates are real semantic events", async () => {
+    const fixture = await harness({
+      capabilities:
+        "message-tags server-time batch labeled-response echo-message draft/chathistory draft/read-marker draft/message-redaction",
+    });
+    await until(() => hasReady(fixture.events));
+    fixture.send(
+      "@msgid=original;time=2026-01-01T00:00:00.000Z :alice!u@h PRIVMSG #room :original",
+    );
+    await until(() =>
+      fixture.events.some(
+        (event) => event.payload.type === "support" && event.payload.features.replies,
+      ),
+    );
+    expect(
+      (
+        await fixture.session.execute(
+          {
+            type: "send",
+            target: "#room",
+            text: "reply",
+            kind: "text",
+            replyToServerId: "original",
+          },
+          op("reply"),
+          signal(),
+        )
+      ).ok,
+    ).toBe(true);
+    await until(() => fixture.written.some((frame) => frame.command === "PRIVMSG"));
+    expect(fixture.written.find((frame) => frame.command === "PRIVMSG")?.tags["+reply"]).toBe(
+      "original",
+    );
+    expect(
+      (
+        await fixture.session.execute(
+          { type: "history", target: "#room", limit: 2 },
+          op("history"),
+          signal(),
+        )
+      ).ok,
+    ).toBe(true);
+    await until(() => fixture.written.some((frame) => frame.command === "CHATHISTORY"));
+    const history = fixture.written.find((frame) => frame.command === "CHATHISTORY")!;
+    fixture.send(
+      `@label=${history.tags.label};draft/chathistory-end :s BATCH +past chathistory #room`,
+    );
+    fixture.send(
+      "@batch=past;msgid=old;time=2025-12-31T00:00:00.000Z;+reply=missing-original :alice!u@h PRIVMSG #room :old reply",
+    );
+    fixture.send("@msgid=new :bob!u@h PRIVMSG #room :interleaved live");
+    fixture.send("@batch=past :ghost!u@h JOIN #room");
+    fixture.send(":s BATCH -past");
+    fixture.send("@+typing=active :alice!u@h TAGMSG #room");
+    fixture.send("@+reply=original;+draft/react=🐈 :bob!u@h TAGMSG #room");
+    fixture.send(":s MARKREAD #room timestamp=2026-01-01T00:00:00.000Z");
+    fixture.send(":alice!u@h REDACT #room original");
+    await until(() => fixture.events.some((event) => event.payload.type === "redaction"));
+    expect(
+      fixture.events.find((event) => event.payload.type === "history-complete")?.payload,
+    ).toMatchObject({ operationId: op("history"), target: "#room", hasMore: false });
+    expect(
+      fixture.events.find(
+        (event) => event.payload.type === "chat" && event.payload.message.serverId === "old",
+      )?.payload,
+    ).toMatchObject({ message: { source: "playback", replyToServerId: "missing-original" } });
+    expect(
+      fixture.events.find(
+        (event) => event.payload.type === "chat" && event.payload.message.serverId === "new",
+      )?.payload,
+    ).toMatchObject({ message: { source: "live" } });
+    expect(
+      fixture.events.some(
+        (event) => event.payload.type === "membership" && event.payload.change.nick === "ghost",
+      ),
+    ).toBe(false);
+    expect(
+      fixture.events.some((event) => event.payload.type === "typing" && event.payload.active),
+    ).toBe(true);
+    expect(
+      fixture.events.some(
+        (event) => event.payload.type === "reaction" && event.payload.value === "🐈",
+      ),
+    ).toBe(true);
+    expect(fixture.events.some((event) => event.payload.type === "read-marker")).toBe(true);
   });
   test("CAP timeout falls back only when authentication is not required", async () => {
     const fixture = await harness({
