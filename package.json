@@ -16,12 +16,18 @@
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run test",
     "prepare": "simple-git-hooks"
   },
+  "dependencies": {
+    "@opentui/core": "^0.6.6",
+    "@opentui/solid": "^0.6.6",
+    "jsonc-parser": "^3.3.1",
+    "solid-js": "1.9.12"
+  },
   "devDependencies": {
     "@types/bun": "^1.4.3",
     "oxfmt": "^0.73.0",
     "oxlint": "^1.88.0",
     "simple-git-hooks": "^2.14.0",
-    "typescript": "^7.0.2",
+    "typescript": "^5.9.3",
     "vitest": "^5.0.5"
   },
   "simple-git-hooks": {

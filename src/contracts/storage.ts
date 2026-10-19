@@ -61,6 +61,11 @@ export interface HistoryRepository {
     radius: number,
     signal: AbortSignal,
   ): Promise<Result<readonly Message[]>>;
+  findByServerId(
+    networkId: NetworkId,
+    serverId: string,
+    signal: AbortSignal,
+  ): Promise<Result<Message | null>>;
   loadConversations(signal: AbortSignal): Promise<Result<readonly ConversationRecord[]>>;
   loadReadPositions(signal: AbortSignal): Promise<Result<readonly ReadPosition[]>>;
   loadWorkspace(signal: AbortSignal): Promise<Result<WorkspaceState>>;

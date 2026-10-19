@@ -1,6 +1,8 @@
 {
   "compilerOptions": {
     "target": "ES2023",
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
     "module": "Preserve",
     "moduleResolution": "Bundler",
     "lib": ["ES2023"],
@@ -15,5 +17,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "tests/**/*.tsx", "vitest.config.ts"]
 }
