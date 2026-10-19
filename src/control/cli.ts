@@ -573,13 +573,35 @@ export async function runControlCli(
           response = await save({ section: section!, patch });
           break;
         }
-        case "config reload":
+        case "config reload": {
+          let expectedRevision = textFlag(parsed, "expected-revision");
+          if (has(parsed, "dry-run")) {
+            response = await execute("config.reload", {
+              dryRun: true,
+              ...(expectedRevision === undefined ? {} : { expectedRevision }),
+              ...confirm(),
+            });
+            break;
+          }
+          if (expectedRevision === undefined) {
+            // config.get describes the live snapshot, not an externally edited disk revision.
+            const inspected = await execute("config.reload", { dryRun: true });
+            if (!inspected.ok) fail(inspected.error);
+            if (
+              !object(inspected.result) ||
+              typeof inspected.result.revision !== "string" ||
+              inspected.result.revision.length === 0
+            )
+              fail(error("protocol", "Configuration reload inspection response is invalid."));
+            expectedRevision = inspected.result.revision;
+          }
           response = await execute("config.reload", {
-            dryRun: has(parsed, "dry-run"),
-            expectedRevision: await revision(),
+            dryRun: false,
+            expectedRevision,
             ...confirm(),
           });
           break;
+        }
         case "networks add":
         case "networks update":
         case "networks remove": {

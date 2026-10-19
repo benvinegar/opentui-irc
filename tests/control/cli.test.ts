@@ -545,25 +545,99 @@ describe("config and full-profile convenience flow", () => {
       expect(result.envelope).toMatchObject({ ok: false });
     }
   });
-  it("reloads with dry-run and CAS revision, forwarding confirmation only if set", async () => {
+  it("reload --dry-run only inspects disk once without reading the live config", async () => {
     const inspect = await invoke(["config", "reload", "--dry-run"]);
+    expect(inspect.code).toBe(0);
+    expect(inspect.calls).toHaveLength(1);
     expect(last(inspect.calls)).toMatchObject({
       method: "config.reload",
-      params: { dryRun: true, expectedRevision: "rev-1" },
+      params: { dryRun: true },
     });
-    const apply = await invoke([
-      "config",
-      "reload",
-      "--expected-revision",
-      "explicit",
-      "--confirm",
+  });
+  it.each([
+    { revision: "disk-rev", liveRevision: "live-rev", plans: [] },
+    { applied: false, revision: "disk-rev", mode: "offline" },
+  ])("inspects reload disk revision then applies that exact revision: %j", async (result) => {
+    const calls: ControlRequest[] = [];
+    const reloaded = await invoke(["config", "reload", "--confirm"], {
+      execute: async (request) => {
+        calls.push(request);
+        return success(request, request.params.dryRun === true ? result : { applied: true });
+      },
+    });
+    expect(reloaded.code).toBe(0);
+    expect(calls.map(({ method, params }) => ({ method, params }))).toEqual([
+      { method: "config.reload", params: { dryRun: true } },
+      {
+        method: "config.reload",
+        params: { dryRun: false, expectedRevision: "disk-rev", confirm: true },
+      },
     ]);
-    expect(apply.calls).toHaveLength(1);
-    expect(last(apply.calls).params).toEqual({
-      dryRun: false,
-      expectedRevision: "explicit",
-      confirm: true,
+  });
+  it.each([false, true])(
+    "preserves explicit reload revision without an extra inspect (dry-run=%s)",
+    async (dryRun) => {
+      const calls: ControlRequest[] = [];
+      const apply = await invoke(
+        [
+          "config",
+          "reload",
+          "--expected-revision",
+          "explicit",
+          "--confirm",
+          ...(dryRun ? ["--dry-run"] : []),
+        ],
+        {
+          execute: async (request) => {
+            calls.push(request);
+            return failure(request);
+          },
+        },
+      );
+      expect(apply.code).toBe(1);
+      expect(calls).toHaveLength(1);
+      expect(last(calls).params).toEqual({ dryRun, expectedRevision: "explicit", confirm: true });
+      expect(apply.envelope).toMatchObject({ error: { code: "conflict" } });
+    },
+  );
+  it("does not retry reload if the disk changes after inspection", async () => {
+    const calls: ControlRequest[] = [];
+    const result = await invoke(["config", "reload"], {
+      execute: async (request) => {
+        calls.push(request);
+        return request.params.dryRun === true
+          ? success(request, { revision: "disk-rev" })
+          : failure(request);
+      },
     });
+    expect(result.code).toBe(1);
+    expect(calls).toHaveLength(2);
+    expect(last(calls).params).toEqual({ dryRun: false, expectedRevision: "disk-rev" });
+    expect(result.envelope).toMatchObject({ error: { code: "conflict" } });
+  });
+  it("does not apply after reload inspection fails or has no valid revision", async () => {
+    for (const reply of [null, {}, { revision: 1 }, { revision: "" }, "failure"]) {
+      const execute = vi.fn(async (request: ControlRequest) =>
+        reply === "failure" ? failure(request) : success(request, reply),
+      );
+      const result = await invoke(["config", "reload"], { execute });
+      expect(result.code).toBe(1);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(result.envelope).toMatchObject({
+        error: { code: reply === "failure" ? "conflict" : "protocol" },
+      });
+    }
+  });
+  it("does not apply reload if cancelled after inspection", async () => {
+    const controller = new AbortController();
+    const execute = vi.fn(async (request: ControlRequest) => {
+      controller.abort();
+      return success(request, { revision: "disk-rev" });
+    });
+    const result = await invoke(["config", "reload"], { execute, signal: controller.signal });
+    expect(result.code).toBe(1);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(result.envelope).toMatchObject({ error: { code: "cancelled" } });
   });
 });
 
