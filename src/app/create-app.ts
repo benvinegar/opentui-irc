@@ -40,7 +40,7 @@ const FEATURES: FeatureSet = {
   redaction: false,
   multiline: false,
 };
-const WINDOW = 500;
+const WINDOW = 300;
 const MAX_HOT_MESSAGES = 5000;
 const MAX_CONVERSATIONS = 1000;
 const MAX_MEMBERS = 10000;
@@ -76,6 +76,7 @@ interface Conversation {
 interface Attempt {
   readonly generation: number;
   readonly controller: AbortController;
+  readonly historyRequested: Set<ConversationId>;
   cursor: SessionCursor;
   session?: IrcSession;
   error?: AppError;
@@ -106,6 +107,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     { conversationId: ConversationId; messageId: MessageId; message: Message }
   >();
   const visibility = new Map<ConversationId, { focused: boolean; atBottom: boolean }>();
+  const channelKeys = new Map<ConversationId, import("../contracts/common").SecretRef>();
   const reactions = new Map<MessageId, Map<string, Set<UserId>>>();
   const typingControllers = new Map<string, AbortController>();
   const modelError = () => deps.diagnostics.record({ level: "error", code: "read-model-listener" });
@@ -299,11 +301,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     );
     for (const c of conversations.values()) {
       if (total <= MAX_HOT_MESSAGES) break;
-      if (
-        c.view.id === active ||
-        (pending.size && [...pending.values()].some((entry) => entry.conversationId === c.view.id))
-      )
-        continue;
+      if (c.view.id === active) continue;
       total -= c.recent.length + (timeline(c).atLatest === false ? timeline(c).messages.length : 0);
       c.recent = [];
       updateTimeline(c, { messages: [], atLatest: true });
@@ -522,12 +520,25 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         });
         if (payload.phase === "ready" && network.phase !== "ready") {
           retryCounts.set(networkId, 0);
+          const joins = new Map<string, SessionCommand>();
           for (const join of profile(networkId).autoJoin) {
+            if (findConversation(networkId, join.channel, "channel")?.closed) continue;
             const c = ensureConversation(networkId, "channel", join.channel);
-            const id = deps.ids.next<"operation">();
+            if (join.key) channelKeys.set(c.view.id, join.key);
+          }
+          for (const c of conversations.values())
+            if (!c.closed && c.view.networkId === networkId && c.view.kind === "channel") {
+              const key = channelKeys.get(c.view.id);
+              joins.set(foldIdentifier(c.view.name, mapping(networkId)), {
+                type: "join",
+                channel: c.view.name,
+                ...(key ? { key } : {}),
+              });
+            }
+          for (const command of joins.values()) {
             const result = await attempt.session!.execute(
-              { type: "join", channel: c.view.name, ...(join.key ? { key: join.key } : {}) },
-              id,
+              command,
+              deps.ids.next<"operation">(),
               attempt.controller.signal,
             );
             if (!result.ok) report(result.error, networkId);
@@ -664,8 +675,23 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           remaining.push({ ...member, prefixes: payload.change.prefixes });
         }
         updateTimeline(c, { members: remaining });
-        if (same(networkId, payload.change.nick, network.nick))
+        if (same(networkId, payload.change.nick, network.nick)) {
           c.view = { ...c.view, joined: payload.change.kind !== "remove" };
+          if (
+            payload.change.kind === "join" &&
+            network.features.history &&
+            !attempt.historyRequested.has(c.view.id)
+          ) {
+            attempt.historyRequested.add(c.view.id);
+            await loadRecent(c);
+            const result = await attempt.session!.execute(
+              { type: "history", target: c.view.name, limit: PAGE_SIZE },
+              deps.ids.next<"operation">(),
+              attempt.controller.signal,
+            );
+            if (!result.ok) report(result.error, networkId);
+          }
+        }
         break;
       }
       case "topic": {
@@ -960,6 +986,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       generation,
       controller: new AbortController(),
       cursor: startSessionCursor(identity),
+      historyRequested: new Set(),
     };
     attempts.set(networkId, attempt);
     support.delete(networkId);
@@ -1082,6 +1109,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
               id,
             );
             const c = ensureConversation(action.networkId, "channel", action.channel);
+            if (action.key) channelKeys.set(c.view.id, action.key);
             active = c.view.id;
             result = { conversationId: c.view.id };
             await loadRecent(c);

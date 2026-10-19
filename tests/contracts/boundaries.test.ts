@@ -11,7 +11,7 @@ const layers: Readonly<
   app: { local: ["app", "domain", "contracts"], external: [] },
   irc: { local: ["irc", "domain", "contracts"], external: [] },
   transport: { local: ["transport", "contracts"], external: ["bun", "bun:", "node:"] },
-  storage: { local: ["storage", "contracts"], external: ["bun", "bun:", "node:"] },
+  storage: { local: ["storage", "contracts"], external: ["bun", "bun:", "node:", "jsonc-parser"] },
   services: { local: ["services", "domain", "contracts"], external: ["node:"] },
   ui: { local: ["ui", "contracts"], external: ["solid-js", "@opentui/"] },
 };

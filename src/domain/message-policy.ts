@@ -39,7 +39,6 @@ export function mentionsNick(
 export function compareMessages(left: Message, right: Message): number {
   return (
     (left.serverTime ?? left.receivedAt) - (right.serverTime ?? right.receivedAt) ||
-    left.receivedAt - right.receivedAt ||
     left.id.localeCompare(right.id)
   );
 }
