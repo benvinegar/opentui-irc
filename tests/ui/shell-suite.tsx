@@ -40,6 +40,57 @@ async function click(view: TestRendererSetup, id: string) {
 }
 
 describe("real Solid/OpenTUI shell", () => {
+  test("conditional credential fields keep their visual keyboard order", async () => {
+    const { view } = await mount();
+    await click(view, "add-network");
+    await click(view, "auth-mode");
+    await view.mockInput.pressTab({ shift: true });
+    await view.renderOnce();
+    expect(view.renderer.currentFocusedRenderable?.id).toBe("network-env");
+    await view.mockInput.pressTab();
+    expect(view.renderer.currentFocusedRenderable?.id).toBe("auth-mode");
+    await view.mockInput.pressTab();
+    expect(view.renderer.currentFocusedRenderable?.id).toBe("network-channel");
+  });
+  test("a new dialog does not inherit a previous send's acceptance status", async () => {
+    const { view } = await mount();
+    await view.mockInput.typeText("previous send");
+    await view.mockInput.pressEnter();
+    await tick();
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("Accepted locally");
+    await view.mockInput.pressKey("F1");
+    await tick();
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("HELP");
+    expect(view.captureCharFrame()).not.toContain("Accepted locally");
+  });
+  test("disconnected networks do not claim a plaintext or active TLS connection", async () => {
+    const { fake, view } = await mount();
+    for (const secure of [false, true]) {
+      fake.state.publish({
+        ...fake.state.getSnapshot(),
+        networks: fake.state.getSnapshot().networks.map((network) => ({
+          ...network,
+          phase: "disconnected",
+          secure,
+        })),
+      });
+      await view.renderOnce();
+      expect(view.captureCharFrame()).not.toContain("Plaintext");
+      expect(view.captureCharFrame()).not.toContain("TLS ·");
+    }
+    fake.state.publish({
+      ...fake.state.getSnapshot(),
+      networks: fake.state.getSnapshot().networks.map((network) => ({
+        ...network,
+        phase: "ready",
+        secure: false,
+      })),
+    });
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("Plaintext · ready");
+  });
   test("Page Up/Down scroll dialogs without moving the conversation or editing a field", async () => {
     const { view } = await mount();
     const transcript = view.renderer.root.findDescendantById("transcript");

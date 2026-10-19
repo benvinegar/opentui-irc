@@ -165,6 +165,18 @@ function Shell(props: UiOptions) {
   });
   // App windows are bounded; impose a second hard cap on mounted layout work.
   const messages = createMemo(() => timeline()?.messages.slice(-300) ?? []);
+  const orderedControls = (layer: string) => {
+    const ids: string[] = [];
+    const visit = (parent: Renderable) => {
+      for (const child of parent.getChildren()) {
+        const entry = controls.get(child.id);
+        if (entry?.layer === layer && entry.control === child) ids.push(child.id);
+        visit(child);
+      }
+    };
+    visit(renderer.root);
+    return ids;
+  };
   let pendingFocusReveal: Renderable | undefined;
   const revealControl = (control: Renderable | undefined) => {
     let parent = control?.parent;
@@ -201,6 +213,7 @@ function Shell(props: UiOptions) {
   const openModal = (value: Modal) => {
     if (!modal()) returnFocus = focusId();
     setFormText("");
+    setStatus("");
     setModal(value);
     queueMicrotask(() => {
       const target =
@@ -459,7 +472,7 @@ function Shell(props: UiOptions) {
         return;
       }
       const layer = modal() ? "modal" : "main";
-      const ids = [...controls].filter(([, item]) => item.layer === layer).map(([id]) => id);
+      const ids = orderedControls(layer);
       const current = ids.indexOf(focusId());
       const next = ids[(current + (event.shift ? -1 : 1) + ids.length) % ids.length];
       if (next) focus(next);
@@ -808,7 +821,10 @@ function Shell(props: UiOptions) {
                     </text>
                   </box>
                   <text fg={net.phase === "ready" ? colors.green : colors.muted}>
-                    {net.secure ? "TLS" : "Plaintext"} · {net.phase}
+                    {["registering", "authenticating", "ready"].includes(net.phase)
+                      ? `${net.secure ? "TLS" : "Plaintext"} · `
+                      : ""}
+                    {net.phase}
                   </text>
                   <Show when={net.lastError}>
                     <text fg={colors.error}>{net.lastError?.message}</text>

@@ -22,3 +22,5 @@
 - Keyboard focus stays visible when tabbing through long forms or resizing short dialogs.
 - Modal dialogs block background mouse actions, focus changes, and accidental composer sends.
 - Servers without a message of the day no longer leave a misleading connection error after successful registration.
+- Conditional credential fields retain their visual Tab order; new dialogs no longer inherit stale acceptance messages.
+- Disconnected and connecting networks no longer claim an active plaintext or TLS connection.
