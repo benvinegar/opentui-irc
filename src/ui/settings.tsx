@@ -373,6 +373,7 @@ export function SettingsForm(props: {
             );
             setBusy(false);
             props.status(result.ok ? "Appearance saved." : result.error.message);
+            if (result.ok) props.focus("settings");
           })();
         }}
       />

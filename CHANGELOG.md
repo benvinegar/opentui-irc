@@ -26,3 +26,4 @@
 - Disconnected and connecting networks no longer claim an active plaintext or TLS connection.
 - Repeated agent status polling no longer exhausts control-socket slots with disconnected liveness probes.
 - Multi-channel joins/reconnects serialize automatic history requests instead of producing avoidable history-busy errors.
+- Saving appearance closes the revision-bound form, avoiding false revision conflicts on subsequent theme changes.

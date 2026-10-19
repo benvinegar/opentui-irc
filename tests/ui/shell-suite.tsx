@@ -40,6 +40,21 @@ async function click(view: TestRendererSetup, id: string) {
 }
 
 describe("real Solid/OpenTUI shell", () => {
+  test("saving appearance closes its revision-bound form before another appearance save", async () => {
+    const { fake, view } = await mount();
+    for (const theme of ["light", "high-contrast"] as const) {
+      await click(view, "settings");
+      const scroll = view.renderer.root.findDescendantById("modal-scroll");
+      if (!(scroll instanceof ScrollBoxRenderable)) throw new Error("Missing settings viewport");
+      scroll.scrollTo(scroll.scrollHeight);
+      await view.renderOnce();
+      await click(view, `theme-${theme}`);
+      await click(view, "appearance-save");
+      expect(fake.settings.getSnapshot()?.tui.theme).toBe(theme);
+      expect(view.renderer.root.findDescendantById("modal-scroll")?.id).toBeUndefined();
+    }
+    expect(fake.actions.some((action) => action.type === "network.connect")).toBe(false);
+  });
   test("conditional credential fields keep their visual keyboard order", async () => {
     const { view } = await mount();
     await click(view, "add-network");
@@ -207,7 +222,7 @@ describe("real Solid/OpenTUI shell", () => {
     });
     await view.renderOnce();
     expect(view.renderer.root.findDescendantById("directory-join-99")).toBeDefined();
-    expect(view.renderer.root.findDescendantById("directory-join-100")).toBeUndefined();
+    expect(view.renderer.root.findDescendantById("directory-join-100")?.id).toBeUndefined();
     expect(view.captureCharFrame()).toContain("Some channels");
     expect(view.captureCharFrame()).toContain("are omitted");
     await click(view, "directory-filter");
@@ -316,7 +331,7 @@ describe("real Solid/OpenTUI shell", () => {
     await view.renderOnce();
     await click(view, "message-picker");
     await click(view, `pick-${own.id}`);
-    expect(view.renderer.root.findDescendantById("redact-message")).toBeUndefined();
+    expect(view.renderer.root.findDescendantById("redact-message")?.id).toBeUndefined();
     fake.state.publish({
       ...fake.state.getSnapshot(),
       networks: fake.state.getSnapshot().networks.map((network) => ({
@@ -577,7 +592,7 @@ describe("real Solid/OpenTUI shell", () => {
       })),
     });
     await view.renderOnce();
-    expect(view.renderer.root.findDescendantById("message-large-0")).toBeUndefined();
+    expect(view.renderer.root.findDescendantById("message-large-0")?.id).toBeUndefined();
     expect(view.renderer.root.findDescendantById("message-large-9999")).toBeDefined();
   });
   test("drafts and literal-paste safety survive conversation switching", async () => {
