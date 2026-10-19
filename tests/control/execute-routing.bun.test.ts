@@ -362,9 +362,24 @@ describe("real CLI and executor routing", () => {
   test("invalid request IDs are not echoed into invalid response envelopes", async () => {
     const { config } = await profile();
     const execute = createControlExecutor({ configDirectory: config, secrets });
-    const response = await execute({ ...request("status"), id: "unsafe\nrequest-id" }, signal());
-    expect(response.ok).toBe(false);
-    expect(response.id).toBe("invalid");
-    expect(parseControlResponse(response).ok).toBe(true);
+    const rejected: readonly ControlRequest[] = [
+      { ...request("status"), id: "" },
+      { ...request("status"), id: "unsafe\nrequest-id" },
+      { ...request("status"), id: "synthetic-secret-" + "x".repeat(129) },
+      { ...request("status"), id: "synthetic/secret-looking-id" },
+      // Even a valid-looking ID must not be echoed when a different envelope field fails.
+      {
+        ...request("status"),
+        id: "synthetic-secret-looking-id",
+        permissions: ["inspect", "inspect"],
+      },
+    ];
+    for (const input of rejected) {
+      const response = await execute(input, signal());
+      expect(response.ok).toBe(false);
+      expect(response.id).toBe("invalid");
+      expect(parseControlResponse(response).ok).toBe(true);
+      if (input.id) expect(JSON.stringify(response)).not.toContain(input.id);
+    }
   });
 });
