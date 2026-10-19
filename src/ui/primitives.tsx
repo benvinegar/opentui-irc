@@ -74,6 +74,7 @@ export function usePalette() {
 }
 export interface FocusManager {
   current: Accessor<string>;
+  active(layer: string): boolean;
   set(id: string): void;
   register(id: string, layer: string, control: Renderable): () => void;
 }
@@ -81,8 +82,11 @@ export const FocusContext = createContext<FocusManager>();
 export function useControl(id: string, layer: string) {
   const focus = useContext(FocusContext)!;
   return {
-    focused: () => focus.current() === id,
-    select: () => focus.set(id),
+    active: () => focus.active(layer),
+    focused: () => focus.active(layer) && focus.current() === id,
+    select: () => {
+      if (focus.active(layer)) focus.set(id);
+    },
     ref(control: Renderable) {
       onCleanup(focus.register(id, layer, control));
     },
@@ -100,6 +104,7 @@ export function Button(props: {
   const colors = usePalette();
   const control = useControl(props.id, props.layer ?? "main");
   const press = () => {
+    if (!control.active()) return;
     control.select();
     if (!props.disabled) props.onPress();
   };
@@ -184,31 +189,43 @@ export function Dialog(props: {
   const colors = usePalette();
   return (
     <box
+      id="modal-backdrop"
       position="absolute"
-      top={1}
-      left={Math.max(0, Math.floor((props.width - Math.min(76, props.width)) / 2))}
-      width={Math.min(76, props.width)}
-      height={Math.min(props.height - 2, 34)}
-      backgroundColor={colors.panel}
-      border
-      borderColor={colors.accent}
-      flexDirection="column"
-      paddingX={2}
+      top={0}
+      left={0}
+      width={props.width}
+      height={props.height}
+      backgroundColor={`${colors.bg}99`}
+      onMouseDown={(event) => event.stopPropagation()}
+      onMouseScroll={(event) => event.stopPropagation()}
     >
-      <box height={2} flexShrink={0} justifyContent="space-between" flexDirection="row">
-        <text fg={colors.accent}>
-          <b>{props.title}</b>
-        </text>
-        <Button id="dialog-close" layer="modal" label="Close [Esc]" onPress={props.onClose} />
-      </box>
-      <scrollbox
-        id="modal-scroll"
-        flexGrow={1}
-        contentOptions={{ flexDirection: "column", gap: 1 }}
-        scrollX={false}
+      <box
+        position="absolute"
+        top={1}
+        left={Math.max(0, Math.floor((props.width - Math.min(76, props.width)) / 2))}
+        width={Math.min(76, props.width)}
+        height={Math.min(props.height - 2, 34)}
+        backgroundColor={colors.panel}
+        border
+        borderColor={colors.accent}
+        flexDirection="column"
+        paddingX={2}
       >
-        {props.children}
-      </scrollbox>
+        <box height={2} flexShrink={0} justifyContent="space-between" flexDirection="row">
+          <text fg={colors.accent}>
+            <b>{props.title}</b>
+          </text>
+          <Button id="dialog-close" layer="modal" label="Close [Esc]" onPress={props.onClose} />
+        </box>
+        <scrollbox
+          id="modal-scroll"
+          flexGrow={1}
+          contentOptions={{ flexDirection: "column", gap: 1 }}
+          scrollX={false}
+        >
+          {props.children}
+        </scrollbox>
+      </box>
     </box>
   );
 }

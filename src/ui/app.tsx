@@ -181,6 +181,7 @@ function Shell(props: UiOptions) {
     }
   };
   const focus = (id: string) => {
+    if (modal() && controls.get(id)?.layer !== "modal") return;
     setFocusId(id);
     const control = controls.get(id)?.control;
     control?.focus();
@@ -289,7 +290,7 @@ function Shell(props: UiOptions) {
     void run({ type: "draft.set", conversationId: active()!.id, text });
   };
   const send = async () => {
-    if (sendBusy || !composer || !active()) return;
+    if (modal() || sendBusy || !composer || !active()) return;
     const text = composer.plainText;
     if (!text.trim()) return;
     if (text.length > 32_768) {
@@ -465,6 +466,10 @@ function Shell(props: UiOptions) {
       return;
     }
     if (modal()) {
+      if (controls.get(focusId())?.layer !== "modal") {
+        event.preventDefault();
+        return;
+      }
       if (event.name === "pageup" || event.name === "pagedown") {
         event.preventDefault();
         pendingFocusReveal = undefined;
@@ -742,6 +747,7 @@ function Shell(props: UiOptions) {
     <FocusContext.Provider
       value={{
         current: focusId,
+        active: (layer) => layer === (modal() ? "modal" : "main"),
         set: focus,
         register(id, layer, control) {
           controls.set(id, { layer, control });

@@ -105,6 +105,35 @@ describe("real Solid/OpenTUI shell", () => {
       dialog.viewport.y + dialog.viewport.height,
     );
   });
+  test("modal dialogs block background sends, navigation, and focus", async () => {
+    const { fake, view } = await mount();
+    view.resize(110, 46);
+    await view.renderOnce();
+    await view.mockInput.typeText("keep this draft private");
+    await view.mockInput.pressKey("F1");
+    await tick();
+    await view.renderOnce();
+    await click(view, "send");
+    await click(view, "add-network");
+    expect(fake.actions.some((action) => action.type === "message.send")).toBe(false);
+    expect(fake.timelines.get(conversationId)?.getSnapshot().draft).toBe("keep this draft private");
+    expect(view.captureCharFrame()).toContain("HELP");
+    expect(view.renderer.currentFocusedRenderable?.id).toBe("dialog-close");
+    await click(view, "dialog-close");
+    await view.mockInput.pressEnter();
+    await tick();
+    expect(fake.actions.filter((action) => action.type === "message.send")).toHaveLength(1);
+  });
+  test("opening a modal and pressing Enter in the same input batch cannot send the composer", async () => {
+    const { fake, view } = await mount();
+    await view.mockInput.typeText("not a confirmation");
+    await view.mockInput.pressKeys(["F1", "RETURN"]);
+    await tick();
+    await view.renderOnce();
+    expect(fake.actions.some((action) => action.type === "message.send")).toBe(false);
+    expect(fake.timelines.get(conversationId)?.getSnapshot().draft).toBe("not a confirmation");
+    expect(view.captureCharFrame()).toContain("HELP");
+  });
   test("channel directory opens from /list, streams bounded/filterable results, and joins the pinned network", async () => {
     const { fake, view } = await mount();
     await view.mockInput.typeText("/list");

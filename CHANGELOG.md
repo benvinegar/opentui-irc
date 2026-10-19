@@ -20,3 +20,4 @@
 
 - Page Up/Down now scroll the active dialog instead of leaving long help/settings content unreachable from the keyboard.
 - Keyboard focus stays visible when tabbing through long forms or resizing short dialogs.
+- Modal dialogs block background mouse actions, focus changes, and accidental composer sends.
