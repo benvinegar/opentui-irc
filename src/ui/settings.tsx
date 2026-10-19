@@ -195,6 +195,7 @@ export function SettingsForm(props: {
         ? "History preference saved. Existing local history is retained; this does not delete it."
         : result.error.message,
     );
+    if (result.ok) props.focus("settings");
   };
   return (
     <>

@@ -40,6 +40,19 @@ async function click(view: TestRendererSetup, id: string) {
 }
 
 describe("real Solid/OpenTUI shell", () => {
+  test("saving history preferences closes the form and permits a fresh inverse change", async () => {
+    const { fake, view } = await mount();
+    for (const enabled of [false, true]) {
+      await click(view, "settings");
+      const scroll = view.renderer.root.findDescendantById("modal-scroll");
+      if (!(scroll instanceof ScrollBoxRenderable)) throw new Error("Missing settings viewport");
+      scroll.scrollTo(scroll.scrollHeight);
+      await view.renderOnce();
+      await click(view, "history-toggle");
+      expect(fake.settings.getSnapshot()?.user.history.enabled).toBe(enabled);
+      expect(view.renderer.root.findDescendantById("modal-scroll")?.id).toBeUndefined();
+    }
+  });
   test("saving appearance closes its revision-bound form before another appearance save", async () => {
     const { fake, view } = await mount();
     for (const theme of ["light", "high-contrast"] as const) {
