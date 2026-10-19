@@ -1822,6 +1822,8 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         try {
           if (stopping) reject("unavailable", "OpenIRC is shutting down.");
           if (signal.aborted) reject("cancelled", "Operation cancelled.");
+          if (settings.revision !== expectedRevision)
+            reject("conflict", "Live settings changed after planning; inspect and plan again.");
           id = newOperation();
           if (change.section === "user")
             for (const p of change.value.networks) {
@@ -1842,15 +1844,17 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         }
       });
     },
-    reloadSettings(expectedRevision, signal) {
+    reloadSettings(expectedDiskRevision, expectedLiveRevision, signal) {
       return serialIntent(signal, async () => {
         let id: OperationId | undefined;
         try {
           if (stopping) reject("unavailable", "OpenIRC is shutting down.");
           if (signal.aborted) reject("cancelled", "Operation cancelled.");
+          if (settings.revision !== expectedLiveRevision)
+            reject("conflict", "Live settings changed after planning; inspect and plan again.");
           id = newOperation();
           const loaded = requireResult(await deps.settings.load(signal));
-          if (loaded.revision !== expectedRevision)
+          if (loaded.revision !== expectedDiskRevision)
             reject("conflict", "Settings changed after inspection; inspect and plan again.");
           if (signal.aborted) reject("cancelled", "Operation cancelled.");
           await applySettingsDocument(loaded);

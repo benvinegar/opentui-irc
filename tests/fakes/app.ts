@@ -208,8 +208,8 @@ export function createFakeApp(initial: AppSnapshot = appSnapshot) {
       );
       return { ok: true, value: entityId<"operation">(`fake-settings-${sequence}`) };
     },
-    async reloadSettings(expectedRevision) {
-      if (settings.getSnapshot()?.revision !== expectedRevision)
+    async reloadSettings(_expectedDiskRevision, expectedLiveRevision) {
+      if (settings.getSnapshot()?.revision !== expectedLiveRevision)
         return {
           ok: false,
           error: { code: "conflict", message: "Settings changed externally.", retryable: false },

@@ -737,7 +737,32 @@ export async function runControlCli(
               networks[index] = profile;
             }
           }
-          response = await save({ section: "user", patch: { networks } });
+          let patch: JsonObject = { networks };
+          if (spec.name === "networks remove") {
+            const current = await config();
+            const history =
+              object(current.user) && object(current.user.history)
+                ? current.user.history
+                : undefined;
+            const exclusions = history?.excludedConversations;
+            if (exclusions !== undefined) {
+              if (
+                !Array.isArray(exclusions) ||
+                exclusions.some((rule) => !object(rule) || typeof rule.networkId !== "string")
+              )
+                fail(error("protocol", "Configuration response is invalid."));
+              patch = {
+                ...patch,
+                history: {
+                  excludedConversations: exclusions.filter(
+                    (rule) =>
+                      object(rule) && networks.some((network) => network.id === rule.networkId),
+                  ),
+                },
+              };
+            }
+          }
+          response = await save({ section: "user", patch });
           break;
         }
         case "networks connect":

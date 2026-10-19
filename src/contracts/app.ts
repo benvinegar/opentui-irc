@@ -112,9 +112,10 @@ export interface AppApi {
     expectedRevision: ConfigRevision,
     signal: AbortSignal,
   ): Promise<Result<OperationId>>;
-  /** Reload validated disk settings only if its revision still equals the inspected revision. */
+  /** Both the planned live base and inspected disk content must match at serial admission. */
   reloadSettings(
-    expectedRevision: ConfigRevision,
+    expectedDiskRevision: ConfigRevision,
+    expectedLiveRevision: ConfigRevision,
     signal: AbortSignal,
   ): Promise<Result<OperationId>>;
   /** Sole secret-string ingress from secure input. Never observable or logged; clear UI input afterward. */

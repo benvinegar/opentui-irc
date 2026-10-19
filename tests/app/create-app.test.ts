@@ -368,10 +368,10 @@ describe("application coordinator", () => {
       ),
     );
     expect(h.app.settings.getSnapshot()?.tui.theme).toBe("dark");
-    const stale = await h.app.reloadSettings(before.revision, signal());
+    const stale = await h.app.reloadSettings(before.revision, before.revision, signal());
     expect(stale.ok).toBe(false);
     expect(h.app.settings.getSnapshot()?.tui.theme).toBe("dark");
-    value(await h.app.reloadSettings(external.revision, signal()));
+    value(await h.app.reloadSettings(external.revision, before.revision, signal()));
     expect(h.app.settings.getSnapshot()?.revision).toBe(external.revision);
     expect(h.app.settings.getSnapshot()?.tui.theme).toBe("light");
   });

@@ -247,7 +247,9 @@ export function createControlService(options: ControlServiceOptions): ControlHan
           requireRights(request, ["configure", ...rights]);
           if (rights.includes("destructive")) confirm(params.confirm);
           if (signal.aborted) fail("cancelled", "Control request cancelled before reload.");
-          const operationId = unwrap(await options.app.reloadSettings(disk.revision, signal));
+          const operationId = unwrap(
+            await options.app.reloadSettings(disk.revision, current.revision, signal),
+          );
           return SUCCESS(request.id, {
             applied: true,
             revision: disk.revision,
