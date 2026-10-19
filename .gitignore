@@ -8,3 +8,4 @@ coverage/
 *.log
 *.sqlite*
 .DS_Store
+__pycache__/
