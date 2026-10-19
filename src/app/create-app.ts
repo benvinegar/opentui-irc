@@ -765,7 +765,23 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           ? { firstUnreadId: first.id }
           : {}),
     });
-    await persist([], [position]);
+    if (canPersist(c)) {
+      // A message received while logging was off may still be visible after it
+      // is re-enabled. Keep its read position in memory, not as a dangling FK,
+      // and never retroactively log its body just to create that bookmark.
+      const stored = await deps.history.context(message.id, 0, lifetime.signal);
+      if (!stored.ok && stored.error.code !== "unavailable") requireResult(stored);
+      if (
+        stored.ok &&
+        stored.value.some(
+          (item) =>
+            item.id === message.id &&
+            item.conversationId === c.view.id &&
+            item.networkId === c.view.networkId,
+        )
+      )
+        await persist([], [position]);
+    }
     const network = networks.get(c.view.networkId);
     if (syncToServer && network?.features.readMarkers && message.serverTime !== undefined) {
       const id = deps.ids.next<"operation">();
@@ -1663,7 +1679,11 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           }
           case "typing.set": {
             const c = getConversation(action.conversationId);
-            if (settings.user.sendTyping && networks.get(c.view.networkId)?.features.typing)
+            // Opt-out may still clear previously advertised activity.
+            if (
+              (settings.user.sendTyping || !action.active) &&
+              networks.get(c.view.networkId)?.features.typing
+            )
               await execute(
                 c.view.networkId,
                 { type: "typing", target: c.view.name, active: action.active },

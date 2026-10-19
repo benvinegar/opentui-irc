@@ -212,6 +212,52 @@ describe("application coordinator", () => {
     value(await h.app.dispatch({ type: "network.disconnect", networkId }, signal()));
     expect(requests()).toHaveLength(1);
   });
+  it("typing opt-out still permits a cleanup stop but never a new active announcement", async () => {
+    const h = await connected();
+    h.session.emit({
+      ...historySupport,
+      features: { ...appSnapshot.networks[0]!.features, typing: true },
+    });
+    await settle();
+    const preference = async (sendTyping: boolean) => {
+      const document = h.app.settings.getSnapshot()!;
+      value(
+        await h.app.saveSettings(
+          { section: "user", value: { ...document.user, sendTyping } },
+          document.revision,
+          signal(),
+        ),
+      );
+    };
+    await preference(true);
+    value(
+      await h.app.dispatch(
+        { type: "typing.set", conversationId: h.conversationId, active: true },
+        signal(),
+      ),
+    );
+    await preference(false);
+    value(
+      await h.app.dispatch(
+        { type: "typing.set", conversationId: h.conversationId, active: false },
+        signal(),
+      ),
+    );
+    value(
+      await h.app.dispatch(
+        { type: "typing.set", conversationId: h.conversationId, active: true },
+        signal(),
+      ),
+    );
+    expect(
+      h.session.commands
+        .filter((entry) => entry.command.type === "typing")
+        .map((entry) => entry.command),
+    ).toEqual([
+      { type: "typing", target: "#welcome", active: true },
+      { type: "typing", target: "#welcome", active: false },
+    ]);
+  });
   it("boots without network effects and cleans up once", async () => {
     const h = await setup();
     expect(h.sessions).toHaveLength(0);

@@ -258,7 +258,7 @@ function Shell(props: UiOptions) {
       network()?.features.typing === true &&
       active()?.kind !== "status",
     focused: typingFocused() && focusId() === "composer" && !modal(),
-    hasText: !!text.trim(),
+    hasText: !!text.trim() && (literalDraft() || !text.trimStart().startsWith("/")),
   });
   createEffect(() => typing.configure(typingContext(timeline()?.draft ?? "")));
   const quit = async () => {
@@ -326,7 +326,7 @@ function Shell(props: UiOptions) {
     }
     switch (intent.value.type) {
       case "action": {
-        typing.dispose();
+        typing.stop();
         sendBusy = true;
         const action = intent.value.action;
         const replyTo = reply();
@@ -335,6 +335,7 @@ function Shell(props: UiOptions) {
         );
         sendBusy = false;
         if (result.ok) {
+          if (action.type === "message.send") typing.messageSent(conversationId);
           const previous = histories.get(conversationId) ?? [];
           histories.set(conversationId, [
             ...previous.slice(-49),
@@ -1067,7 +1068,7 @@ function Shell(props: UiOptions) {
                 />
               </Show>
               <Show when={settings()?.tui.memberList && dimensions().width > 100}>
-                <text fg={colors.muted}>
+                <text height={1} flexShrink={0} fg={colors.muted}>
                   People:{" "}
                   {timeline()
                     ?.members.slice(0, 30)
@@ -1076,10 +1077,14 @@ function Shell(props: UiOptions) {
                 </text>
               </Show>
               <Show when={timeline()?.typing.length}>
-                <text fg={colors.muted}>Someone is typing…</text>
+                <text height={1} flexShrink={0} fg={colors.muted}>
+                  Someone is typing…
+                </text>
               </Show>
               <Show when={reply()}>
-                <text fg={colors.accent}>Replying to a message · Esc to cancel</text>
+                <text height={1} flexShrink={0} fg={colors.accent}>
+                  Replying to a message · Esc to cancel
+                </text>
               </Show>
               <box
                 height={6}

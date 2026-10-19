@@ -7,8 +7,13 @@ export interface TypingContext {
   readonly focused: boolean;
   readonly hasText: boolean;
 }
+interface Announcement {
+  active: boolean;
+  lastReport: number;
+  stopTimer?: ReturnType<typeof setTimeout>;
+}
 
-/** One UI-owned timer; never emits on merely restoring/focusing a saved draft. */
+/** UI-owned, bounded timers. Restored drafts never announce activity. */
 export function createTypingReporter(options: {
   report: (conversationId: ConversationId, active: boolean) => void;
   now?: () => number;
@@ -16,18 +21,42 @@ export function createTypingReporter(options: {
   idleMs?: number;
 }) {
   const now = options.now ?? Date.now;
-  const refreshMs = options.refreshMs ?? 4_000;
+  // IRCv3 throttles *all* typing notifications, including done. Leave the same
+  // scheduling margin as active refreshes; the session also guards actual writes.
+  const refreshMs = Math.max(3000, options.refreshMs ?? 4_000);
   const idleMs = options.idleMs ?? 6_000;
+  const announcements = new Map<ConversationId, Announcement>();
   let current: ConversationId | undefined;
-  let lastReport = 0;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearIdle = () => {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleTimer = undefined;
+  };
+  const clearStop = (entry: Announcement) => {
+    if (entry.stopTimer !== undefined) clearTimeout(entry.stopTimer);
+    delete entry.stopTimer;
+  };
+  const announce = (id: ConversationId, entry: Announcement, active: boolean) => {
+    entry.active = active;
+    entry.lastReport = now();
+    options.report(id, active);
+  };
   const stop = () => {
-    if (timer !== undefined) clearTimeout(timer);
-    timer = undefined;
-    if (current) {
-      const id = current;
-      current = undefined;
-      options.report(id, false);
+    clearIdle();
+    const id = current;
+    current = undefined;
+    if (!id) return;
+    const entry = announcements.get(id);
+    if (!entry?.active || entry.stopTimer !== undefined) return;
+    const delay = Math.max(0, refreshMs - (now() - entry.lastReport));
+    if (!delay) announce(id, entry, false);
+    else {
+      const timer = setTimeout(() => {
+        if (announcements.get(id) !== entry || entry.stopTimer !== timer) return;
+        delete entry.stopTimer;
+        if (entry.active) announce(id, entry, false);
+      }, delay);
+      entry.stopTimer = timer;
     }
   };
   const allowed = (context: TypingContext) =>
@@ -47,14 +76,40 @@ export function createTypingReporter(options: {
       }
       const id = context.conversationId!;
       if (current && current !== id) stop();
-      if (!current || now() - lastReport >= refreshMs) {
-        current = id;
-        lastReport = now();
-        options.report(id, true);
+      for (const [key, entry] of announcements)
+        if (!entry.active && entry.stopTimer === undefined && now() - entry.lastReport >= refreshMs)
+          announcements.delete(key);
+      let entry = announcements.get(id);
+      if (!entry) {
+        // Optional presence never creates an unbounded timer/cache on rapid switching.
+        if (announcements.size >= 16) return;
+        entry = { active: false, lastReport: -Infinity };
+        announcements.set(id, entry);
       }
-      if (timer !== undefined) clearTimeout(timer);
-      timer = setTimeout(stop, idleMs);
+      clearStop(entry);
+      current = id;
+      if (now() - entry.lastReport >= refreshMs) announce(id, entry, true);
+      clearIdle();
+      idleTimer = setTimeout(stop, idleMs);
     },
-    dispose: stop,
+    stop,
+    messageSent(id: ConversationId) {
+      if (current === id) {
+        clearIdle();
+        current = undefined;
+      }
+      const entry = announcements.get(id);
+      if (entry) {
+        clearStop(entry);
+        // The chat itself clears peer indicators; no redundant done packet.
+        entry.active = false;
+      }
+    },
+    dispose() {
+      clearIdle();
+      current = undefined;
+      for (const entry of announcements.values()) clearStop(entry);
+      announcements.clear();
+    },
   };
 }

@@ -28,3 +28,5 @@
 - Multi-channel joins/reconnects serialize automatic history requests instead of producing avoidable history-busy errors.
 - Saving appearance/history preferences closes the revision-bound form, avoiding false revision conflicts on subsequent changes.
 - Shared events replayed into multiple channel histories retain separate local occurrences instead of disconnecting or cross-merging messages/reactions/removals. Existing history upgrades retain a private `.schema-v1.bak` snapshot outside active retention/deletion.
+- Re-enabling logging keeps read markers for unlogged messages in memory instead of creating invalid durable bookmarks or retroactively saving message bodies.
+- Typing, reply and member hints reserve their own rows in short transcripts. Dialog/blur/opt-out cleanup respects IRCv3 pacing instead of producing rate-limit errors; slash-command input is not advertised.

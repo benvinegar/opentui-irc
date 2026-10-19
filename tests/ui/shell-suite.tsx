@@ -40,6 +40,73 @@ async function click(view: TestRendererSetup, id: string) {
 }
 
 describe("real Solid/OpenTUI shell", () => {
+  test("typing status has its own row above the composer in a full short transcript", async () => {
+    const { fake, view } = await mount();
+    view.resize(80, 24);
+    const model = fake.timelines.get(conversationId)!;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: Array.from({ length: 80 }, (_, index) => ({
+        ...welcomeMessage,
+        id: entityId<"message">(`typing-row-${index}`),
+        text: `filler-row-${index}-marker`,
+      })),
+    });
+    await view.renderOnce();
+    await view.renderOnce();
+    const transcript = view.renderer.root.findDescendantById("transcript");
+    if (!(transcript instanceof ScrollBoxRenderable)) throw new Error("Missing transcript");
+    transcript.scrollTo(transcript.scrollHeight);
+    await view.mockInput.typeText("QA bottom draft");
+    model.publish({ ...model.getSnapshot(), typing: [entityId<"user">("typing-user")] });
+    await view.renderOnce();
+    await view.renderOnce();
+    const frame = view.captureCharFrame();
+    expect(frame).toContain("QA bottom draft");
+    expect(frame).toContain("Someone is typing…");
+    const line = frame.split("\n").find((line) => line.includes("Someone is typing"))!;
+    expect(line.slice(line.indexOf("Someone")).trim()).toBe("Someone is typing…");
+  });
+  test("reply and member hints reserve rows beside typing in a full wide transcript", async () => {
+    const { fake, view } = await mount();
+    view.resize(110, 24);
+    const document = fake.settings.getSnapshot()!;
+    fake.settings.publish({ ...document, tui: { ...document.tui, memberList: true } });
+    fake.state.publish({
+      ...fake.state.getSnapshot(),
+      networks: fake.state.getSnapshot().networks.map((network) => ({
+        ...network,
+        features: { ...network.features, replies: true },
+      })),
+    });
+    const model = fake.timelines.get(conversationId)!;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: Array.from({ length: 80 }, (_, index) => ({
+        ...welcomeMessage,
+        id: entityId<"message">(`status-row-${index}`),
+        serverId: `status-${index}`,
+        text: `filler-row-${index}-marker`,
+      })),
+    });
+    await view.renderOnce();
+    await view.renderOnce();
+    const transcript = view.renderer.root.findDescendantById("transcript");
+    if (!(transcript instanceof ScrollBoxRenderable)) throw new Error("Missing transcript");
+    transcript.scrollTo(transcript.scrollHeight);
+    await view.renderOnce();
+    await click(view, "message-status-row-79");
+    await click(view, "reply-message");
+    model.publish({ ...model.getSnapshot(), typing: [entityId<"user">("typing-user")] });
+    await view.renderOnce();
+    await view.renderOnce();
+    const frame = view.captureCharFrame();
+    for (const hint of ["People:", "Someone is typing…", "Replying to a message · Esc to cancel"]) {
+      expect(frame).toContain(hint);
+      const line = frame.split("\n").find((line) => line.includes(hint))!;
+      expect(line.slice(line.indexOf(hint)).trim()).toBe(hint);
+    }
+  });
   test("saving history preferences closes the form and permits a fresh inverse change", async () => {
     const { fake, view } = await mount();
     for (const enabled of [false, true]) {
@@ -308,7 +375,7 @@ describe("real Solid/OpenTUI shell", () => {
       ),
     ).toBe(false);
   });
-  test("typing is opt-in/capability gated and stops when opening a dialog", async () => {
+  test("typing is opt-in/capability gated and stops after a paced dialog transition", async () => {
     const { fake, view } = await mount();
     await view.mockInput.typeText("a");
     expect(fake.actions.some((action) => action.type === "typing.set")).toBe(false);
@@ -329,12 +396,26 @@ describe("real Solid/OpenTUI shell", () => {
       { type: "typing.set", conversationId, active: true },
     ]);
     await view.mockInput.pressKey("F1");
-    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 4100));
     expect(fake.actions.filter((action) => action.type === "typing.set").at(-1)).toEqual({
       type: "typing.set",
       conversationId,
       active: false,
     });
+  });
+  test("typing does not advertise slash-command input", async () => {
+    const { fake, view } = await mount();
+    const document = fake.settings.getSnapshot()!;
+    fake.settings.publish({ ...document, user: { ...document.user, sendTyping: true } });
+    fake.state.publish({
+      ...fake.state.getSnapshot(),
+      networks: fake.state.getSnapshot().networks.map((network) => ({
+        ...network,
+        features: { ...network.features, typing: true },
+      })),
+    });
+    await view.mockInput.typeText("/whois guide");
+    expect(fake.actions.some((action) => action.type === "typing.set")).toBe(false);
   });
   test("removing an own server-backed message requires capability and explicit confirmation", async () => {
     const { fake, view } = await mount();

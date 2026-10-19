@@ -130,6 +130,70 @@ describe("app with strict real SQLite durability", () => {
     }
   });
 
+  test("reenabling logging never creates durable read markers for an unlogged message", async () => {
+    const { app, session, history, conversationId } = await setup();
+    value(await app.dispatch({ type: "conversation.activate", conversationId }, signal));
+    const logging = async (enabled: boolean) => {
+      const config = app.settings.getSnapshot()!;
+      value(
+        await app.saveSettings(
+          {
+            section: "user",
+            value: { ...config.user, history: { ...config.user.history, enabled } },
+          },
+          config.revision,
+          signal,
+        ),
+      );
+    };
+    await logging(false);
+    session.emit({
+      type: "chat",
+      message: {
+        target: "#welcome",
+        sender: { nick: "guide" },
+        kind: "text",
+        text: "off-the-record fixture",
+        receivedAt: 1_700_000_002_000,
+        source: "live",
+        serverId: "not-logged",
+      },
+    });
+    await settle();
+    const unlogged = value(app.timeline(conversationId)).getSnapshot().messages.at(-1)!;
+    expect(
+      app.state.getSnapshot().conversations.find((c) => c.id === conversationId)?.unreadCount,
+    ).toBe(1);
+    await logging(true);
+    value(
+      await app.dispatch(
+        {
+          type: "view.report",
+          conversationId,
+          focused: true,
+          atBottom: true,
+          lastVisibleMessageId: unlogged.id,
+        },
+        signal,
+      ),
+    );
+    expect(
+      app.state.getSnapshot().conversations.find((c) => c.id === conversationId)?.unreadCount,
+    ).toBe(0);
+    expect(app.state.getSnapshot().error).toBeUndefined();
+    expect(value(await history.loadReadPositions(signal))).toEqual([]);
+    expect(
+      value(await history.search({ text: "off-the-record", limit: 10 }, signal)).items,
+    ).toEqual([]);
+    expect(
+      (
+        await app.dispatch(
+          { type: "message.send", conversationId, text: "logging resumed", kind: "text" },
+          signal,
+        )
+      ).ok,
+    ).toBe(true);
+  });
   test("shortened retention removes durable bodies immediately and they remain absent after shutdown", async () => {
     const { app, h, session, history, conversationId, path } = await setup();
     session.emit({

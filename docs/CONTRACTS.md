@@ -94,6 +94,7 @@ No text-equality echo matching. A missing echo does not prove rejection. A succe
 
 - `commit` atomically writes conversation records, messages and read positions. Validate network/conversation foreign keys. Identical message-ID upserts are idempotent.
 - Only the app writes; it serializes merge operations. Repository does not invent echo correlations.
+- Persist read positions only when their target message already exists in that network/conversation's durable history. Reading an unlogged message may advance in-memory attention state; never log its body retroactively merely to create a bookmark.
 - Wire server IDs are network-scoped event identifiers, not local occurrence primary keys. Enforce `(networkId, conversationId, serverId)` uniqueness when an ID exists: a shared event can occur in several channel histories. Preserve local ID on echo enrichment and repeated playback within that conversation. A collision with another local row in the same conversation requires explicit merging; never merge occurrences, reactions, or redactions across targets.
 - Durable message order uses server time when available, otherwise receive time, plus deterministic stable tie-break metadata. Cursor/keyset pagination must not use OFFSET for large history. Newly received messages must not invalidate an older-page cursor and cause duplicates/skips in an unchanged older region.
 - Loading persisted pending/written messages after crash must not restart sends. App converts unresolved operations to uncertain as appropriate.
