@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { AppApi } from "../../src/contracts/app";
-import type { ConversationId, Result } from "../../src/contracts/common";
+import { entityId, type ConversationId, type Result } from "../../src/contracts/common";
 import type { SessionPayload } from "../../src/contracts/session";
 import { createApp } from "../../src/app/create-app";
 import { appSnapshot, networkId, settings } from "../fixtures/scenario";
@@ -80,7 +80,138 @@ function timeline(app: AppApi, id: ConversationId) {
   return value(app.timeline(id)).getSnapshot();
 }
 
+const historySupport: SessionPayload = {
+  type: "support",
+  features: { ...appSnapshot.networks[0]!.features, history: true },
+  support: {
+    casemapping: "rfc1459",
+    channelTypes: "#&",
+    prefixModes: "ov",
+    prefixSymbols: "@+",
+    channelModeGroups: ["b", "k", "l", "imnt"],
+    capabilities: { "draft/chathistory": null, batch: null, "server-time": null },
+  },
+};
 describe("application coordinator", () => {
+  it("serializes automatic history for joined channels and advances after completion or failure", async () => {
+    const h = await connected();
+    h.session.emit(historySupport);
+    for (const channel of ["#one", "#two", "#three"])
+      h.session.emit({
+        type: "membership",
+        channel,
+        change: { kind: "join", nick: "newcomer", prefixes: [] },
+      });
+    await settle();
+    const requests = () => h.session.commands.filter((entry) => entry.command.type === "history");
+    expect(requests()).toHaveLength(1);
+    expect(requests()[0]?.command).toMatchObject({ target: "#one" });
+    h.session.emit({
+      type: "history-complete",
+      operationId: entityId<"operation">("unrelated"),
+      target: "#one",
+      hasMore: false,
+    });
+    await settle();
+    expect(requests()).toHaveLength(1);
+    h.session.emit({
+      type: "history-complete",
+      operationId: entityId<"operation">(requests()[0]!.operationId),
+      target: "#one",
+      hasMore: false,
+    });
+    await settle();
+    expect(requests()).toHaveLength(2);
+    expect(requests()[1]?.command).toMatchObject({ target: "#two" });
+    h.session.emit({
+      type: "error",
+      operationId: entityId<"operation">(requests()[1]!.operationId),
+      error: { code: "unavailable", message: "Synthetic history timeout", retryable: true },
+    });
+    await settle();
+    expect(requests()).toHaveLength(3);
+    expect(requests()[2]?.command).toMatchObject({ target: "#three" });
+  });
+  it("automatic history waits for manual history and skips channels closed while queued", async () => {
+    const h = await connected();
+    h.session.emit(historySupport);
+    await settle();
+    const manual = value(
+      await h.app.dispatch(
+        { type: "history.load-older", conversationId: h.conversationId },
+        signal(),
+      ),
+    );
+    for (const channel of ["#closed", "#next"])
+      h.session.emit({
+        type: "membership",
+        channel,
+        change: { kind: "join", nick: "newcomer", prefixes: [] },
+      });
+    await settle();
+    const requests = () => h.session.commands.filter((entry) => entry.command.type === "history");
+    expect(requests()).toHaveLength(1);
+    const closed = h.app.state.getSnapshot().conversations.find((c) => c.name === "#closed")!;
+    value(
+      await h.app.dispatch({ type: "conversation.close", conversationId: closed.id }, signal()),
+    );
+    h.session.emit({
+      type: "history-complete",
+      operationId: manual.operationId,
+      target: "#welcome",
+      hasMore: false,
+    });
+    await settle();
+    expect(requests()).toHaveLength(2);
+    expect(requests()[1]?.command).toMatchObject({ target: "#next" });
+  });
+  it("a replacement session discards the old history queue and ignores its completions", async () => {
+    const h = await connected();
+    h.session.emit(historySupport);
+    for (const channel of ["#first", "#queued"])
+      h.session.emit({
+        type: "membership",
+        channel,
+        change: { kind: "join", nick: "newcomer", prefixes: [] },
+      });
+    await settle();
+    const old = h.session.commands.find((entry) => entry.command.type === "history")!;
+    value(await h.app.dispatch({ type: "network.reconnect", networkId }, signal()));
+    await settle();
+    const next = h.harness.session(networkId);
+    expect(next).not.toBe(h.session);
+    next.emit(historySupport);
+    next.emit({
+      type: "state",
+      phase: "ready",
+      nick: "newcomer",
+      secure: true,
+      authenticated: false,
+    });
+    for (const channel of ["#queued", "#third"])
+      next.emit({
+        type: "membership",
+        channel,
+        change: { kind: "join", nick: "newcomer", prefixes: [] },
+      });
+    await settle();
+    const requests = () => next.commands.filter((entry) => entry.command.type === "history");
+    expect(requests()).toHaveLength(1);
+    expect(requests()[0]?.command).toMatchObject({ target: "#queued" });
+    next.emit(
+      {
+        type: "history-complete",
+        operationId: entityId<"operation">(old.operationId),
+        target: "#first",
+        hasMore: false,
+      },
+      { generation: h.session.identity.generation },
+    );
+    await settle();
+    expect(requests()).toHaveLength(1);
+    value(await h.app.dispatch({ type: "network.disconnect", networkId }, signal()));
+    expect(requests()).toHaveLength(1);
+  });
   it("boots without network effects and cleans up once", async () => {
     const h = await setup();
     expect(h.sessions).toHaveLength(0);

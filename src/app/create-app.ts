@@ -90,6 +90,9 @@ interface Attempt {
   readonly generation: number;
   readonly controller: AbortController;
   readonly historyRequested: Set<ConversationId>;
+  /** At most MAX_CONVERSATIONS entries, deduplicated by historyRequested. */
+  readonly historyQueue: ConversationId[];
+  historyOperation?: OperationId;
   cursor: SessionCursor;
   session?: IrcSession;
   error?: AppError;
@@ -647,6 +650,34 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     if (!attempt?.session || networks.get(networkId)?.phase !== "ready")
       reject("unavailable", "Connect to this network first.");
     requireResult(await attempt.session.execute(command, id, attempt.controller.signal));
+    if (command.type === "history") attempt.historyOperation = id;
+  };
+  const drainHistory = async (networkId: NetworkId, attempt: Attempt) => {
+    if (
+      stopping ||
+      attempts.get(networkId) !== attempt ||
+      attempt.controller.signal.aborted ||
+      !attempt.session ||
+      networks.get(networkId)?.phase !== "ready" ||
+      !networks.get(networkId)?.features.history ||
+      attempt.error?.code === "network"
+    )
+      return;
+    while (!attempt.historyOperation && attempt.historyQueue.length) {
+      const c = conversations.get(attempt.historyQueue.shift()!);
+      if (!c || c.closed || !c.view.joined) continue;
+      const id = deps.ids.next<"operation">();
+      const result = await attempt.session.execute(
+        { type: "history", target: c.view.name, limit: PAGE_SIZE },
+        id,
+        attempt.controller.signal,
+      );
+      if (result.ok) attempt.historyOperation = id;
+      else {
+        report(result.error, networkId);
+        if (["network", "unavailable", "cancelled"].includes(result.error.code)) return;
+      }
+    }
   };
   const updateSend = async (
     id: OperationId,
@@ -968,12 +999,8 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           ) {
             attempt.historyRequested.add(c.view.id);
             await loadRecent(c);
-            const result = await attempt.session!.execute(
-              { type: "history", target: c.view.name, limit: PAGE_SIZE },
-              deps.ids.next<"operation">(),
-              attempt.controller.signal,
-            );
-            if (!result.ok) report(result.error, networkId);
+            attempt.historyQueue.push(c.view.id);
+            await drainHistory(networkId, attempt);
           }
         }
         break;
@@ -1067,6 +1094,11 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           });
         }
         await statusMessage(networkId, payload.error.message);
+        if (payload.operationId && payload.operationId === attempt.historyOperation) {
+          delete attempt.historyOperation;
+          if (!["network", "cancelled"].includes(payload.error.code))
+            await drainHistory(networkId, attempt);
+        }
         break;
       }
       case "notice":
@@ -1118,6 +1150,10 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       }
       case "history-complete":
         operation(payload.operationId, "completed");
+        if (payload.operationId === attempt.historyOperation) {
+          delete attempt.historyOperation;
+          await drainHistory(networkId, attempt);
+        }
         break;
       case "typing": {
         const c =
@@ -1321,6 +1357,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       controller: new AbortController(),
       cursor: startSessionCursor(identity),
       historyRequested: new Set(),
+      historyQueue: [],
     };
     attempts.set(networkId, attempt);
     support.delete(networkId);
