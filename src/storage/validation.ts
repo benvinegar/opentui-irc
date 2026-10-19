@@ -15,12 +15,19 @@ export function text(value: unknown, max = 65536): value is string {
     value.length <= max &&
     Array.from(value).every((character) => {
       const code = character.codePointAt(0)!;
-      return code === 9 || code === 10 || (code >= 32 && (code < 127 || code > 159));
+      return (
+        code === 9 ||
+        code === 10 ||
+        (code >= 32 && (code < 127 || code > 159) && (code < 0xd800 || code > 0xdfff))
+      );
     })
   );
 }
 export function identifier(value: unknown): value is string {
   return text(value, 512) && value.length > 0 && !/[\s]/u.test(value);
+}
+function label(value: unknown): value is string {
+  return text(value, 512) && value.trim().length > 0 && !/[\n\t]/u.test(value);
 }
 export function timestamp(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -40,7 +47,9 @@ function unique(value: readonly string[]): boolean {
 export function secretReference(value: unknown): value is string {
   return (
     typeof value === "string" &&
-    /^(env:[A-Za-z_][A-Za-z0-9_]{0,255}|keychain:[a-f0-9-]{36})$/u.test(value)
+    /^(env:[A-Za-z_][A-Za-z0-9_]{0,255}|keychain:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/u.test(
+      value,
+    )
   );
 }
 function channel(value: unknown): value is string {
@@ -70,8 +79,7 @@ export function validUserSettings(value: unknown): value is UserSettings {
         "autoJoin",
       ]) ||
       !identifier(network.id) ||
-      !text(network.name, 256) ||
-      !network.name.trim() ||
+      !label(network.name) ||
       typeof network.autoConnect !== "boolean"
     )
       return false;
@@ -152,7 +160,7 @@ export function validUserSettings(value: unknown): value is UserSettings {
       !identifier(exclusion.networkId) ||
       !ids.includes(exclusion.networkId) ||
       !oneOf(exclusion.kind, ["channel", "direct", "status"]) ||
-      !identifier(exclusion.name)
+      !(exclusion.kind === "status" ? label(exclusion.name) : identifier(exclusion.name))
     )
       return false;
     exclusions.push(JSON.stringify([exclusion.networkId, exclusion.kind, exclusion.name]));
@@ -203,7 +211,7 @@ export function validConversation(value: unknown): value is ConversationRecord {
     identifier(value.id) &&
     identifier(value.networkId) &&
     oneOf(value.kind, ["channel", "direct", "status"]) &&
-    identifier(value.name)
+    (value.kind === "status" ? label(value.name) : identifier(value.name))
   );
 }
 export function validMessage(value: unknown): value is Message {

@@ -101,7 +101,12 @@ function document(sources: Sources): SettingsDocument {
 }
 /** Leaf edits preserve JSONC comments/formatting on unchanged fields, including array elements. */
 function updateJsonc(source: string | null, previous: unknown, next: unknown): string {
-  if (source === null) return `${JSON.stringify(next, null, 2)}\n`;
+  if (source === null) {
+    const created = `${JSON.stringify(next, null, 2)}\n`;
+    if (Buffer.byteLength(created) > MAX_CONFIG_BYTES)
+      throw new StorageFault("invalid-input", "Settings exceed the file size limit.");
+    return created;
+  }
   let result = source;
   function update(path: (string | number)[], before: unknown, after: unknown): void {
     if (JSON.stringify(before) === JSON.stringify(after)) return;

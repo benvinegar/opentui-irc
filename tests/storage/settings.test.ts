@@ -210,6 +210,60 @@ describe("JSONC settings", () => {
     expect((await repository.load(signal)).ok).toBe(false);
   });
 
+  test("concurrent repository instances serialize cooperating writers", async () => {
+    const { directory, repository } = await setup();
+    const other = createSettingsRepository(directory);
+    const loaded = value(await repository.load(signal));
+    const results = await Promise.all([
+      repository.save({ section: "user", value: loaded.user }, loaded.revision, signal),
+      other.save({ section: "tui", value: loaded.tui }, loaded.revision, signal),
+    ]);
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    expect(results.filter((result) => !result.ok && result.error.code === "conflict")).toHaveLength(
+      1,
+    );
+    expect((await readdir(directory)).filter((entry) => entry.startsWith(".settings"))).toEqual([]);
+  });
+
+  test("first save cannot create an oversized file that later loads would reject", async () => {
+    const { directory, repository } = await setup();
+    const loaded = value(await repository.load(signal));
+    const networkId = entityId<"network">("n");
+    const oversized = {
+      ...loaded.user,
+      networks: [
+        {
+          id: networkId,
+          name: "Example",
+          endpoints: [{ host: "localhost", port: 6697, tls: true }],
+          identity: { nick: "tester", alternateNicks: [], username: "tester", realname: "Test" },
+          autoConnect: false,
+          autoJoin: [],
+        },
+      ],
+      history: {
+        ...loaded.user.history,
+        excludedConversations: Array.from({ length: 6000 }, (_, index) => ({
+          networkId,
+          kind: "direct" as const,
+          name: `${"x".repeat(200)}${index}`,
+        })),
+      },
+    };
+    const result = await repository.save(
+      { section: "user", value: oversized },
+      loaded.revision,
+      signal,
+    );
+    expect(result.ok ? null : result.error.code).toBe("invalid-input");
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  test("requires an explicit nonempty directory without falling back to cwd", async () => {
+    const result = await createSettingsRepository("").load(signal);
+    expect(result.ok ? null : result.error.code).toBe("invalid-input");
+  });
+
   test("accepts trailing commas, rejects oversized files and observes cancellation without writes", async () => {
     const { directory, repository } = await setup();
     await writeFile(

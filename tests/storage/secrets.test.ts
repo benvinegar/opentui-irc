@@ -71,6 +71,20 @@ describe("credential references", () => {
     expect((await createSecretProvider().store("private-test-value", signal)).ok).toBe(false);
     expect(remove).toHaveBeenCalled();
   });
+  test("aborting a pending OS lookup promptly unblocks and detaches its abort listener", async () => {
+    vi.stubGlobal("Bun", { secrets: { get: vi.fn(() => new Promise(() => {})) } });
+    const controller = new AbortController();
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const pending = createSecretProvider().resolve(
+      entityId("keychain:00000000-0000-0000-0000-000000000000"),
+      controller.signal,
+    );
+    controller.abort();
+    const result = await pending;
+    expect(result.ok ? null : result.error.code).toBe("cancelled");
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
+
   test("cancellation happens before any credential access and empty strings are rejected", async () => {
     const set = vi.fn();
     vi.stubGlobal("Bun", { secrets: { set, get: vi.fn() } });

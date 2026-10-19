@@ -29,10 +29,21 @@ type MessageRow = {
   network_id: string;
   server_id: string | null;
   order_time: number;
+  sender: string;
+  search_text: string;
   body: string;
 };
 type Position = { time: number; id: string };
 const MAX_PAGE = 500;
+const MAX_BATCH_BYTES = 16 * 1024 * 1024;
+function checkPayload(items: readonly unknown[], limit = MAX_BATCH_BYTES): void {
+  let bytes = 0;
+  for (const item of items) {
+    bytes += Buffer.byteLength(JSON.stringify(item));
+    if (bytes > limit)
+      throw new StorageFault("invalid-input", "Storage payload exceeds the supported size.");
+  }
+}
 function validLimit(value: number): boolean {
   return Number.isInteger(value) && value > 0 && value <= MAX_PAGE;
 }
@@ -72,6 +83,8 @@ function decodeMessage(row: MessageRow): Message {
     value.networkId !== row.network_id ||
     (value.serverId ?? null) !== row.server_id ||
     (value.serverTime ?? value.receivedAt) !== row.order_time ||
+    value.sender.nick !== row.sender ||
+    value.text !== row.search_text ||
     (value.redacted && (value.text !== "" || value.reactions.length !== 0))
   )
     throw new StorageFault("storage", "Stored history is invalid.");
@@ -193,6 +206,7 @@ function repository(db: Database): HistoryRepository {
           !batch.readPositions.every(validReadPosition)
         )
           throw new StorageFault("invalid-input", "Invalid history batch.");
+        checkPayload([...batch.conversations, ...batch.messages, ...batch.readPositions]);
         db.transaction(() => {
           for (const conversation of batch.conversations) {
             const existing = db
@@ -275,17 +289,17 @@ function repository(db: Database): HistoryRepository {
                 "invalid-input",
                 "Read position does not belong to its conversation.",
               );
-            const previous = db
-              .query<{ order_time: number; id: string }, [string]>(
-                "SELECT m.order_time,m.id FROM read_positions r JOIN messages m ON m.id=r.message_id WHERE r.conversation_id=?",
+            const newerPosition = db
+              .query<{ id: string }, [string, number, number, string]>(
+                "SELECT m.id FROM read_positions r JOIN messages m ON m.id=r.message_id WHERE r.conversation_id=? AND (m.order_time > ? OR (m.order_time = ? AND m.id > ?))",
               )
-              .get(position.conversationId);
-            if (
-              previous &&
-              (previous.order_time > target.order_time ||
-                (previous.order_time === target.order_time && previous.id > position.messageId))
-            )
-              continue;
+              .get(
+                position.conversationId,
+                target.order_time,
+                target.order_time,
+                position.messageId,
+              );
+            if (newerPosition) continue;
             db.query(
               "INSERT INTO read_positions(conversation_id,message_id,read_at) VALUES(?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET message_id=excluded.message_id,read_at=max(read_at,excluded.read_at)",
             ).run(position.conversationId, position.messageId, position.readAt);
@@ -464,6 +478,10 @@ function repository(db: Database): HistoryRepository {
       return perform(signal, () => {
         if (!validWorkspace(state))
           throw new StorageFault("invalid-input", "Invalid workspace state.");
+        checkPayload(
+          [...state.conversationOrder, ...state.mutedConversations, ...state.drafts],
+          8 * 1024 * 1024,
+        );
         db.transaction(() => {
           const ids = [
             ...state.conversationOrder,

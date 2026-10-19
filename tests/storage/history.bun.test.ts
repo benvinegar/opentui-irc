@@ -342,6 +342,73 @@ describe("SQLite history", () => {
     expect((await repository.close()).ok).toBe(false);
   });
 
+  test("status labels allow spaces; Unicode ID ties use SQLite ordering for read monotonicity", async () => {
+    const { repository } = await openHistory();
+    const status: ConversationRecord = { ...first, kind: "status", name: "Example Network status" };
+    const lower = message("\ue000", 10);
+    const higher = message("\u{10000}", 10);
+    value(
+      await repository.commit(
+        {
+          conversations: [status],
+          messages: [higher, lower],
+          readPositions: [{ conversationId: status.id, messageId: higher.id, readAt: 10 }],
+        },
+        signal,
+      ),
+    );
+    value(
+      await repository.commit(
+        {
+          conversations: [],
+          messages: [],
+          readPositions: [{ conversationId: status.id, messageId: lower.id, readAt: 20 }],
+        },
+        signal,
+      ),
+    );
+    expect(value(await repository.loadReadPositions(signal))[0]?.messageId).toBe(higher.id);
+    expect(
+      value(await repository.page(status.id, { limit: 10 }, signal)).items.map((item) => item.id),
+    ).toEqual([lower.id, higher.id]);
+  });
+
+  test("rejects unregistered workspace references and externally corrupted search columns", async () => {
+    const { repository, path } = await openHistory();
+    expect(
+      (
+        await repository.saveWorkspace(
+          { conversationOrder: [first.id], mutedConversations: [], drafts: [] },
+          signal,
+        )
+      ).ok,
+    ).toBe(false);
+    value(
+      await repository.commit(
+        { conversations: [first], messages: [message("a", 10)], readPositions: [] },
+        signal,
+      ),
+    );
+    const raw = new Database(path);
+    raw.exec("UPDATE messages SET search_text='inconsistent private body'");
+    raw.close();
+    const result = await repository.search({ text: "inconsistent", limit: 1 }, signal);
+    expect(result.ok ? null : result.error.code).toBe("storage");
+    expect(JSON.stringify(result)).not.toContain("private body");
+    expect(
+      (
+        await repository.commit(
+          {
+            conversations: [],
+            messages: [message("invalid", 20, { text: "bad\x1b[31m" })],
+            readPositions: [],
+          },
+          signal,
+        )
+      ).ok,
+    ).toBe(false);
+  });
+
   test("rejects newer schema and corrupt stored data with safe errors", async () => {
     const { repository, path } = await openHistory();
     value(
