@@ -146,6 +146,33 @@ export function SettingsForm(props: {
     );
     props.focus(`connect-${id}`);
   };
+  const preset = (label: string, hostname: string) => {
+    setName(label);
+    setHost(hostname);
+    setPort("6697");
+    setError("");
+    setPassword("");
+    setStoredSecret(undefined);
+    setAccount("");
+    setVariable("");
+    setChannel("");
+  };
+  const saveTyping = async () => {
+    if (busy()) return;
+    setBusy(true);
+    const result = await props.app.saveSettings(
+      { section: "user", value: { ...original.user, sendTyping: !original.user.sendTyping } },
+      original.revision,
+      formAbort.signal,
+    );
+    setBusy(false);
+    if (result.ok) {
+      props.status(
+        "Typing preference saved. Activity is shared only with networks that negotiate support.",
+      );
+      props.focus("settings");
+    } else setError(result.error.message);
+  };
   const savePrivacy = async () => {
     if (busy()) return;
     setBusy(true);
@@ -178,6 +205,25 @@ export function SettingsForm(props: {
           : ""}
         ; review Privacy below.
       </text>
+      <text fg={colors.muted}>
+        Optional presets only fill the form; nothing connects until you save and choose Connect.
+      </text>
+      <box height={1} flexShrink={0} flexDirection="row">
+        <Button
+          id="preset-libera"
+          layer="modal"
+          label="Libera.Chat"
+          disabled={busy()}
+          onPress={() => preset("Libera.Chat", "irc.libera.chat")}
+        />
+        <Button
+          id="preset-oftc"
+          layer="modal"
+          label="OFTC"
+          disabled={busy()}
+          onPress={() => preset("OFTC", "irc.oftc.net")}
+        />
+      </box>
       <Field
         id="network-name"
         label="Network display name"
@@ -280,6 +326,21 @@ export function SettingsForm(props: {
         }
         disabled={busy()}
         onPress={() => void savePrivacy()}
+      />
+      <text fg={colors.muted}>
+        Share typing activity: {original.user.sendTyping ? "on" : "off"}. This is optional,
+        transient, and only works on supported networks.
+      </text>
+      <Button
+        id="typing-toggle"
+        layer="modal"
+        label={
+          original.user.sendTyping
+            ? "Stop sharing typing activity"
+            : "Share typing activity on supported networks"
+        }
+        disabled={busy()}
+        onPress={() => void saveTyping()}
       />
       <text fg={colors.accent}>Appearance</text>
       <box flexDirection="row" height={1}>

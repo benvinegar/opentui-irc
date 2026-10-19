@@ -20,7 +20,7 @@ import {
 } from "@opentui/solid";
 import { ScrollBoxRenderable, type Renderable, type TextareaRenderable } from "@opentui/core";
 import type { AppAction, AppApi } from "../contracts/app";
-import type { ConversationId, MessageId } from "../contracts/common";
+import type { ConversationId, MessageId, NetworkId } from "../contracts/common";
 import type { Message, TimelineSnapshot } from "../contracts/model";
 import type {
   CommandService,
@@ -31,6 +31,8 @@ import type {
 import { useReadable } from "./bridge";
 import { Button, Dialog, Field, FocusContext, ThemeContext, usePalette } from "./primitives";
 import { SettingsForm } from "./settings";
+import { DiscoveryPanel } from "./discovery";
+import { createTypingReporter } from "./typing";
 
 export interface UiOptions {
   readonly app: AppApi;
@@ -47,6 +49,10 @@ type Modal =
   | "search"
   | "paste"
   | "message"
+  | "messages"
+  | "directory"
+  | "whois"
+  | "redact"
   | "quit"
   | null;
 const cleanPaste = (value: string) =>
@@ -79,6 +85,10 @@ function Shell(props: UiOptions) {
   const [paste, setPaste] = createSignal("");
   const [literalDraft, setLiteralDraft] = createSignal(false);
   const [selectedMessage, setSelectedMessage] = createSignal<Message>();
+  const [discoveryNetwork, setDiscoveryNetwork] = createSignal<NetworkId>();
+  const [requestedNick, setRequestedNick] = createSignal("");
+  const [typingFocused, setTypingFocused] = createSignal(true);
+  const [redacting, setRedacting] = createSignal(false);
   const [reply, setReply] = createSignal<MessageId>();
   const [results, setResults] = createSignal<readonly Message[]>([]);
   const [searching, setSearching] = createSignal(false);
@@ -172,6 +182,10 @@ function Shell(props: UiOptions) {
     setPaste("");
     queueMicrotask(() => focus(returnFocus));
   };
+  const closeToComposer = () => {
+    returnFocus = "composer";
+    closeModal();
+  };
   const openModal = (value: Modal) => {
     if (!modal()) returnFocus = focusId();
     setFormText("");
@@ -180,17 +194,48 @@ function Shell(props: UiOptions) {
       const target =
         value === "settings"
           ? "network-name"
-          : ["join", "query", "switch", "search"].includes(value ?? "")
-            ? "dialog-input"
-            : "dialog-close";
+          : value === "whois"
+            ? "whois-nick"
+            : value === "directory"
+              ? "directory-filter"
+              : ["join", "query", "switch", "search"].includes(value ?? "")
+                ? "dialog-input"
+                : "dialog-close";
       focus(target);
     });
   };
   const run = async (action: AppAction) => {
+    if (
+      action.type === "irc.request" &&
+      (action.command.type === "list" || action.command.type === "whois")
+    ) {
+      const target = action.command.type === "list" ? "directory" : "whois";
+      const needsOpen = modal() !== target || discoveryNetwork() !== action.networkId;
+      setDiscoveryNetwork(action.networkId);
+      if (action.command.type === "whois") setRequestedNick(action.command.nick);
+      if (needsOpen) openModal(target);
+    }
     const result = await props.app.dispatch(action, abort.signal);
     if (!result.ok) setStatus(result.error.message);
     return result;
   };
+  const typing = createTypingReporter({
+    report: (conversationId, active) => {
+      void run({ type: "typing.set", conversationId, active });
+    },
+  });
+  onCleanup(typing.dispose);
+  const typingContext = (text: string) => ({
+    ...(activeId() ? { conversationId: activeId()! } : {}),
+    enabled: settings()?.user.sendTyping === true,
+    available:
+      network()?.phase === "ready" &&
+      network()?.features.typing === true &&
+      active()?.kind !== "status",
+    focused: typingFocused() && focusId() === "composer" && !modal(),
+    hasText: !!text.trim(),
+  });
+  createEffect(() => typing.configure(typingContext(timeline()?.draft ?? "")));
   const quit = async () => {
     if (props.onQuit) await props.onQuit();
     else {
@@ -201,8 +246,7 @@ function Shell(props: UiOptions) {
   };
   const activate = (id: ConversationId) => {
     void run({ type: "conversation.activate", conversationId: id });
-    closeModal();
-    focus("composer");
+    closeToComposer();
   };
   createEffect(() => {
     const value = timeline();
@@ -230,6 +274,7 @@ function Shell(props: UiOptions) {
       setStatus("Draft limit is 32,768 characters. Remove some text before sending.");
       return;
     }
+    typing.activity(typingContext(text));
     void run({ type: "draft.set", conversationId: active()!.id, text });
   };
   const send = async () => {
@@ -256,6 +301,7 @@ function Shell(props: UiOptions) {
     }
     switch (intent.value.type) {
       case "action": {
+        typing.dispose();
         sendBusy = true;
         const action = intent.value.action;
         const replyTo = reply();
@@ -309,8 +355,7 @@ function Shell(props: UiOptions) {
     setLiteralDraft(true);
     if (active()) literalConversations.add(active()!.id);
     syncDraft();
-    closeModal();
-    focus("composer");
+    closeToComposer();
   };
   usePaste((event) => {
     if (modal() || focusId() !== "composer") return;
@@ -486,7 +531,7 @@ function Shell(props: UiOptions) {
     }
     if (intent.value.type === "action") {
       const result = await run(intent.value.action);
-      if (result.ok) closeModal();
+      if (result.ok) closeToComposer();
     }
   };
   const matchingConversations = () =>
@@ -494,8 +539,14 @@ function Shell(props: UiOptions) {
       item.name.toLowerCase().includes(formText().toLowerCase()),
     );
   onResize(captureAnchor);
-  onFocus(() => setTerminalFocused(true));
-  onBlur(() => setTerminalFocused(false));
+  onFocus(() => {
+    setTerminalFocused(true);
+    setTypingFocused(true);
+  });
+  onBlur(() => {
+    setTerminalFocused(false);
+    setTypingFocused(false);
+  });
   onMount(() => {
     focus("composer");
     const restoreAnchor = () => {
@@ -540,8 +591,36 @@ function Shell(props: UiOptions) {
       renderer.requestRender();
     }
   });
+  const canRedact = (message: Message) => {
+    const net = state().networks.find((item) => item.id === message.networkId);
+    return (
+      !!net &&
+      net.phase === "ready" &&
+      net.features.redaction &&
+      !!message.serverId &&
+      !message.redacted &&
+      message.kind !== "event" &&
+      activeId() === message.conversationId &&
+      (message.source === "local" || message.sender.nick === net.nick)
+    );
+  };
+  const redact = async () => {
+    const message = messages().find((item) => item.id === selectedMessage()?.id);
+    if (redacting() || !message || !canRedact(message)) {
+      setStatus("This message can no longer be removed on this network.");
+      return;
+    }
+    setRedacting(true);
+    const result = await run({ type: "message.redact", messageId: message.id });
+    setRedacting(false);
+    if (result.ok) {
+      closeModal();
+      setStatus("Removal requested. Other clients or logs may still retain a copy.");
+    }
+  };
   const messageActions = () => {
-    const message = selectedMessage();
+    const selected = selectedMessage();
+    const message = selected && (messages().find((item) => item.id === selected.id) ?? selected);
     if (!message) return null;
     const links = message.text.match(/https?:\/\/[^\s<>]+/gu) ?? [];
     return (
@@ -570,8 +649,7 @@ function Shell(props: UiOptions) {
             label="Reply to this message"
             onPress={() => {
               setReply(message.id);
-              closeModal();
-              focus("composer");
+              closeToComposer();
             }}
           />
         </Show>
@@ -587,6 +665,29 @@ function Shell(props: UiOptions) {
                 value: "👍",
                 remove: false,
               });
+            }}
+          />
+        </Show>
+        <Button
+          id="message-whois"
+          layer="modal"
+          label={`Look up ${message.sender.nick}`}
+          onPress={() => {
+            void run({
+              type: "irc.request",
+              networkId: message.networkId,
+              command: { type: "whois", nick: message.sender.nick },
+            });
+          }}
+        />
+        <Show when={canRedact(message)}>
+          <Button
+            id="redact-message"
+            layer="modal"
+            label="Remove my message…"
+            onPress={() => {
+              setSelectedMessage(message);
+              openModal("redact");
             }}
           />
         </Show>
@@ -690,6 +791,28 @@ function Shell(props: UiOptions) {
                           net.phase === "disconnected" ? "network.connect" : "network.disconnect",
                         networkId: net.id,
                       });
+                    }}
+                  />
+                  <Button
+                    id={`browse-${net.id}`}
+                    label="Browse channels"
+                    disabled={net.phase !== "ready"}
+                    onPress={() => {
+                      void run({
+                        type: "irc.request",
+                        networkId: net.id,
+                        command: { type: "list" },
+                      });
+                    }}
+                  />
+                  <Button
+                    id={`people-${net.id}`}
+                    label="Look up a person"
+                    disabled={net.phase !== "ready"}
+                    onPress={() => {
+                      setDiscoveryNetwork(net.id);
+                      setRequestedNick("");
+                      openModal("whois");
                     }}
                   />
                   <For each={["channel", "direct", "status"] as const}>
@@ -801,11 +924,16 @@ function Shell(props: UiOptions) {
                 />
                 <Button
                   id="leave"
-                  label="Close conversation"
+                  label="Close"
                   onPress={() => {
                     if (active())
                       void run({ type: "conversation.close", conversationId: active()!.id });
                   }}
+                />
+                <Button
+                  id="message-picker"
+                  label="Messages…"
+                  onPress={() => openModal("messages")}
                 />
               </box>
               <scrollbox
@@ -996,8 +1124,8 @@ function Shell(props: UiOptions) {
                   document={settings()!}
                   signal={abort.signal}
                   focus={(id) => {
+                    returnFocus = id;
                     closeModal();
-                    focus(id);
                   }}
                   status={setStatus}
                 />
@@ -1078,7 +1206,7 @@ function Shell(props: UiOptions) {
                       void run({ type: "history.reveal", messageId: message.id }).then((result) => {
                         if (result.ok) {
                           setReveal(message.id);
-                          closeModal();
+                          closeToComposer();
                         }
                       });
                     }}
@@ -1102,7 +1230,59 @@ function Shell(props: UiOptions) {
                 onPress={insertPaste}
               />
             </Show>
+            <Show when={(modal() === "directory" || modal() === "whois") && discoveryNetwork()}>
+              <DiscoveryPanel
+                app={props.app}
+                networkId={discoveryNetwork()!}
+                networkName={
+                  state().networks.find((item) => item.id === discoveryNetwork())?.name ??
+                  "Selected network"
+                }
+                mode={modal() === "directory" ? "directory" : "whois"}
+                requestedNick={requestedNick()}
+                dispatch={async (action) => (await run(action)).ok}
+                close={closeToComposer}
+              />
+            </Show>
+            <Show when={modal() === "messages"}>
+              <text fg={colors.muted}>
+                Select a message for copy, person details, or supported reply/reaction/removal
+                actions.
+              </text>
+              <For each={messages()}>
+                {(message) => (
+                  <Button
+                    id={`pick-${message.id}`}
+                    layer="modal"
+                    label={`${message.sender.nick}: ${message.redacted ? "[message removed]" : message.text.slice(0, 100)}`}
+                    onPress={() => {
+                      setSelectedMessage(message);
+                      openModal("message");
+                    }}
+                  />
+                )}
+              </For>
+            </Show>
             <Show when={modal() === "message"}>{messageActions()}</Show>
+            <Show when={modal() === "redact"}>
+              <text fg={colors.error}>
+                Remove your message from this conversation? This cannot be undone. Other clients,
+                server history, exports, or logs may still retain a copy.
+              </text>
+              <Button
+                id="redact-confirm"
+                layer="modal"
+                label={redacting() ? "Requesting removal…" : "Yes, remove my message"}
+                disabled={
+                  redacting() ||
+                  !messages().some(
+                    (message) => message.id === selectedMessage()?.id && canRedact(message),
+                  )
+                }
+                onPress={() => void redact()}
+              />
+              <Button id="redact-cancel" layer="modal" label="Keep message" onPress={closeModal} />
+            </Show>
             <Show when={modal() === "quit"}>
               <text fg={colors.text}>
                 OpenIRC will close its connections and flush local history. It does not remain

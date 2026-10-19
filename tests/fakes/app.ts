@@ -4,8 +4,10 @@ import {
   type Readable,
   type Result,
   type ConversationId,
+  type NetworkId,
 } from "../../src/contracts/common";
 import type { AppSnapshot, Message, TimelineSnapshot } from "../../src/contracts/model";
+import type { DiscoverySnapshot } from "../../src/contracts/discovery";
 import type { SettingsDocument } from "../../src/contracts/settings";
 import { appSnapshot, settings as initialSettings, timelineSnapshot } from "../fixtures/scenario";
 
@@ -53,6 +55,16 @@ export function createFakeApp(initial: AppSnapshot = appSnapshot) {
         messages: item.id === timelineSnapshot.conversationId ? timelineSnapshot.messages : [],
       }),
     );
+  const discoveries = new Map<NetworkId, ReturnType<typeof model<DiscoverySnapshot>>>();
+  for (const network of initial.networks)
+    discoveries.set(
+      network.id,
+      model<DiscoverySnapshot>({
+        networkId: network.id,
+        directory: { state: "idle", items: [], truncated: false },
+        user: { state: "idle" },
+      }),
+    );
   const actions: AppAction[] = [];
   let sequence = 0;
   const receipt = () => {
@@ -68,13 +80,37 @@ export function createFakeApp(initial: AppSnapshot = appSnapshot) {
       const value = timelines.get(id);
       return value ? { ok: true, value } : unavailable<Readable<TimelineSnapshot>>();
     },
-    discovery() {
-      return unavailable();
+    discovery(id) {
+      const value = discoveries.get(id);
+      return value ? { ok: true, value } : unavailable<Readable<DiscoverySnapshot>>();
     },
     async dispatch(action, signal) {
       if (signal.aborted)
         return { ok: false, error: { code: "cancelled", message: "Cancelled.", retryable: false } };
       actions.push(action);
+      if (action.type === "irc.request") {
+        const discovery = discoveries.get(action.networkId);
+        if (discovery && action.command.type === "list")
+          discovery.publish({
+            ...discovery.getSnapshot(),
+            directory: { state: "loading", items: [], truncated: false },
+          });
+        if (discovery && action.command.type === "whois")
+          discovery.publish({ ...discovery.getSnapshot(), user: { state: "loading" } });
+      }
+      if (action.type === "message.redact") {
+        for (const timeline of timelines.values())
+          timeline.publish({
+            ...timeline.getSnapshot(),
+            messages: timeline
+              .getSnapshot()
+              .messages.map((message) =>
+                message.id === action.messageId
+                  ? { ...message, redacted: true, text: "", reactions: [] }
+                  : message,
+              ),
+          });
+      }
       if (action.type === "conversation.activate")
         state.publish({
           ...state.getSnapshot(),
@@ -91,7 +127,7 @@ export function createFakeApp(initial: AppSnapshot = appSnapshot) {
         timeline.publish({
           ...timeline.getSnapshot(),
           messages: [
-            ...timeline.getSnapshot().messages.slice(-198),
+            ...timeline.getSnapshot().messages.slice(-299),
             {
               ...timelineSnapshot.messages[0]!,
               id: entityId<"message">(`fake-message-${sequence + 1}`),
@@ -203,13 +239,14 @@ export function createFakeApp(initial: AppSnapshot = appSnapshot) {
     settings,
     operations,
     timelines,
+    discoveries,
     actions,
     incoming(message: Message) {
       const timeline = timelines.get(message.conversationId);
       if (timeline)
         timeline.publish({
           ...timeline.getSnapshot(),
-          messages: [...timeline.getSnapshot().messages.slice(-198), message],
+          messages: [...timeline.getSnapshot().messages.slice(-299), message],
         });
     },
     setDraft(id: ConversationId, draft: string) {

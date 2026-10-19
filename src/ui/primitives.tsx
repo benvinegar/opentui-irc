@@ -142,6 +142,7 @@ export function Field(props: {
   value: string;
   onInput: (value: string) => void;
   placeholder?: string;
+  onSubmit?: () => void;
 }) {
   const colors = usePalette();
   const control = useControl(props.id, "modal");
@@ -163,6 +164,7 @@ export function Field(props: {
         focused={control.focused()}
         onMouseDown={control.select}
         onInput={props.onInput}
+        onSubmit={() => props.onSubmit?.()}
         placeholder={props.placeholder ?? ""}
         backgroundColor={colors.raised}
         focusedBackgroundColor={colors.bg}

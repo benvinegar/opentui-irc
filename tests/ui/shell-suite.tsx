@@ -40,6 +40,157 @@ async function click(view: TestRendererSetup, id: string) {
 }
 
 describe("real Solid/OpenTUI shell", () => {
+  test("channel directory opens from /list, streams bounded/filterable results, and joins the pinned network", async () => {
+    const { fake, view } = await mount();
+    await view.mockInput.typeText("/list");
+    await view.mockInput.pressEnter();
+    await tick();
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("Receiving directory");
+    const discovery = fake.discoveries.get(welcomeMessage.networkId)!;
+    discovery.publish({
+      ...discovery.getSnapshot(),
+      directory: {
+        state: "ready",
+        truncated: true,
+        items: Array.from({ length: 150 }, (_, index) => ({
+          channel: `#room-${index}`,
+          userCount: index,
+          topic: `Community ${index}`,
+        })),
+      },
+    });
+    await view.renderOnce();
+    expect(view.renderer.root.findDescendantById("directory-join-99")).toBeDefined();
+    expect(view.renderer.root.findDescendantById("directory-join-100")).toBeUndefined();
+    expect(view.captureCharFrame()).toContain("Some channels");
+    expect(view.captureCharFrame()).toContain("are omitted");
+    await click(view, "directory-filter");
+    await view.mockInput.typeText("#room-149");
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("Join #room-149");
+    await click(view, "directory-join-0");
+    expect(
+      fake.actions.some(
+        (action) =>
+          action.type === "conversation.join" &&
+          action.channel === "#room-149" &&
+          action.networkId === welcomeMessage.networkId,
+      ),
+    ).toBe(true);
+    expect(discovery.subscribers).toBe(0);
+  });
+  test("WHOIS renders live details/errors and opens a direct conversation", async () => {
+    const { fake, view } = await mount();
+    await view.mockInput.typeText("/whois guide");
+    await view.mockInput.pressEnter();
+    await tick();
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("Waiting for the network");
+    const discovery = fake.discoveries.get(welcomeMessage.networkId)!;
+    discovery.publish({
+      ...discovery.getSnapshot(),
+      user: {
+        state: "failed",
+        error: { code: "network", message: "No such nickname.", retryable: false },
+      },
+    });
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("No such nickname");
+    discovery.publish({
+      ...discovery.getSnapshot(),
+      user: {
+        state: "ready",
+        details: {
+          nick: "guide",
+          realname: "Community guide",
+          account: "guide-account",
+          awayReason: "Lunch",
+          channels: ["#welcome"],
+        },
+      },
+    });
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("Community guide");
+    expect(view.captureCharFrame()).toContain("Away: Lunch");
+    await click(view, "whois-message");
+    expect(
+      fake.actions.some(
+        (action) => action.type === "conversation.query" && action.nick === "guide",
+      ),
+    ).toBe(true);
+  });
+  test("optional presets only populate setup and never save/connect without consent", async () => {
+    const { fake, view } = await mount();
+    const before = fake.settings.getSnapshot();
+    await click(view, "add-network");
+    await click(view, "preset-libera");
+    expect(view.captureCharFrame()).toContain("irc.libera.chat");
+    await click(view, "preset-oftc");
+    expect(view.captureCharFrame()).toContain("irc.oftc.net");
+    expect(fake.settings.getSnapshot()).toBe(before);
+    expect(
+      fake.actions.some(
+        (action) => action.type === "network.connect" || action.type === "conversation.join",
+      ),
+    ).toBe(false);
+  });
+  test("typing is opt-in/capability gated and stops when opening a dialog", async () => {
+    const { fake, view } = await mount();
+    await view.mockInput.typeText("a");
+    expect(fake.actions.some((action) => action.type === "typing.set")).toBe(false);
+    const document = fake.settings.getSnapshot()!;
+    fake.settings.publish({ ...document, user: { ...document.user, sendTyping: true } });
+    await view.mockInput.typeText("b");
+    expect(fake.actions.some((action) => action.type === "typing.set")).toBe(false);
+    fake.state.publish({
+      ...fake.state.getSnapshot(),
+      networks: fake.state.getSnapshot().networks.map((network) => ({
+        ...network,
+        features: { ...network.features, typing: true },
+      })),
+    });
+    await view.mockInput.typeText("cde");
+    await tick();
+    expect(fake.actions.filter((action) => action.type === "typing.set")).toEqual([
+      { type: "typing.set", conversationId, active: true },
+    ]);
+    await view.mockInput.pressKey("F1");
+    await tick();
+    expect(fake.actions.filter((action) => action.type === "typing.set").at(-1)).toEqual({
+      type: "typing.set",
+      conversationId,
+      active: false,
+    });
+  });
+  test("removing an own server-backed message requires capability and explicit confirmation", async () => {
+    const { fake, view } = await mount();
+    const timeline = fake.timelines.get(conversationId)!;
+    const own = { ...welcomeMessage, serverId: "server-own", sender: { nick: "newcomer" } };
+    timeline.publish({ ...timeline.getSnapshot(), messages: [own] });
+    await view.renderOnce();
+    await click(view, "message-picker");
+    await click(view, `pick-${own.id}`);
+    expect(view.renderer.root.findDescendantById("redact-message")).toBeUndefined();
+    fake.state.publish({
+      ...fake.state.getSnapshot(),
+      networks: fake.state.getSnapshot().networks.map((network) => ({
+        ...network,
+        features: { ...network.features, redaction: true },
+      })),
+    });
+    await view.renderOnce();
+    await click(view, "redact-message");
+    expect(fake.actions.some((action) => action.type === "message.redact")).toBe(false);
+    await click(view, "redact-cancel");
+    expect(fake.actions.some((action) => action.type === "message.redact")).toBe(false);
+    await click(view, "message-picker");
+    await click(view, `pick-${own.id}`);
+    await click(view, "redact-message");
+    await click(view, "redact-confirm");
+    expect(fake.actions.filter((action) => action.type === "message.redact")).toHaveLength(1);
+    expect(timeline.getSnapshot().messages[0]?.redacted).toBe(true);
+  });
   test("network onboarding is mouse-first and persists only secret references", async () => {
     const { fake, view } = await mount();
     await click(view, "add-network");
@@ -122,6 +273,18 @@ describe("real Solid/OpenTUI shell", () => {
         (action) => action.type === "conversation.join" && action.channel === "#newcomers",
       ),
     ).toBe(true);
+    const joinedId = fake.state.getSnapshot().activeConversationId;
+    await view.mockInput.typeText("Hello channel");
+    await view.mockInput.pressEnter();
+    await tick();
+    expect(
+      fake.actions.some(
+        (action) =>
+          action.type === "message.send" &&
+          action.text === "Hello channel" &&
+          action.conversationId === joinedId,
+      ),
+    ).toBe(true);
     await click(view, "query");
     await click(view, "dialog-input");
     await view.mockInput.typeText("friend");
@@ -132,6 +295,19 @@ describe("real Solid/OpenTUI shell", () => {
         (action) => action.type === "conversation.query" && action.nick === "friend",
       ),
     ).toBe(true);
+    const directId = fake.state.getSnapshot().activeConversationId;
+    await view.mockInput.typeText("Hello friend");
+    await view.mockInput.pressEnter();
+    await tick();
+    expect(
+      fake.actions.some(
+        (action) =>
+          action.type === "message.send" &&
+          action.text === "Hello friend" &&
+          action.conversationId === directId,
+      ),
+    ).toBe(true);
+    expect(fake.actions.filter((action) => action.type === "conversation.query")).toHaveLength(1);
   });
   test("a historical window offers an explicit app-level return to latest", async () => {
     const { fake, view } = await mount();
