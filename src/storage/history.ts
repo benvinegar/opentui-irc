@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { chmod, mkdir } from "node:fs/promises";
+import { chmod, mkdir, open, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { entityId, type Cursor, type Result } from "../contracts/common";
 import type { Message } from "../contracts/model";
@@ -104,7 +104,7 @@ export async function createHistoryRepository(path: string): Promise<Result<Hist
     const version = db
       .query<{ user_version: number }, []>("PRAGMA user_version")
       .get()?.user_version;
-    if (version !== 0 && version !== 1)
+    if (version !== 0 && version !== 1 && version !== 2)
       throw new StorageFault("unsupported", "History database schema is not supported.");
     if (version === 0) {
       if (
@@ -122,13 +122,44 @@ export async function createHistoryRepository(path: string): Promise<Result<Hist
         db!.exec(`
           CREATE TABLE conversations (id TEXT PRIMARY KEY, network_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('channel','direct','status')), name TEXT NOT NULL, UNIQUE(id, network_id));
           CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, network_id TEXT NOT NULL, server_id TEXT, order_time INTEGER NOT NULL, sender TEXT NOT NULL, search_text TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(id, conversation_id), FOREIGN KEY(conversation_id, network_id) REFERENCES conversations(id, network_id));
-          CREATE UNIQUE INDEX message_server_identity ON messages(network_id, server_id) WHERE server_id IS NOT NULL;
+          CREATE UNIQUE INDEX message_server_identity ON messages(network_id, conversation_id, server_id) WHERE server_id IS NOT NULL;
           CREATE INDEX message_conversation_order ON messages(conversation_id, order_time DESC, id DESC);
           CREATE INDEX message_order ON messages(order_time DESC, id DESC);
           CREATE INDEX message_network_order ON messages(network_id, order_time DESC, id DESC);
           CREATE TABLE read_positions (conversation_id TEXT PRIMARY KEY REFERENCES conversations(id), message_id TEXT NOT NULL, read_at INTEGER NOT NULL, FOREIGN KEY(message_id, conversation_id) REFERENCES messages(id, conversation_id) ON DELETE CASCADE);
           CREATE TABLE workspace (singleton INTEGER PRIMARY KEY CHECK(singleton=1), body TEXT NOT NULL);
-          PRAGMA user_version = 1;
+          PRAGMA user_version = 2;
+        `);
+      })();
+    }
+    if (version === 1) {
+      // VACUUM INTO snapshots committed WAL content too; create the target privately
+      // before SQLite writes it. Never overwrite an earlier migration backup.
+      const backupPath = `${path}.schema-v1.bak`;
+      let backup;
+      try {
+        backup = await open(backupPath, "wx", 0o600);
+      } catch (cause) {
+        if (cause instanceof Error && "code" in cause && cause.code === "EEXIST")
+          throw new StorageFault(
+            "conflict",
+            "History migration backup already exists. Preserve it and inspect before retrying.",
+          );
+        throw new StorageFault("storage", "Could not create a private history migration backup.");
+      }
+      try {
+        await backup.close();
+        db.query("VACUUM INTO ?").run(backupPath);
+      } catch (cause) {
+        await backup.close().catch(() => {});
+        await unlink(backupPath).catch(() => {});
+        throw cause;
+      }
+      db.transaction(() => {
+        db!.exec(`
+          DROP INDEX message_server_identity;
+          CREATE UNIQUE INDEX message_server_identity ON messages(network_id, conversation_id, server_id) WHERE server_id IS NOT NULL;
+          PRAGMA user_version = 2;
         `);
       })();
     }
@@ -255,10 +286,10 @@ function repository(db: Database): HistoryRepository {
               );
             if (message.serverId !== undefined) {
               const collision = db
-                .query<{ id: string }, [string, string]>(
-                  "SELECT id FROM messages WHERE network_id=? AND server_id=?",
+                .query<{ id: string }, [string, string, string]>(
+                  "SELECT id FROM messages WHERE network_id=? AND conversation_id=? AND server_id=?",
                 )
-                .get(message.networkId, message.serverId);
+                .get(message.networkId, message.conversationId, message.serverId);
               if (collision && collision.id !== message.id)
                 throw new StorageFault(
                   "conflict",
@@ -323,15 +354,15 @@ function repository(db: Database): HistoryRepository {
         );
       });
     },
-    findByServerId(networkId, serverId, signal) {
+    findByServerId(networkId, conversationId, serverId, signal) {
       return perform(signal, () => {
-        if (!identifier(networkId) || !identifier(serverId))
+        if (!identifier(networkId) || !identifier(conversationId) || !identifier(serverId))
           throw new StorageFault("invalid-input", "Invalid server message identity.");
         const row = db
-          .query<MessageRow, [string, string]>(
-            "SELECT * FROM messages WHERE network_id=? AND server_id=?",
+          .query<MessageRow, [string, string, string]>(
+            "SELECT * FROM messages WHERE network_id=? AND conversation_id=? AND server_id=?",
           )
-          .get(networkId, serverId);
+          .get(networkId, conversationId, serverId);
         return row ? decodeMessage(row) : null;
       });
     },

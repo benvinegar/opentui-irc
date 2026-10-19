@@ -92,7 +92,7 @@ Contracts are **revision 1, internal and evolvable**, not semver-stable public A
 ### Identity rules
 
 - Opaque generated IDs are stable; names are mutable labels. Never use array positions or nick strings as message/user IDs.
-- Every server message ID is scoped by network. Every user and channel lookup uses negotiated IRC casemapping, not Unicode `toLowerCase()`.
+- Wire server message IDs are scoped by network; local event occurrences and deduplication are additionally scoped by conversation because a shared event can appear in several channel histories. Every user and channel lookup uses negotiated IRC casemapping, not Unicode `toLowerCase()`.
 - Conversation records are persisted before their history/read positions become durable. Restore the registry on boot before history windows.
 - Network status is a conversation too, but not a message target. Reject sends to status conversations.
 - A direct conversation follows nick changes for a currently tracked user. User IDs are never merged merely because a nickname/account string matches. Current DM conversation history is **nickname-address based**, not a verified-person archive: a nickname reused after QUIT/reconnect can share the existing conversation while sender IDs differ. The UI warns about nickname reuse. Durable peer/account-bound archives need a coordinated registry/API change; see ADR-008 in DECISIONS.md.
@@ -155,7 +155,7 @@ Ignore/mute/filter are different policies: ignore suppresses selected users/cont
 
 ### History and search
 
-Read local history first. Request server/bouncer history only when negotiated and needed; absence is normal. Merge by scoped server IDs and reliable operation correlation, not heuristic timestamp/text dedupe. If no reliable identity exists, avoid dropping legitimate repeated messages.
+Read local history first. Request server/bouncer history only when negotiated and needed; absence is normal. Merge by `(networkId, conversationId, serverId)` and reliable operation correlation, not heuristic timestamp/text dedupe or cross-conversation ID matches. If no reliable identity exists, avoid dropping legitimate repeated messages.
 
 `HistoryRepository.page()` returns a chronological page and opaque cursor to older items. Search returns newest matches first with deterministic ties. `history.reveal` loads context and activates the relevant conversation; UI scrolls to the stable message ID. Prepending and resize anchoring are UI responsibilities with domain-provided stable IDs.
 

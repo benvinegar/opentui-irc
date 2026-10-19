@@ -75,7 +75,7 @@ Implement independent factories for `HistoryRepository`, `SettingsRepository`, `
 Acceptance:
 
 - SQLite schema/migrations for stable conversation registry, messages, search, read positions and workspace; atomic commits and deterministic keyset pagination.
-- Query-bound cursor rejection, missing context target, server-ID collision conflict, deletion/retention/search cleanup tests.
+- Query-bound cursor rejection, missing context target, same-conversation server-ID collision conflict, deletion/retention/search cleanup tests.
 - JSONC validation, revision/CAS conflict including external-edit race, single-file atomic save and failure recovery tests.
 - Environment secret resolver first; keychain proof before interactive secret saving is claimed. Unsupported secure store returns an explicit failure, never plaintext fallback.
 - Temp directories/databases only in tests. Bun-runtime integration for `bun:sqlite`.

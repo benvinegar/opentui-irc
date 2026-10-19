@@ -61,8 +61,10 @@ export interface HistoryRepository {
     radius: number,
     signal: AbortSignal,
   ): Promise<Result<readonly Message[]>>;
+  /** Look up an event's occurrence in this conversation, never merge across targets. */
   findByServerId(
     networkId: NetworkId,
+    conversationId: ConversationId,
     serverId: string,
     signal: AbortSignal,
   ): Promise<Result<Message | null>>;

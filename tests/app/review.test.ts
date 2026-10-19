@@ -322,13 +322,34 @@ describe("app persistence/lifecycle review regressions", () => {
     expect(messages[0]?.sendState).toBe("echo-observed");
   });
 
-  it("does not overwrite another conversation when a scoped server identity collides", async () => {
-    const { app, h, conversationId, emit } = await setup();
-    await emit("scoped", 10);
+  it("preserves cross-channel event occurrences and scopes their reactions/redactions", async () => {
+    const { app, h, session, conversationId, emit } = await setup();
+    await emit("scoped", 10, "#welcome", "HistServ");
     const original = timeline(app, conversationId).messages[0]!;
-    await emit("scoped", 20, "newcomer", "peer");
+    await emit("scoped", 10, "#other", "HistServ");
+    await emit("scoped", 10, "#other", "HistServ");
+    const other = app.state.getSnapshot().conversations.find((c) => c.name === "#other")!;
+    const occurrence = timeline(app, other.id).messages[0]!;
+    expect(occurrence.id).not.toBe(original.id);
+    expect(timeline(app, other.id).messages).toHaveLength(1);
     expect(h.messages.get(original.id)?.conversationId).toBe(conversationId);
-    expect(app.state.getSnapshot().error?.code).toBe("conflict");
+    expect(app.state.getSnapshot().networks[0]?.phase).toBe("ready");
+    expect(app.state.getSnapshot().error).toBeUndefined();
+    session.emit({
+      type: "reaction",
+      target: "#other",
+      serverId: "scoped",
+      nick: "guide",
+      value: "👍",
+      remove: false,
+    });
+    await settle();
+    expect(timeline(app, other.id).messages[0]?.reactions).toHaveLength(1);
+    expect(timeline(app, conversationId).messages[0]?.reactions).toEqual([]);
+    session.emit({ type: "redaction", target: "#other", serverId: "scoped" });
+    await settle();
+    expect(timeline(app, other.id).messages[0]?.redacted).toBe(true);
+    expect(timeline(app, conversationId).messages[0]?.redacted).toBe(false);
   });
   it("prunes during long running sessions, adopts retention edits immediately and cancels maintenance on shutdown", async () => {
     const { app, h, conversationId } = await setup();

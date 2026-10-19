@@ -173,10 +173,13 @@ export function harness(initialSettings: SettingsDocument = fixtureSettings) {
             )
           : failure("unavailable");
       },
-      async findByServerId(networkId, serverId) {
+      async findByServerId(networkId, conversationId, serverId) {
         return success(
           [...messages.values()].find(
-            (message) => message.networkId === networkId && message.serverId === serverId,
+            (message) =>
+              message.networkId === networkId &&
+              message.conversationId === conversationId &&
+              message.serverId === serverId,
           ) ?? null,
         );
       },

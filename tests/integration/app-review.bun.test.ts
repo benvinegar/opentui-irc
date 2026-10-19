@@ -111,9 +111,9 @@ describe("app with strict real SQLite durability", () => {
       },
     });
     await settle();
-    expect(value(await history.findByServerId(networkId, "durable-echo", signal))?.id).toBe(
-      sent.messageId!,
-    );
+    expect(
+      value(await history.findByServerId(networkId, conversationId, "durable-echo", signal))?.id,
+    ).toBe(sent.messageId!);
     value(
       await app.dispatch({ type: "draft.set", conversationId, text: "erase this draft" }, signal),
     );
@@ -122,14 +122,16 @@ describe("app with strict real SQLite durability", () => {
     const reopened = value(await createHistoryRepository(path));
     try {
       expect(value(await reopened.loadWorkspace(signal)).drafts).toEqual([]);
-      expect(value(await reopened.findByServerId(networkId, "durable-echo", signal))).toBeNull();
+      expect(
+        value(await reopened.findByServerId(networkId, conversationId, "durable-echo", signal)),
+      ).toBeNull();
     } finally {
       await reopened.close();
     }
   });
 
   test("shortened retention removes durable bodies immediately and they remain absent after shutdown", async () => {
-    const { app, h, session, history, path } = await setup();
+    const { app, h, session, history, conversationId, path } = await setup();
     session.emit({
       type: "chat",
       message: {
@@ -143,7 +145,9 @@ describe("app with strict real SQLite durability", () => {
       },
     });
     await settle();
-    expect(value(await history.findByServerId(networkId, "old-body", signal))).not.toBeNull();
+    expect(
+      value(await history.findByServerId(networkId, conversationId, "old-body", signal)),
+    ).not.toBeNull();
     const config = app.settings.getSnapshot()!;
     value(
       await app.saveSettings(
@@ -155,7 +159,9 @@ describe("app with strict real SQLite durability", () => {
         signal,
       ),
     );
-    expect(value(await history.findByServerId(networkId, "old-body", signal))).toBeNull();
+    expect(
+      value(await history.findByServerId(networkId, conversationId, "old-body", signal)),
+    ).toBeNull();
     value(await app.shutdown());
     const reopened = value(await createHistoryRepository(path));
     try {

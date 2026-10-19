@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { entityId, type Result } from "../../src/contracts/common";
@@ -57,6 +57,92 @@ afterEach(async () => {
 });
 
 describe("SQLite history", () => {
+  test("upgrades v1 with a private consistent WAL backup and preserves per-conversation occurrences", async () => {
+    const { repository, path } = await openHistory();
+    const legacy = message("legacy", 100, { serverId: "shared-event" });
+    value(
+      await repository.commit(
+        { conversations: [first], messages: [legacy], readPositions: [] },
+        signal,
+      ),
+    );
+    value(await repository.close());
+    const raw = new Database(path);
+    try {
+      raw.exec(
+        "DROP INDEX message_server_identity; CREATE UNIQUE INDEX message_server_identity ON messages(network_id,server_id) WHERE server_id IS NOT NULL; PRAGMA user_version=1;",
+      );
+      const wal = { ...legacy, text: "committed WAL content" };
+      raw
+        .query("UPDATE messages SET body=?,search_text=? WHERE id=?")
+        .run(JSON.stringify(wal), wal.text, wal.id);
+      const upgraded = value(await createHistoryRepository(path));
+      repositories.push(upgraded);
+      expect(value(await upgraded.page(first.id, { limit: 10 }, signal)).items).toEqual([wal]);
+      const backupPath = `${path}.schema-v1.bak`;
+      expect((await stat(backupPath)).mode & 0o777).toBe(0o600);
+      const backup = new Database(backupPath, { readonly: true });
+      try {
+        expect(
+          backup.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version,
+        ).toBe(1);
+        const body = backup
+          .query<{ body: string }, [string]>("SELECT body FROM messages WHERE id=?")
+          .get(legacy.id)?.body;
+        expect(body && JSON.parse(body)).toEqual(wal);
+      } finally {
+        backup.close();
+      }
+      const other: ConversationRecord = { ...first, id: entityId("other-channel"), name: "#other" };
+      const occurrence = {
+        ...wal,
+        id: entityId<"message">("other-occurrence"),
+        conversationId: other.id,
+      };
+      value(
+        await upgraded.commit(
+          { conversations: [other], messages: [occurrence], readPositions: [] },
+          signal,
+        ),
+      );
+      expect(
+        value(await upgraded.findByServerId(first.networkId, first.id, "shared-event", signal))?.id,
+      ).toBe(legacy.id);
+      expect(
+        value(await upgraded.findByServerId(first.networkId, other.id, "shared-event", signal))?.id,
+      ).toBe(occurrence.id);
+      value(await upgraded.close());
+      const reopened = value(await createHistoryRepository(path));
+      repositories.push(reopened);
+      expect(value(await reopened.page(other.id, { limit: 10 }, signal)).items).toEqual([
+        occurrence,
+      ]);
+    } finally {
+      raw.close();
+    }
+  });
+  test("never overwrites a preexisting migration backup or upgrades without a fresh backup", async () => {
+    const { repository, path } = await openHistory();
+    value(await repository.close());
+    const raw = new Database(path);
+    raw.exec(
+      "DROP INDEX message_server_identity; CREATE UNIQUE INDEX message_server_identity ON messages(network_id,server_id) WHERE server_id IS NOT NULL; PRAGMA user_version=1;",
+    );
+    raw.close();
+    const backupPath = `${path}.schema-v1.bak`;
+    await writeFile(backupPath, "preserve this existing backup", { flag: "wx", mode: 0o600 });
+    const opened = await createHistoryRepository(path);
+    expect(opened.ok ? null : opened.error.code).toBe("conflict");
+    expect(await readFile(backupPath, "utf8")).toBe("preserve this existing backup");
+    const unchanged = new Database(path, { readonly: true });
+    try {
+      expect(
+        unchanged.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version,
+      ).toBe(1);
+    } finally {
+      unchanged.close();
+    }
+  });
   test("migrates, persists registry/workspace/messages/read positions and idempotently enriches local identity", async () => {
     const { repository, path } = await openHistory();
     const local = message("local", 100, { source: "local", sendState: "pending" });
@@ -92,21 +178,30 @@ describe("SQLite history", () => {
     repositories.push(reopened);
     expect(value(await reopened.loadConversations(signal))).toEqual([first]);
     expect(value(await reopened.page(first.id, { limit: 10 }, signal)).items).toEqual([echo]);
-    expect(value(await reopened.findByServerId(first.networkId, "server-1", signal))).toEqual(echo);
-    expect(value(await reopened.findByServerId(second.networkId, "server-1", signal))).toBeNull();
+    expect(
+      value(await reopened.findByServerId(first.networkId, first.id, "server-1", signal)),
+    ).toEqual(echo);
+    expect(
+      value(await reopened.findByServerId(second.networkId, first.id, "server-1", signal)),
+    ).toBeNull();
+    expect(
+      value(await reopened.findByServerId(first.networkId, second.id, "server-1", signal)),
+    ).toBeNull();
     expect(value(await reopened.loadReadPositions(signal))).toEqual(batch.readPositions);
     expect(value(await reopened.loadWorkspace(signal)).drafts[0]?.text).toBe("draft");
     expect((await stat(path)).mode & 0o777).toBe(0o600);
   });
 
-  test("enforces scoped server identities, immutable identities and atomic rollback", async () => {
+  test("enforces conversation-scoped event occurrences, immutable identities and atomic rollback", async () => {
     const { repository } = await openHistory();
+    const third: ConversationRecord = { ...first, id: entityId("conversation-3"), name: "#third" };
     value(
       await repository.commit(
         {
-          conversations: [first, second],
+          conversations: [first, second, third],
           messages: [
             message("a", 10, { serverId: "same" }),
+            message("occurrence", 10, { conversationId: third.id, serverId: "same" }),
             message("b", 10, {
               conversationId: second.id,
               networkId: second.networkId,
@@ -118,6 +213,9 @@ describe("SQLite history", () => {
         signal,
       ),
     );
+    expect(
+      value(await repository.findByServerId(first.networkId, third.id, "same", signal))?.id,
+    ).toBe(entityId("occurrence"));
     const conflict = await repository.commit(
       {
         conversations: [],

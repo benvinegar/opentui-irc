@@ -31,6 +31,7 @@ History is local **plaintext SQLite**, enabled for 30 days by default. New priva
 - Logging exclusions are checked before persistence, including saved drafts.
 - Disabling logging prevents future message-body writes; it does not implicitly erase old history.
 - Local deletion cannot remove server/bouncer/recipient copies or guarantee forensic erasure from SQLite/filesystem storage.
+- The v1→v2 history upgrade retains an owner-only `<database>.schema-v1.bak` snapshot before changing the index. It contains plaintext bodies and is outside active retention/deletion. Handle that backup consciously; an existing backup is never silently overwritten.
 - Configuration contains credential references, not their resolved values. References, hostnames, nicknames, channel names and database paths can themselves be sensitive.
 - Settings do not automatically load from the working directory. Bun's own runtime/environment-file behavior is separate from OpenIRC configuration; use trusted launch environments.
 - Normal filesystem operations cannot fully eliminate a race with an arbitrary non-cooperating editor. Saves detect revisions, serialize cooperating writers and atomically replace one file; see [adapter guarantees](../src/storage/README.md).

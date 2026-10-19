@@ -631,9 +631,13 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     }
     return undefined;
   };
-  const findServerMessage = (networkId: NetworkId, serverId: string): Message | undefined => {
+  const findServerMessage = (
+    networkId: NetworkId,
+    conversationId: ConversationId,
+    serverId: string,
+  ): Message | undefined => {
     for (const c of conversations.values()) {
-      if (c.view.networkId !== networkId) continue;
+      if (c.view.networkId !== networkId || c.view.id !== conversationId) continue;
       const message = [...c.recent, ...timeline(c).messages].find(
         (item) => item.serverId === serverId,
       );
@@ -897,10 +901,11 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         const local = incoming.operationId ? pending.get(incoming.operationId) : undefined;
         let existing = local && (findMessage(local.messageId)?.message ?? local.message);
         if (!existing && incoming.serverId) {
-          existing = findServerMessage(networkId, incoming.serverId);
+          existing = findServerMessage(networkId, c.view.id, incoming.serverId);
           if (!existing) {
             const stored = await deps.history.findByServerId(
               networkId,
+              c.view.id,
               incoming.serverId,
               lifetime.signal,
             );
@@ -1188,10 +1193,11 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       case "redaction": {
         const c = findConversation(networkId, payload.target);
         if (!c) break;
-        let message = findServerMessage(networkId, payload.serverId);
+        let message = findServerMessage(networkId, c.view.id, payload.serverId);
         if (!message) {
           const found = await deps.history.findByServerId(
             networkId,
+            c.view.id,
             payload.serverId,
             lifetime.signal,
           );
