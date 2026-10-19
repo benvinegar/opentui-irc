@@ -1,7 +1,17 @@
 import type { AppAction, UserIrcCommand } from "../contracts/app";
 import type { Result } from "../contracts/common";
 import type { ControlError, ControlPermission, JsonObject } from "../contracts/control";
-import { boolean, choice, ControlFault, fields, opaqueId, string } from "./validation";
+import { secretReference } from "../storage/validation";
+import {
+  boolean,
+  choice,
+  ControlFault,
+  fail,
+  fields,
+  opaqueId,
+  OPAQUE_ID_PATTERN,
+  string,
+} from "./validation";
 
 type Shape = { readonly required: readonly string[]; readonly optional?: readonly string[] };
 const SHAPES = {
@@ -45,16 +55,19 @@ function ircCommand(value: unknown): UserIrcCommand {
   switch (type) {
     case "nick":
     case "whois":
-      return { type, nick: string(command.nick, 512) };
+      return { type, nick: bounded(command.nick, nickProperty) };
     case "away":
-      return { type, reason: command.reason === null ? null : string(command.reason, 4096) };
+      return {
+        type,
+        reason: command.reason === null ? null : bounded(command.reason, awayProperty),
+      };
     case "list":
       return { type };
     case "topic":
       return {
         type,
-        channel: string(command.channel, 512),
-        ...(command.text !== undefined ? { text: string(command.text) } : {}),
+        channel: bounded(command.channel, channelProperty),
+        ...(command.text !== undefined ? { text: bounded(command.text, contentProperty) } : {}),
       };
   }
 }
@@ -95,12 +108,15 @@ export function parseAppAction(value: unknown): Result<AppAction, ControlError> 
           value: {
             type,
             networkId: network(),
-            channel: string(action.channel, 512),
-            ...(action.key !== undefined ? { key: opaqueId<"secret-ref">(action.key) } : {}),
+            channel: bounded(action.channel, channelProperty),
+            ...(action.key !== undefined ? { key: secretKey(action.key) } : {}),
           },
         };
       case "conversation.query":
-        return { ok: true, value: { type, networkId: network(), nick: string(action.nick, 512) } };
+        return {
+          ok: true,
+          value: { type, networkId: network(), nick: bounded(action.nick, queryNickProperty) },
+        };
       case "conversation.mute":
         return {
           ok: true,
@@ -117,7 +133,7 @@ export function parseAppAction(value: unknown): Result<AppAction, ControlError> 
           value: {
             type,
             conversationId: conversation(),
-            text: string(action.text),
+            text: bounded(action.text, messageProperty),
             kind: choice(action.kind, ["text", "action", "notice"]),
             ...(action.replyTo !== undefined
               ? { replyTo: opaqueId<"message">(action.replyTo) }
@@ -130,7 +146,7 @@ export function parseAppAction(value: unknown): Result<AppAction, ControlError> 
           value: {
             type,
             messageId: message(),
-            value: string(action.value, 64),
+            value: bounded(action.value, reactionProperty),
             remove: boolean(action.remove),
           },
         };
@@ -218,8 +234,62 @@ export function permissionsForAction(action: AppAction): readonly ControlPermiss
 }
 
 const stringProperty: JsonObject = { type: "string", maxLength: 65536 };
-const identifierProperty: JsonObject = { type: "string", minLength: 1, maxLength: 512 };
-function propertiesFor(shape: Shape): JsonObject {
+const identifierProperty: JsonObject = {
+  type: "string",
+  minLength: 1,
+  maxLength: 512,
+  pattern: OPAQUE_ID_PATTERN,
+};
+const nickProperty: JsonObject = {
+  type: "string",
+  minLength: 1,
+  maxLength: 200,
+  pattern: "^[^\\s\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff,:]+$",
+};
+const queryNickProperty: JsonObject = { ...nickProperty, maxLength: 100 };
+const channelProperty: JsonObject = {
+  type: "string",
+  minLength: 2,
+  maxLength: 200,
+  pattern: "^[#&+!][^\\s\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff,:]+$",
+};
+const reactionProperty: JsonObject = {
+  type: "string",
+  minLength: 1,
+  maxLength: 64,
+  pattern: "^[^\\s\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]+$",
+};
+const contentProperty: JsonObject = { ...stringProperty, pattern: "^[^\\r\\n\\u0000]*$" };
+const awayProperty: JsonObject = { ...contentProperty, maxLength: 4096 };
+const messageProperty: JsonObject = {
+  ...stringProperty,
+  minLength: 1,
+  pattern: "^(?=[\\s\\S]*\\S)[^\\r\\u0000\\u0001]*$",
+};
+const secretProperty: JsonObject = {
+  type: "string",
+  minLength: 1,
+  maxLength: 260,
+  pattern:
+    "^(env:[A-Za-z_][A-Za-z0-9_]{0,255}|keychain:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$",
+  description: "Secret reference only, never plaintext or a resolved credential.",
+};
+/** Schema and input parser share bounds/patterns; app/session still own contextual validation. */
+function bounded(value: unknown, shape: JsonObject): string {
+  const text = string(value, typeof shape.maxLength === "number" ? shape.maxLength : 65536);
+  if (
+    (typeof shape.minLength === "number" && text.length < shape.minLength) ||
+    (typeof shape.pattern === "string" && !new RegExp(shape.pattern, "u").test(text))
+  )
+    fail("invalid-input", "Action text does not match the documented constraints.");
+  return text;
+}
+function secretKey(value: unknown) {
+  const reference = bounded(value, secretProperty);
+  if (!secretReference(reference)) fail("invalid-input", "A valid secret reference is required.");
+  return opaqueId<"secret-ref">(reference);
+}
+function propertiesFor(shape: Shape, type: string): JsonObject {
   return Object.fromEntries(
     [...shape.required, ...(shape.optional ?? [])].map((name) => [
       name,
@@ -228,12 +298,28 @@ function propertiesFor(shape: Shape): JsonObject {
         : name === "kind"
           ? { enum: ["text", "action", "notice"] }
           : name === "reason"
-            ? { type: ["string", "null"], maxLength: 4096 }
+            ? { ...awayProperty, type: ["string", "null"] }
             : name === "cursor"
-              ? { type: "string", minLength: 1, maxLength: 16384 }
-              : name.endsWith("Id") || ["replyTo", "key"].includes(name)
-                ? identifierProperty
-                : stringProperty,
+              ? { ...identifierProperty, maxLength: 16384 }
+              : name === "nick"
+                ? type === "conversation.query"
+                  ? queryNickProperty
+                  : nickProperty
+                : name === "channel"
+                  ? channelProperty
+                  : name === "value"
+                    ? reactionProperty
+                    : name === "key"
+                      ? secretProperty
+                      : name === "text"
+                        ? type === "message.send"
+                          ? messageProperty
+                          : type === "topic"
+                            ? contentProperty
+                            : stringProperty
+                        : name.endsWith("Id") || name === "replyTo"
+                          ? identifierProperty
+                          : stringProperty,
     ]),
   );
 }
@@ -243,18 +329,23 @@ export function actionSchema(): JsonObject {
       type: "object",
       additionalProperties: false,
       required: ["type", ...spec.required],
-      properties: { type: { const: type }, ...propertiesFor(spec) },
+      properties: { type: { type: "string", const: type }, ...propertiesFor(spec, type) },
     })),
   };
   return {
     $schema: "https://json-schema.org/draft/2020-12/schema",
+    title: "OpenIRC AppAction",
+    description:
+      "All supported typed actions. Rights require both server grant and request intent. Destructive actions also require confirm:true. IRC away/nick publish presence/identity under network permission; topic writes require send-messages too.",
+    "x-runtime-validation":
+      "Bounds use UTF-16 code units at runtime (schema lengths count code points). App/session enforce current network capabilities, channel prefixes, connection state, membership, reply targets and ownership. No raw IRC or command batches. Actions do not return message/draft bodies.",
     oneOf: Object.entries(SHAPES).map(([type, spec]) => ({
       type: "object",
       additionalProperties: false,
       required: ["type", ...spec.required],
       properties: {
-        type: { const: type },
-        ...propertiesFor(spec),
+        type: { type: "string", const: type },
+        ...propertiesFor(spec, type),
         ...(type === "irc.request" ? { command: commandSchema } : {}),
       },
     })),

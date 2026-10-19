@@ -1,5 +1,6 @@
 import { entityId } from "../contracts/common";
 import type { ControlError, JsonObject, JsonValue } from "../contracts/control";
+import { isJsonValue } from "./protocol";
 
 export class ControlFault extends Error {
   constructor(readonly detail: ControlError) {
@@ -22,7 +23,10 @@ export function fields(
   required: readonly string[],
   optional: readonly string[] = [],
 ): Record<string, unknown> {
+  // Also protect direct in-process callers: accessors, inherited/prototype keys and exotic
+  // JSON values must not execute code or disappear during fingerprinting/validation.
   if (
+    !isJsonValue(value) ||
     !object(value) ||
     required.some((key) => !Object.hasOwn(value, key)) ||
     Object.keys(value).some((key) => !required.includes(key) && !optional.includes(key))
@@ -44,16 +48,10 @@ export function integer(value: unknown, min: number, max: number): number {
     fail("invalid-input", "A numeric parameter is outside its allowed range.");
   return value;
 }
+export const OPAQUE_ID_PATTERN = "^[^\\s\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]+$";
 export function opaqueId<Kind extends string>(value: unknown, max = 512) {
   const text = string(value, max);
-  if (
-    !text ||
-    /\s/u.test(text) ||
-    Array.from(text).some((c) => {
-      const code = c.codePointAt(0)!;
-      return code < 32 || code === 127;
-    })
-  )
+  if (!new RegExp(OPAQUE_ID_PATTERN, "u").test(text))
     fail("invalid-input", "Invalid opaque identifier.");
   return entityId<Kind>(text);
 }
@@ -61,26 +59,68 @@ export function choice<const T extends string>(value: unknown, choices: readonly
   for (const candidate of choices) if (value === candidate) return candidate;
   return fail("invalid-input", "An enumerated parameter is not supported.");
 }
-
-export function isJson(value: unknown, depth = 0): value is JsonValue {
-  if (depth > 32) return false;
-  if (value === null || typeof value === "boolean" || typeof value === "string") return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  if (Array.isArray(value)) return value.every((entry: unknown) => isJson(entry, depth + 1));
-  if (!object(value)) return false;
-  return Object.entries(value).every(
-    ([key, entry]) =>
-      !["__proto__", "prototype", "constructor"].includes(key) && isJson(entry, depth + 1),
-  );
+export function isJson(value: unknown): value is JsonValue {
+  return isJsonValue(value);
 }
-/** Produce an owned JSON copy; never serialize platform exceptions or arbitrary runtime objects. */
+
+/** Owned, bounded output JSON. Omit undefined object properties like JSON.stringify, but
+ * never invoke getters/toJSON, serialize exception instances, or silently rewrite non-JSON data. */
 export function json(value: unknown): JsonValue {
-  const copied: unknown = JSON.parse(JSON.stringify(value));
-  if (!isJson(copied)) fail("internal", "The control result is not serializable.");
-  return copied;
+  let remaining = 100000;
+  let units = 0;
+  const ancestors = new Set<object>();
+  const invalid = (): never =>
+    fail("internal", "The control result is not serializable or exceeds supported limits.");
+  function copy(input: unknown, depth: number): JsonValue {
+    if (--remaining < 0 || depth > 64) return invalid();
+    if (input === null || typeof input === "boolean") return input;
+    if (typeof input === "number") return Number.isFinite(input) ? input : invalid();
+    if (typeof input === "string") {
+      units += input.length;
+      return units <= 4194304 ? input : invalid();
+    }
+    if (typeof input !== "object" || input === null || ancestors.has(input)) return invalid();
+    ancestors.add(input);
+    let result: JsonValue;
+    if (Array.isArray(input)) {
+      if (
+        Object.getPrototypeOf(input) !== Array.prototype ||
+        input.length > remaining ||
+        Reflect.ownKeys(input).length !== input.length + 1
+      )
+        return invalid();
+      const items: JsonValue[] = [];
+      for (let index = 0; index < input.length; index++) {
+        const property = Object.getOwnPropertyDescriptor(input, String(index));
+        if (!property || !property.enumerable || !("value" in property)) return invalid();
+        const child: unknown = property.value;
+        items.push(copy(child, depth + 1));
+      }
+      result = items;
+    } else {
+      if (!object(input)) return invalid();
+      const properties: Record<string, JsonValue> = {};
+      for (const name of Reflect.ownKeys(input)) {
+        if (typeof name !== "string" || ["__proto__", "prototype", "constructor"].includes(name))
+          return invalid();
+        units += name.length;
+        if (units > 4194304) return invalid();
+        const property = Object.getOwnPropertyDescriptor(input, name);
+        if (!property || !property.enumerable || !("value" in property)) return invalid();
+        const child: unknown = property.value;
+        if (child !== undefined) properties[name] = copy(child, depth + 1);
+      }
+      result = properties;
+    }
+    ancestors.delete(input);
+    return result;
+  }
+  const result = copy(value, 0);
+  if (Buffer.byteLength(JSON.stringify(result)) > 4194304) return invalid();
+  return result;
 }
 export function jsonObject(value: unknown): JsonObject {
-  if (!object(value) || !isJson(value))
+  if (!isJsonValue(value) || !object(value))
     fail("invalid-input", "A JSON object parameter is required.");
   return value;
 }
