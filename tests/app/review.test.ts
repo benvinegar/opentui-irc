@@ -410,6 +410,223 @@ describe("app persistence/lifecycle review regressions", () => {
     expect(h.records.get(statusId)?.name).toBe("Renamed Network");
   });
 
+  it("does not persist removed-network drafts or keep its old readables live", async () => {
+    const config = {
+      ...settings,
+      user: { ...settings.user, history: { ...settings.user.history, persistDrafts: true } },
+    };
+    const { app, h, conversationId } = await setup(config);
+    value(
+      await app.dispatch(
+        { type: "draft.set", conversationId, text: "removed network draft" },
+        signal(),
+      ),
+    );
+    const old = value(app.timeline(conversationId));
+    const current = app.settings.getSnapshot()!;
+    value(
+      await app.saveSettings(
+        { section: "user", value: { ...current.user, networks: [] } },
+        current.revision,
+        signal(),
+      ),
+    );
+    expect(h.workspace.drafts).toEqual([]);
+    expect(old.getSnapshot().draft).toBe("");
+    expect(old.getSnapshot().members).toEqual([]);
+    expect(app.timeline(conversationId).ok).toBe(false);
+  });
+
+  it("replacement connect resets old membership before any new JOIN acknowledgment", async () => {
+    const { app, session, h, conversationId } = await setup();
+    session.emit({
+      type: "state",
+      phase: "disconnected",
+      nick: "newcomer",
+      secure: true,
+      authenticated: false,
+    });
+    await settle();
+    value(await app.dispatch({ type: "network.connect", networkId }, signal()));
+    const next = h.session(networkId);
+    next.emit({
+      type: "state",
+      phase: "ready",
+      nick: "newcomer",
+      secure: true,
+      authenticated: false,
+    });
+    await settle();
+    expect(sidebar(app, conversationId).joined).toBe(false);
+    expect(timeline(app, conversationId).members).toEqual([]);
+    expect(
+      (
+        await app.dispatch(
+          { type: "message.send", conversationId, text: "not joined", kind: "text" },
+          signal(),
+        )
+      ).ok,
+    ).toBe(false);
+  });
+
+  it("preserves restored reaction aggregates without inventing unknown actor membership", async () => {
+    const id = entityId<"conversation">("persisted-reactions");
+    const { app, session, conversationId } = await setup(settings, (h) => {
+      h.records.set(id, { id, networkId, kind: "channel", name: "#welcome" });
+      const message = {
+        ...storedMessage("reacted", id, h.deps.clock.now()),
+        serverId: "reacted",
+        reactions: [{ value: "old", count: 3, reactedBySelf: false }],
+      };
+      h.messages.set(message.id, message);
+      h.deps.history.loadWorkspace = async () =>
+        success({
+          activeConversationId: id,
+          conversationOrder: [id],
+          mutedConversations: [],
+          drafts: [],
+        });
+    });
+    session.emit({
+      type: "reaction",
+      target: "#welcome",
+      serverId: "reacted",
+      nick: "another",
+      value: "old",
+      remove: false,
+    });
+    await settle();
+    expect(timeline(app, conversationId).messages[0]?.reactions).toEqual([
+      { value: "old", count: 3, reactedBySelf: false },
+    ]);
+    session.emit({
+      type: "reaction",
+      target: "#welcome",
+      serverId: "reacted",
+      nick: "another",
+      value: "new",
+      remove: false,
+    });
+    await settle();
+    expect(timeline(app, conversationId).messages[0]?.reactions).toEqual([
+      { value: "old", count: 3, reactedBySelf: false },
+      { value: "new", count: 1, reactedBySelf: false },
+    ]);
+    session.emit({
+      type: "reaction",
+      target: "#welcome",
+      serverId: "reacted",
+      nick: "newcomer",
+      value: "old",
+      remove: false,
+    });
+    await settle();
+    expect(timeline(app, conversationId).messages[0]?.reactions[0]).toEqual({
+      value: "old",
+      count: 4,
+      reactedBySelf: true,
+    });
+    session.emit({
+      type: "reaction",
+      target: "#welcome",
+      serverId: "reacted",
+      nick: "newcomer",
+      value: "old",
+      remove: true,
+    });
+    session.emit({
+      type: "reaction",
+      target: "#welcome",
+      serverId: "reacted",
+      nick: "newcomer",
+      value: "old",
+      remove: true,
+    });
+    await settle();
+    expect(timeline(app, conversationId).messages[0]?.reactions[0]).toEqual({
+      value: "old",
+      count: 3,
+      reactedBySelf: false,
+    });
+  });
+
+  it("keeps chat/input/shutdown responsive with an unresolved notification sink and ignores its late failure", async () => {
+    const config = {
+      ...settings,
+      user: {
+        ...settings.user,
+        notifications: { ...settings.user.notifications, desktop: true, previews: true },
+      },
+    };
+    let finish!: (result: Result<void>) => void;
+    const { app, h, conversationId, emit } = await setup(config, (h) => {
+      h.deps.notifications.notify = vi.fn(
+        () =>
+          new Promise<Result<void>>((resolve) => {
+            finish = resolve;
+          }),
+      );
+    });
+    let changes = 0;
+    app.state.subscribe(() => {
+      changes++;
+    });
+    await emit("first mention", 10);
+    for (let index = 0; index < 10; index++) await emit(`queued ${index}`, 20 + index);
+    value(
+      await app.dispatch({ type: "draft.set", conversationId, text: "still responsive" }, signal()),
+    );
+    expect(sidebar(app, conversationId).unreadCount).toBe(11);
+    expect(h.deps.notifications.notify).toHaveBeenCalledTimes(1);
+    value(await app.shutdown());
+    const before = changes;
+    const diagnostics = h.diagnostics.length;
+    finish(failure("unavailable"));
+    await settle();
+    expect(changes).toBe(before);
+    expect(h.diagnostics).toHaveLength(diagnostics);
+    expect(h.deps.notifications.notify).toHaveBeenCalledTimes(1);
+  });
+
+  it("coalesces/rate-limits notification bursts and rechecks preview policy before dispatch", async () => {
+    const config = {
+      ...settings,
+      user: {
+        ...settings.user,
+        notifications: { ...settings.user.notifications, desktop: true, previews: true },
+      },
+    };
+    const { app, h, emit } = await setup(config, (h) => {
+      h.deps.notifications.notify = vi.fn(async () => success(undefined));
+    });
+    await emit("first", 10);
+    await emit("second", 20);
+    await emit("third", 30);
+    expect(h.deps.notifications.notify).toHaveBeenCalledTimes(1);
+    const current = app.settings.getSnapshot()!;
+    value(
+      await app.saveSettings(
+        {
+          section: "user",
+          value: {
+            ...current.user,
+            notifications: { ...current.user.notifications, previews: false },
+          },
+        },
+        current.revision,
+        signal(),
+      ),
+    );
+    h.advance(2000);
+    await settle();
+    expect(h.deps.notifications.notify).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(h.deps.notifications.notify).mock.calls[1]?.[0].body).toBeUndefined();
+    expect(
+      sidebar(app, app.state.getSnapshot().conversations.find((c) => c.name === "#welcome")!.id)
+        .unreadCount,
+    ).toBe(3);
+  });
+
   it("bounds queued user intents while storage is slow without accepting overflow", async () => {
     const { app, h, conversationId } = await setup();
     let release!: () => void;

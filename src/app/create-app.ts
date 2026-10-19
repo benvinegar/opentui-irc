@@ -22,6 +22,7 @@ import type {
 import type { ProtocolSupport } from "../contracts/protocol";
 import type { CreateApp } from "../contracts/runtime";
 import type { IrcSession, SessionCommand, SessionEvent } from "../contracts/session";
+import type { NotificationSink } from "../contracts/services";
 import type { NetworkProfile, SettingsDocument } from "../contracts/settings";
 import type { ConversationRecord, ReadPosition } from "../contracts/storage";
 import { foldIdentifier } from "../domain/irc-identifiers";
@@ -47,6 +48,7 @@ const MAX_MEMBERS = 10000;
 const MAX_OPERATIONS = 256;
 const MAX_QUEUED_INTENTS = 256;
 const RETENTION_INTERVAL_MS = 86400000;
+const NOTIFICATION_INTERVAL_MS = 2000;
 const PAGE_SIZE = 100;
 const MAX_INPUT = 65536;
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
@@ -101,6 +103,10 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
   let durabilityFailure: AppError | undefined;
   let queuedIntents = 0;
   const retentionController = new AbortController();
+  const notificationController = new AbortController();
+  let notificationRunning = false;
+  let queuedNotification: Parameters<NotificationSink["notify"]>[0] | undefined;
+  let nextNotificationAt = 0;
   let shutdownPromise: Promise<Result<void>> | undefined;
   let tail: Promise<unknown> = Promise.resolve();
   let revision = 0;
@@ -124,8 +130,14 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
   >();
   const visibility = new Map<ConversationId, { focused: boolean; atBottom: boolean }>();
   const channelKeys = new Map<ConversationId, import("../contracts/common").SecretRef>();
-  const reactions = new Map<MessageId, Map<string, Set<UserId>>>();
-  const typingControllers = new Map<string, AbortController>();
+  const reactions = new Map<
+    MessageId,
+    { baseline: Message["reactions"]; actors: Map<string, Set<UserId>> }
+  >();
+  const typingControllers = new Map<
+    string,
+    { controller: AbortController; conversationId: ConversationId }
+  >();
   const modelError = () => deps.diagnostics.record({ level: "error", code: "read-model-listener" });
   const state = createReadModel<AppSnapshot>(
     { revision, boot, networks: [], conversations: [] },
@@ -183,6 +195,72 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       ...(active ? { activeConversationId: active } : {}),
       ...(lastError ? { error: lastError } : {}),
     });
+  const queueNotification = (notification: Parameters<NotificationSink["notify"]>[0]) => {
+    if (stopping) return;
+    // One in-flight effect plus one latest pending notification; never queue chat behind OS work.
+    queuedNotification = notification;
+    if (notificationRunning) return;
+    notificationRunning = true;
+    void (async () => {
+      try {
+        while (!stopping && queuedNotification) {
+          const delay = nextNotificationAt - deps.clock.now();
+          if (delay > 0) await deps.clock.sleep(delay, notificationController.signal);
+          if (stopping) break;
+          const next = queuedNotification;
+          queuedNotification = undefined;
+          if (!next) continue;
+          const c = conversations.get(next.conversationId);
+          const visible = visibility.get(next.conversationId);
+          if (
+            !settings.user.notifications.desktop ||
+            !c ||
+            c.closed ||
+            !networks.has(c.view.networkId) ||
+            c.view.muted ||
+            (active === c.view.id &&
+              visible?.focused &&
+              visible.atBottom &&
+              timeline(c).atLatest !== false)
+          )
+            continue;
+          nextNotificationAt = deps.clock.now() + NOTIFICATION_INTERVAL_MS;
+          let result: Result<void>;
+          try {
+            const { body, ...safe } = next;
+            result = await deps.notifications.notify({
+              ...safe,
+              ...(settings.user.notifications.previews && body ? { body } : {}),
+            });
+          } catch {
+            result = {
+              ok: false,
+              error: error("unavailable", "Desktop notifications are unavailable."),
+            };
+          }
+          if (!result.ok && result.error.code !== "unsupported" && !stopping) {
+            const detail = result.error;
+            await serial(() => {
+              if (!stopping) {
+                report(detail);
+                publish();
+              }
+            });
+          }
+        }
+      } catch {
+        if (!stopping)
+          await serial(() => {
+            if (!stopping) {
+              report(error("unavailable", "Desktop notifications are unavailable."));
+              publish();
+            }
+          });
+      } finally {
+        notificationRunning = false;
+      }
+    })();
+  };
   const operation = (id: OperationId, status: OperationView["state"], detail?: AppError) => {
     const previous = operations.readable.getSnapshot().filter((entry) => entry.id !== id);
     // Never evict an in-flight operation. Admission is capped separately.
@@ -206,6 +284,13 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     const id = deps.ids.next<"operation">();
     operation(id, "accepted");
     return id;
+  };
+  const cancelTyping = (conversationId: ConversationId) => {
+    for (const [key, entry] of typingControllers)
+      if (entry.conversationId === conversationId) {
+        entry.controller.abort();
+        typingControllers.delete(key);
+      }
   };
   const profile = (id: NetworkId): NetworkProfile => {
     const value = settings.user.networks.find((network) => network.id === id);
@@ -257,6 +342,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
   };
   const reopenConversation = (c: Conversation) => {
     if (c.closed) {
+      c.model.dispose();
       c.model = createReadModel(
         { ...timeline(c), messages: c.recent, members: [], typing: [], loadingOlder: false },
         modelError,
@@ -290,6 +376,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     return reopenConversation(c);
   };
   const canPersist = (c: Conversation) =>
+    settings.user.networks.some((p) => p.id === c.view.networkId) &&
     settings.user.history.enabled &&
     !settings.user.history.excludedConversations.some(
       (rule) =>
@@ -849,12 +936,11 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
             incoming.source === "live" &&
             settings.user.notifications.desktop
           ) {
-            const result = await deps.notifications.notify({
+            queueNotification({
               title: `${message.sender.nick} · ${c.view.name}`,
               conversationId: c.view.id,
               ...(settings.user.notifications.previews ? { body: message.text.slice(0, 240) } : {}),
             });
-            if (!result.ok && result.error.code !== "unsupported") report(result.error);
           }
         }
         break;
@@ -1039,7 +1125,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           ensureConversation(networkId, "direct", payload.nick);
         const value = user(networkId, payload.nick);
         const key = `${c.view.id}:${value.id}`;
-        typingControllers.get(key)?.abort();
+        typingControllers.get(key)?.controller.abort();
         typingControllers.delete(key);
         updateTimeline(c, {
           typing: payload.active
@@ -1048,12 +1134,12 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         });
         if (payload.active) {
           const controller = new AbortController();
-          typingControllers.set(key, controller);
+          typingControllers.set(key, { controller, conversationId: c.view.id });
           void deps.clock
             .sleep(10000, controller.signal)
             .then(() =>
               serial(() => {
-                if (typingControllers.get(key) !== controller) return;
+                if (typingControllers.get(key)?.controller !== controller) return;
                 typingControllers.delete(key);
                 updateTimeline(c, { typing: timeline(c).typing.filter((id) => id !== value.id) });
               }),
@@ -1084,30 +1170,72 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         } else if (!message.redacted) {
           let grouped = reactions.get(message.id);
           if (!grouped) {
-            grouped = new Map();
+            if (reactions.size >= MAX_HOT_MESSAGES) {
+              const oldest = reactions.keys().next().value;
+              if (oldest !== undefined) reactions.delete(oldest);
+            }
+            grouped = { baseline: message.reactions, actors: new Map() };
             reactions.set(message.id, grouped);
           }
+          const knownActors = grouped.actors;
+          // Durable aggregates contain no actor IDs. Unknown actor deltas cannot safely replace them.
+          const baseline = grouped.baseline.find((entry) => entry.value === payload.value);
+          const self = same(networkId, payload.nick, network.nick);
+          if (baseline) {
+            if (self && baseline.reactedBySelf !== !payload.remove) {
+              grouped.baseline = grouped.baseline
+                .map((entry) =>
+                  entry !== baseline
+                    ? entry
+                    : {
+                        ...entry,
+                        reactedBySelf: !payload.remove,
+                        count: Math.max(0, entry.count + (payload.remove ? -1 : 1)),
+                      },
+                )
+                .filter((entry) => entry.count > 0);
+              message = {
+                ...message,
+                reactions: [
+                  ...grouped.baseline,
+                  ...message.reactions.filter((entry) => knownActors.has(entry.value)),
+                ],
+              };
+              putMessages(c, [message]);
+              await persist([message]);
+            }
+            break;
+          }
           const value = user(networkId, payload.nick);
-          let members = grouped.get(payload.value);
+          let members = grouped.actors.get(payload.value);
+          if (!members && payload.remove) break;
           if (!members) {
+            if (grouped.actors.size >= 128) {
+              report(error("rate-limited", "Reaction limit reached."));
+              break;
+            }
             members = new Set();
-            grouped.set(payload.value, members);
+            grouped.actors.set(payload.value, members);
           }
           if (payload.remove) members.delete(value.id);
           else members.add(value.id);
+          if (!members.size) grouped.actors.delete(payload.value);
           message = {
             ...message,
-            reactions: [...grouped]
-              .filter(([, set]) => set.size)
-              .map(([reaction, set]) => ({
-                value: plainText(reaction),
-                count: set.size,
-                reactedBySelf: [...set].some(
-                  (id) =>
-                    users.get(networkId)?.get(foldIdentifier(network.nick, mapping(networkId)))
-                      ?.id === id,
-                ),
-              })),
+            reactions: [
+              ...grouped.baseline,
+              ...[...grouped.actors]
+                .filter(([, set]) => set.size)
+                .map(([reaction, set]) => ({
+                  value: plainText(reaction),
+                  count: set.size,
+                  reactedBySelf: [...set].some(
+                    (id) =>
+                      users.get(networkId)?.get(foldIdentifier(network.nick, mapping(networkId)))
+                        ?.id === id,
+                  ),
+                })),
+            ],
           };
         }
         putMessages(c, [message]);
@@ -1128,6 +1256,15 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     publish();
   };
 
+  const resetNetworkState = (networkId: NetworkId) => {
+    for (const c of conversations.values())
+      if (c.view.networkId === networkId) {
+        cancelTyping(c.view.id);
+        c.view = { ...c.view, joined: false };
+        updateTimeline(c, { members: [], typing: [] });
+      }
+    users.delete(networkId);
+  };
   const finishAttempt = async (networkId: NetworkId, attempt: Attempt) => {
     if (attempts.get(networkId) !== attempt || stopping) return;
     for (const [id, entry] of pending)
@@ -1139,12 +1276,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           attempt.error,
         );
       }
-    for (const c of conversations.values())
-      if (c.view.networkId === networkId) {
-        c.view = { ...c.view, joined: false };
-        updateTimeline(c, { members: [], typing: [] });
-      }
-    users.delete(networkId);
+    resetNetworkState(networkId);
     const view = networks.get(networkId)!;
     networks.set(networkId, {
       ...view,
@@ -1192,6 +1324,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     };
     attempts.set(networkId, attempt);
     support.delete(networkId);
+    resetNetworkState(networkId);
     const { lastError: _last, ...view } = networks.get(networkId)!;
     networks.set(networkId, {
       ...view,
@@ -1261,12 +1394,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         authenticated: false,
         features: FEATURES,
       });
-    for (const c of conversations.values())
-      if (c.view.networkId === networkId) {
-        c.view = { ...c.view, joined: false };
-        updateTimeline(c, { members: [], typing: [] });
-      }
-    users.delete(networkId);
+    resetNetworkState(networkId);
     publish();
   };
 
@@ -1350,6 +1478,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
               );
             if (c.view.kind === "channel" && c.view.joined)
               await execute(c.view.networkId, { type: "part", channel: c.view.name }, id);
+            cancelTyping(c.view.id);
             c.closed = true;
             c.recent = [];
             c.view = { ...c.view, joined: false };
@@ -1667,6 +1796,11 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
               networks.delete(id);
               for (const c of conversations.values())
                 if (c.view.networkId === id) {
+                  cancelTyping(c.view.id);
+                  updateTimeline(c, { messages: [], members: [], typing: [], draft: "" });
+                  c.model.dispose();
+                  c.recent = [];
+                  c.loaded = false;
                   c.closed = true;
                   if (active === c.view.id) active = undefined;
                 }
@@ -1713,8 +1847,10 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       shutdownPromise ??= (async () => {
         stopping = true;
         retentionController.abort();
+        notificationController.abort();
+        queuedNotification = undefined;
         rootSignal.removeEventListener("abort", onAbort);
-        for (const controller of typingControllers.values()) controller.abort();
+        for (const { controller } of typingControllers.values()) controller.abort();
         typingControllers.clear();
         let failure: AppError | undefined = durabilityFailure;
         const closing = [...attempts.values()];
