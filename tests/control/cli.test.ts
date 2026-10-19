@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -645,6 +646,11 @@ describe("bounded input, secret ingress and safe failures", () => {
       expect(huge.calls).toEqual([]);
       const folder = await invoke(["action", "--file", directory], { useFilesystem: true });
       expect(folder.code).toBe(1);
+      const fifoPath = join(directory, "input.fifo");
+      execFileSync("mkfifo", [fifoPath]);
+      const fifo = await invoke(["action", "--file", fifoPath], { useFilesystem: true });
+      expect(fifo.code).toBe(1);
+      expect(fifo.calls).toEqual([]);
       const missing = await invoke(["action", "--file", join(directory, "SECRET-FILENAME")], {
         useFilesystem: true,
       });

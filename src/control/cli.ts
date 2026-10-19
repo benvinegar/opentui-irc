@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import type { Result } from "../contracts/common";
 import {
@@ -343,7 +344,8 @@ function parseJson(value: string): JsonValue {
   }
 }
 async function readFileBounded(path: string): Promise<string> {
-  const file = await open(path, "r");
+  // Avoid blocking on a FIFO before we can reject non-regular inputs below.
+  const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
     if (!stat.isFile())
