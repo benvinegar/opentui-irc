@@ -567,6 +567,14 @@ export async function createControlServer(options: {
   const abort = () => {
     void close().catch(() => {});
   };
+  const listenerFailed = () => {
+    // A listening failure is not an application shutdown. The lifecycle owner
+    // may still be using/flushing storage; retain its profile lease until close().
+    closed = true;
+    for (const controller of controllers) controller.abort();
+    for (const socket of sockets) socket.destroy();
+    server.close(() => {});
+  };
   try {
     checkAbort(root);
     await new Promise<void>((done, reject) => {
@@ -591,7 +599,7 @@ export async function createControlServer(options: {
     await unlink(bindingPath);
     socketIdentity = await lstat(lease.paths.socketPath);
     privateStat(socketIdentity, "socket");
-    server.on("error", abort);
+    server.on("error", listenerFailed);
     root.addEventListener("abort", abort, { once: true });
     checkAbort(root);
     return { ok: true, value: { socketPath: lease.paths.socketPath, close } };
