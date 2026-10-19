@@ -165,17 +165,28 @@ function Shell(props: UiOptions) {
   });
   // App windows are bounded; impose a second hard cap on mounted layout work.
   const messages = createMemo(() => timeline()?.messages.slice(-300) ?? []);
+  let pendingFocusReveal: Renderable | undefined;
+  const revealControl = (control: Renderable | undefined) => {
+    let parent = control?.parent;
+    while (parent && control) {
+      if (parent instanceof ScrollBoxRenderable) {
+        const margin = parent.viewport.height > 2 ? 1 : 0;
+        const top = parent.viewport.y + margin;
+        const bottom = parent.viewport.y + parent.viewport.height - margin;
+        if (control.y < top) parent.scrollBy(control.y - top);
+        else if (control.y + control.height > bottom)
+          parent.scrollBy(control.y + control.height - bottom);
+      }
+      parent = parent.parent;
+    }
+  };
   const focus = (id: string) => {
     setFocusId(id);
     const control = controls.get(id)?.control;
     control?.focus();
-    let child = control;
-    let parent = control?.parent;
-    while (parent && child) {
-      if (parent instanceof ScrollBoxRenderable) parent.scrollChildIntoView(child.id);
-      child = parent;
-      parent = parent.parent;
-    }
+    revealControl(control);
+    // Recheck against measured layout, not a field's stale pre-focus coordinates.
+    pendingFocusReveal = control;
   };
   const closeModal = () => {
     setModal(null);
@@ -456,6 +467,7 @@ function Shell(props: UiOptions) {
     if (modal()) {
       if (event.name === "pageup" || event.name === "pagedown") {
         event.preventDefault();
+        pendingFocusReveal = undefined;
         const viewport = renderer.root.findDescendantById("modal-scroll");
         if (viewport instanceof ScrollBoxRenderable)
           viewport.scrollBy(event.name === "pageup" ? -1 : 1, "viewport");
@@ -543,7 +555,10 @@ function Shell(props: UiOptions) {
     state().conversations.filter((item) =>
       item.name.toLowerCase().includes(formText().toLowerCase()),
     );
-  onResize(captureAnchor);
+  onResize(() => {
+    captureAnchor();
+    if (modal()) pendingFocusReveal = controls.get(focusId())?.control;
+  });
   onFocus(() => {
     setTerminalFocused(true);
     setTypingFocused(true);
@@ -555,6 +570,11 @@ function Shell(props: UiOptions) {
   onMount(() => {
     focus("composer");
     const restoreAnchor = () => {
+      if (pendingFocusReveal) {
+        const control = pendingFocusReveal;
+        pendingFocusReveal = undefined;
+        if (renderer.currentFocusedRenderable === control) revealControl(control);
+      }
       if (pendingReveal && transcript?.getRenderable(`message-${pendingReveal}`)) {
         transcript.scrollChildIntoView(`message-${pendingReveal}`);
         pendingReveal = undefined;

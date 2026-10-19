@@ -71,6 +71,40 @@ describe("real Solid/OpenTUI shell", () => {
     await view.renderOnce();
     expect(view.captureCharFrame()).toContain("paging preserves this");
   });
+  test("tabbing through a short settings dialog keeps every focused control visible", async () => {
+    const { view } = await mount();
+    view.resize(80, 24);
+    await view.renderOnce();
+    await click(view, "add-network");
+    const dialog = view.renderer.root.findDescendantById("modal-scroll");
+    expect(dialog).toBeInstanceOf(ScrollBoxRenderable);
+    if (!(dialog instanceof ScrollBoxRenderable)) throw new Error("Missing dialog viewport");
+    for (let index = 0; index < 24; index++) {
+      await view.mockInput.pressTab();
+      await view.renderOnce();
+      await view.renderOnce();
+      const focused = view.renderer.currentFocusedRenderable;
+      expect(focused).not.toBeNull();
+      if (!focused || focused.id === "dialog-close") continue;
+      if (focused.id === "network-nick") {
+        await view.mockInput.typeText("visible-nick");
+        await view.renderOnce();
+        expect(view.captureCharFrame()).toContain("visible-nick");
+      }
+      expect(focused.y).toBeGreaterThanOrEqual(dialog.viewport.y);
+      expect(focused.y + focused.height).toBeLessThanOrEqual(
+        dialog.viewport.y + dialog.viewport.height,
+      );
+    }
+    view.resize(50, 16);
+    await view.renderOnce();
+    await view.renderOnce();
+    const focused = view.renderer.currentFocusedRenderable!;
+    expect(focused.y).toBeGreaterThanOrEqual(dialog.viewport.y);
+    expect(focused.y + focused.height).toBeLessThanOrEqual(
+      dialog.viewport.y + dialog.viewport.height,
+    );
+  });
   test("channel directory opens from /list, streams bounded/filterable results, and joins the pinned network", async () => {
     const { fake, view } = await mount();
     await view.mockInput.typeText("/list");
