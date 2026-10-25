@@ -1297,7 +1297,7 @@ function Shell(props: UiOptions) {
             >
               <text flexGrow={1} minWidth={0} height={1} wrapMode="none">
                 <b>
-                  <span style={{ fg: colors.text }}>{active()?.name ?? "Welcome"}</span>
+                  <span style={{ fg: colors.text }}>{active()?.name ?? "Welcome to OpenIRC"}</span>
                 </b>
                 <span style={{ fg: colors.muted }}>
                   {"  "}
