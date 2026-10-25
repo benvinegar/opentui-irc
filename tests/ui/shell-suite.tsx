@@ -113,6 +113,52 @@ describe("real Solid/OpenTUI shell", () => {
     expect(view.captureCharFrame()).not.toContain("hidden-service-privmsg");
     expect(model.getSnapshot().messages).toHaveLength(5);
   });
+  test("consecutive lines from one sender omit the repeated time and nickname", async () => {
+    const { fake, view } = await mount();
+    const model = fake.timelines.get(conversationId)!;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: ["first-grouped-line", "second-grouped-line"].map((text, index) => ({
+        ...welcomeMessage,
+        id: entityId<"message">(`grouped-${index}`),
+        sender: { nick: "groupnick" },
+        receivedAt: welcomeMessage.receivedAt + index * 1000,
+        text,
+      })),
+    });
+    await view.renderOnce();
+    const lines = view.captureCharFrame().split("\n");
+    expect(lines.find((line) => line.includes("first-grouped-line"))).toContain("groupnick");
+    expect(lines.find((line) => line.includes("second-grouped-line"))).not.toContain("groupnick");
+  });
+  test("ctrl+k filters conversations and actions and Enter runs the highlighted entry", async () => {
+    const { view } = await mount();
+    view.mockInput.pressKey("k", { ctrl: true });
+    await tick();
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("Jump to…");
+    expect(view.captureCharFrame()).toContain("Join a channel…");
+    await view.mockInput.typeText("join a");
+    await tick();
+    await view.renderOnce();
+    expect(view.captureCharFrame()).not.toContain("Search history…");
+    view.mockInput.pressEnter();
+    await tick();
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("Channel name");
+  });
+  test("arrow keys move through dialog actions", async () => {
+    const { view } = await mount();
+    await click(view, `message-${welcomeMessage.id}`);
+    expect(view.renderer.currentFocusedRenderable?.id).toBe("copy-message");
+    view.mockInput.pressArrow("down");
+    await tick();
+    await view.renderOnce();
+    expect(view.renderer.currentFocusedRenderable?.id).not.toBe("copy-message");
+    view.mockInput.pressArrow("up");
+    await tick();
+    expect(view.renderer.currentFocusedRenderable?.id).toBe("copy-message");
+  });
   test("a service-only window explains that older chat may still exist", async () => {
     const { fake, view } = await mount();
     const model = fake.timelines.get(conversationId)!;

@@ -318,7 +318,6 @@ export function ListItem(props: {
         minWidth={0}
         height={1}
         wrapMode="none"
-        truncate
         fg={
           lit()
             ? colors.accent
@@ -349,17 +348,28 @@ export function ListItem(props: {
   );
 }
 /** Footer key legend: keys stand out, descriptions recede. */
-export function KeyHints(props: { hints: readonly (readonly [string, string])[] }) {
+export function KeyHints(props: {
+  hints: readonly (readonly [string, string])[];
+  /** Drop trailing hints rather than cut one in half. */
+  maxWidth: number;
+}) {
   const colors = usePalette();
+  const fitting = () => {
+    let used = 0;
+    return props.hints.filter(([key, label]) => {
+      used += key.length + label.length + 4;
+      return used - 3 <= props.maxWidth;
+    });
+  };
   return (
-    <text height={1} wrapMode="none" truncate>
-      <For each={props.hints}>
+    <text height={1} wrapMode="none">
+      <For each={fitting()}>
         {([key, label], index) => (
           <>
             <span style={{ fg: colors.text }}>{key}</span>
             <span style={{ fg: colors.muted }}>
               {` ${label}`}
-              {index() < props.hints.length - 1 ? "   " : ""}
+              {index() < fitting().length - 1 ? "   " : ""}
             </span>
           </>
         )}

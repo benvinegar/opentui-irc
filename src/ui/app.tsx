@@ -19,7 +19,12 @@ import {
   useRenderer,
   useTerminalDimensions,
 } from "@opentui/solid";
-import { ScrollBoxRenderable, type Renderable, type TextareaRenderable } from "@opentui/core";
+import {
+  InputRenderable,
+  ScrollBoxRenderable,
+  type Renderable,
+  type TextareaRenderable,
+} from "@opentui/core";
 import type { AppAction, AppApi } from "../contracts/app";
 import type { ConversationId, MessageId, NetworkId } from "../contracts/common";
 import type { ConnectionPhase, Message, TimelineSnapshot } from "../contracts/model";
@@ -244,7 +249,11 @@ function Shell(props: UiOptions) {
     }
   };
   const sidebarWidth = createMemo(() =>
-    dimensions().width < 65 ? 18 : (settings()?.tui.sidebarWidth ?? 26),
+    dimensions().width < 65
+      ? 16
+      : dimensions().width < 100
+        ? Math.min(20, settings()?.tui.sidebarWidth ?? 26)
+        : (settings()?.tui.sidebarWidth ?? 26),
   );
   const gutterWidth = createMemo(() =>
     transcriptGutterWidth(
@@ -291,7 +300,10 @@ function Shell(props: UiOptions) {
     // Recheck against measured layout, not a field's stale pre-focus coordinates.
     pendingFocusReveal = control;
   };
+  // Dialog controls act on mouse-down; ignore the matching mouse-up on what lies beneath.
+  let modalClosedAt = 0;
   const closeModal = () => {
+    modalClosedAt = Date.now();
     setModal(null);
     setPaste("");
     queueMicrotask(() => focus(returnFocus));
@@ -313,9 +325,15 @@ function Shell(props: UiOptions) {
             ? "whois-nick"
             : value === "directory"
               ? "directory-filter"
-              : ["join", "query", "switch", "search"].includes(value ?? "")
-                ? "dialog-input"
-                : "dialog-close";
+              : value === "message"
+                ? "copy-message"
+                : value === "quit"
+                  ? "quit-confirm"
+                  : value === "redact"
+                    ? "redact-cancel"
+                    : ["join", "query", "switch", "search"].includes(value ?? "")
+                      ? "dialog-input"
+                      : "dialog-close";
       focus(target);
     });
   };
@@ -593,6 +611,20 @@ function Shell(props: UiOptions) {
           filteredPalette()[paletteIndex()]?.id ?? "",
         );
         if (target) revealControl(target);
+      } else if (
+        (event.name === "up" || event.name === "down") &&
+        !(controls.get(focusId())?.control instanceof InputRenderable) &&
+        modal() !== "settings"
+      ) {
+        // Arrow keys walk dialog lists; text fields keep their own cursor keys.
+        event.preventDefault();
+        const ids = orderedControls("modal").filter((id) => id !== "dialog-close");
+        const current = ids.indexOf(focusId());
+        const next =
+          ids[
+            current < 0 ? 0 : (current + (event.name === "up" ? -1 : 1) + ids.length) % ids.length
+          ];
+        if (next) focus(next);
       } else if (event.name === "return" && focusId() === "dialog-input") {
         event.preventDefault();
         if (modal() === "search") void search();
@@ -772,84 +804,88 @@ function Shell(props: UiOptions) {
         <text selectable fg={colors.text}>
           {message.redacted ? "[message removed]" : message.text}
         </text>
-        <Button
-          id="copy-message"
-          layer="modal"
-          label="Copy message text"
-          onPress={() => {
-            void props.external
-              .copyText(message.text, abort.signal)
-              .then((result) => setStatus(result.ok ? "Copied." : result.error.message));
-          }}
-        />
-        <Show when={network()?.features.replies && message.serverId && !message.redacted}>
-          <Button
-            id="reply-message"
+        <box flexDirection="column" flexShrink={0}>
+          <ListItem
+            id="copy-message"
             layer="modal"
-            label="Reply to this message"
+            label="Copy message text"
             onPress={() => {
-              setReply(message.id);
-              closeToComposer();
+              void props.external
+                .copyText(message.text, abort.signal)
+                .then((result) => setStatus(result.ok ? "Copied." : result.error.message));
             }}
           />
-        </Show>
-        <Show when={network()?.features.reactions && message.serverId && !message.redacted}>
-          <Button
-            id="react-message"
+          <Show when={network()?.features.replies && message.serverId && !message.redacted}>
+            <ListItem
+              id="reply-message"
+              layer="modal"
+              label="Reply to this message"
+              onPress={() => {
+                setReply(message.id);
+                closeToComposer();
+              }}
+            />
+          </Show>
+          <Show when={network()?.features.reactions && message.serverId && !message.redacted}>
+            <ListItem
+              id="react-message"
+              layer="modal"
+              label="React +1"
+              onPress={() => {
+                void run({
+                  type: "message.react",
+                  messageId: message.id,
+                  value: "👍",
+                  remove: false,
+                });
+              }}
+            />
+          </Show>
+          <ListItem
+            id="message-whois"
             layer="modal"
-            label="React +1"
+            label={`Look up ${message.sender.nick}`}
             onPress={() => {
               void run({
-                type: "message.react",
-                messageId: message.id,
-                value: "👍",
-                remove: false,
+                type: "irc.request",
+                networkId: message.networkId,
+                command: { type: "whois", nick: message.sender.nick },
               });
             }}
           />
-        </Show>
-        <Button
-          id="message-whois"
-          layer="modal"
-          label={`Look up ${message.sender.nick}`}
-          onPress={() => {
-            void run({
-              type: "irc.request",
-              networkId: message.networkId,
-              command: { type: "whois", nick: message.sender.nick },
-            });
-          }}
-        />
-        <Show when={canRedact(message)}>
-          <Button
-            id="redact-message"
-            layer="modal"
-            label="Remove my message…"
-            onPress={() => {
-              setSelectedMessage(message);
-              openModal("redact");
-            }}
-          />
-        </Show>
-        <For each={links.slice(0, 8)}>
-          {(url, index) => (
-            <Button
-              id={`url-${index()}`}
+          <Show when={canRedact(message)}>
+            <ListItem
+              id="redact-message"
               layer="modal"
-              label={`Open in browser: ${url}`}
+              label="Remove my message…"
               onPress={() => {
-                void props.external
-                  .openUrl(url, abort.signal)
-                  .then((result) =>
-                    setStatus(result.ok ? "Opened browser." : result.error.message),
-                  );
+                setSelectedMessage(message);
+                openModal("redact");
               }}
             />
-          )}
-        </For>
-        <text fg={colors.muted}>
-          Opening a link shares it with your default browser. No automatic previews are fetched.
-        </text>
+          </Show>
+          <For each={links.slice(0, 8)}>
+            {(url, index) => (
+              <ListItem
+                id={`url-${index()}`}
+                layer="modal"
+                label={`Open in browser: ${url}`}
+                onPress={() => {
+                  void props.external
+                    .openUrl(url, abort.signal)
+                    .then((result) =>
+                      setStatus(result.ok ? "Opened browser." : result.error.message),
+                    );
+                }}
+              />
+            )}
+          </For>
+        </box>
+        <Show when={links.length}>
+          <text fg={colors.muted}>
+            Opening a link shares it with your default browser. No automatic previews are fetched.
+          </text>
+        </Show>
       </>
     );
   };
@@ -857,7 +893,16 @@ function Shell(props: UiOptions) {
     () =>
       settings()?.tui.memberList === true &&
       active()?.kind === "channel" &&
-      dimensions().width - sidebarWidth() >= 100,
+      dimensions().width - sidebarWidth() >= 90,
+  );
+  const sortedMembers = createMemo(() =>
+    [...(timeline()?.members ?? [])]
+      .sort(
+        (a, b) =>
+          Number(!a.prefixes.length) - Number(!b.prefixes.length) ||
+          a.nick.localeCompare(b.nick, undefined, { sensitivity: "base" }),
+      )
+      .slice(0, 200),
   );
   const typingLabel = () => {
     const ids = timeline()?.typing ?? [];
@@ -1115,11 +1160,7 @@ function Shell(props: UiOptions) {
                       prefixColor={phaseColor(net.phase)}
                       label={net.name}
                       strong
-                      {...(net.phase !== "ready"
-                        ? { hint: phaseLabel(net.phase) }
-                        : net.secure
-                          ? {}
-                          : { hint: "plaintext" })}
+                      {...(net.phase === "ready" ? {} : { hint: phaseLabel(net.phase) })}
                       active={!!status() && active()?.id === status()!.id}
                       onPress={() => {
                         if (status()) activate(status()!.id);
@@ -1193,7 +1234,7 @@ function Shell(props: UiOptions) {
               border={["bottom"]}
               borderColor={colors.border}
             >
-              <text flexGrow={1} minWidth={0} height={1} wrapMode="none" truncate>
+              <text flexGrow={1} minWidth={0} height={1} wrapMode="none">
                 <b>
                   <span style={{ fg: colors.text }}>{active()?.name ?? "Welcome to OpenIRC"}</span>
                 </b>
@@ -1319,6 +1360,7 @@ function Shell(props: UiOptions) {
                                 ? { dayLabel: `── ${formatDay(messageTime(message))} ──` }
                                 : {})}
                               onSelect={() => {
+                                if (modal() || Date.now() - modalClosedAt < 300) return;
                                 setSelectedMessage(message);
                                 openModal("message");
                               }}
@@ -1341,7 +1383,7 @@ function Shell(props: UiOptions) {
                   </box>
                   <Show when={timeline()?.typing.length}>
                     <box height={1} flexShrink={0} paddingX={2}>
-                      <text height={1} wrapMode="none" truncate fg={colors.muted}>
+                      <text height={1} wrapMode="none" fg={colors.muted}>
                         {typingLabel()}
                       </text>
                     </box>
@@ -1414,7 +1456,7 @@ function Shell(props: UiOptions) {
                     <text height={1} flexShrink={0} fg={colors.muted}>
                       PEOPLE · {timeline()?.members.length ?? 0}
                     </text>
-                    <For each={(timeline()?.members ?? []).slice(0, 200)}>
+                    <For each={sortedMembers()}>
                       {(member) => (
                         <text
                           height={1}
@@ -1443,8 +1485,21 @@ function Shell(props: UiOptions) {
           backgroundColor={colors.panel}
         >
           <box flexGrow={1} minWidth={0}>
-            <Show when={footerMessage()} fallback={<KeyHints hints={footerHints()} />}>
-              <text height={1} wrapMode="none" truncate fg={colors.error}>
+            <Show
+              when={footerMessage()}
+              fallback={
+                <KeyHints
+                  hints={footerHints()}
+                  maxWidth={
+                    dimensions().width -
+                    6 -
+                    (network() ? network()!.nick.length + 14 : 0) -
+                    (!atBottom() || timeline()?.atLatest === false ? 10 : 0)
+                  }
+                />
+              }
+            >
+              <text height={1} wrapMode="none" fg={colors.error}>
                 {footerMessage()}
               </text>
             </Show>
@@ -1456,6 +1511,9 @@ function Shell(props: UiOptions) {
             <text flexShrink={0} height={1} fg={colors.muted}>
               {"  "}
               {network()!.nick}
+              <Show when={network()!.phase === "ready" && !network()!.secure}>
+                <span style={{ fg: colors.yellow }}> · plaintext</span>
+              </Show>
               <span style={{ fg: phaseColor(network()!.phase) }}> ●</span>
             </text>
           </Show>
@@ -1483,7 +1541,9 @@ function Shell(props: UiOptions) {
                                 ? "Message someone"
                                 : `${modal()!.charAt(0).toUpperCase()}${modal()!.slice(1)}`
             }
-            compact={["switch", "join", "query", "quit", "redact"].includes(modal() ?? "")}
+            compact={["switch", "join", "query", "quit", "redact", "message"].includes(
+              modal() ?? "",
+            )}
             width={dimensions().width}
             height={dimensions().height}
             onClose={closeModal}
