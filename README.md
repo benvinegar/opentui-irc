@@ -99,6 +99,7 @@ Ergo 2.19.1 was verified for registration, JOIN, server IDs/echoes, replies, typ
 
 ## Architecture and scope
 
+- [Latest checkpoint and session handoff](docs/HANDOFF.md)
 - [Agent operation guide](docs/AGENT_GUIDE.md)
 - [Versioned local control API](docs/CONTROL.md)
 - [Implementation status and remaining work](docs/IMPLEMENTATION.md)

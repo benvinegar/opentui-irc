@@ -8,6 +8,7 @@ Read `docs/AGENT_GUIDE.md`. Use `bun run --silent ctl --help`, `config schema`, 
 
 ## Start here
 
+- `docs/HANDOFF.md`: latest verified checkpoint, recent decisions and session continuity notes.
 - `docs/PLAN.md`: feature scope and confirmed product decisions.
 - `docs/ARCHITECTURE.md`: boundaries, state ownership and lifecycle.
 - `docs/CONTRACTS.md`: behavioral requirements; TypeScript alone is insufficient.

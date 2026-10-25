@@ -2,6 +2,8 @@
 
 OpenIRC is a runnable early daily-driver alpha, not completion of every A/V item in [PLAN.md](PLAN.md). Start with `bun install --frozen-lockfile && bun run start`.
 
+For the latest verified UI/QA checkpoint and new-session continuity notes, read [HANDOFF.md](HANDOFF.md). The transcript now uses the compact glirc-style layout; HistServ is hidden by default with a reversible, agent-configurable presentation filter.
+
 ## Implemented components
 
 | Component      | Current implementation                                                                                                                                                              |
