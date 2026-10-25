@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { ScrollBoxRenderable } from "@opentui/core";
+import { ScrollBoxRenderable, TextRenderable } from "@opentui/core";
 import type { TestRendererSetup } from "@opentui/core/testing";
 import { OpenIrc } from "../../src/ui/app";
 import { createCommandService } from "../../src/services/commands";
@@ -14,7 +14,7 @@ afterEach(() => {
   setup?.renderer.destroy();
   setup = undefined;
 });
-async function mount() {
+async function mount(kittyKeyboard = false) {
   const fake = createFakeApp();
   setup = await testRender(
     () => (
@@ -24,7 +24,7 @@ async function mount() {
         external={createExternalActions({ run: async () => ({ ok: true, value: undefined }) })}
       />
     ),
-    { width: 110, height: 36 },
+    { width: 110, height: 36, kittyKeyboard },
   );
   await setup.renderOnce();
   return { fake, view: setup };
@@ -40,6 +40,145 @@ async function click(view: TestRendererSetup, id: string) {
 }
 
 describe("real Solid/OpenTUI shell", () => {
+  test("compact transcript aligns time/nicks beside a full-height fixed divider at every width", async () => {
+    const { fake, view } = await mount();
+    const document = fake.settings.getSnapshot()!;
+    fake.settings.publish({ ...document, tui: { ...document.tui, density: "compact" } });
+    const model = fake.timelines.get(conversationId)!;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: [
+        {
+          ...welcomeMessage,
+          id: entityId<"message">("grid-joey"),
+          sender: { nick: "joey" },
+          text: "wrapped words ".repeat(8),
+        },
+        {
+          ...welcomeMessage,
+          id: entityId<"message">("grid-robert"),
+          sender: { nick: "robert" },
+          text: "Second participant",
+        },
+      ],
+    });
+    for (const width of [110, 80, 50, 110]) {
+      view.resize(width, 24);
+      await view.renderOnce();
+      await view.renderOnce();
+      const divider = view.renderer.root.findDescendantById("transcript-divider")!;
+      const frame = view.renderer.root.findDescendantById("transcript-frame")!;
+      const body = view.renderer.root.findDescendantById("body-grid-joey")!;
+      const nick = view.renderer.root.findDescendantById("nick-grid-joey")!;
+      expect(divider.width).toBe(1);
+      expect(divider.y).toBe(frame.y);
+      expect(divider.height).toBe(frame.height);
+      expect(body.x).toBe(divider.x + 2);
+      expect(body.y).toBe(nick.y);
+      expect(body.height).toBeGreaterThan(1);
+      if (!(body instanceof TextRenderable)) throw new Error("Missing message text");
+      expect(body.height).toBe(body.virtualLineCount);
+      const rendered = view
+        .captureCharFrame()
+        .split("\n")
+        .slice(body.y, body.y + body.height)
+        .map((line) => line.slice(body.x, body.x + body.width).trim())
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+      expect(rendered).toBe("wrapped words ".repeat(8).trim());
+      expect(nick.height).toBe(1);
+      const robert = view.renderer.root.findDescendantById("nick-grid-robert")!;
+      const spans = view.captureSpans().lines;
+      const joeyColor = spans[nick.y]?.spans
+        .find((span) => span.text.includes("joey"))
+        ?.fg.toInts();
+      const robertColor = spans[robert.y]?.spans
+        .find((span) => span.text.includes("robert"))
+        ?.fg.toInts();
+      expect(joeyColor).toBeDefined();
+      expect(robertColor).toBeDefined();
+      expect(joeyColor).not.toEqual(robertColor);
+      const lines = view.captureCharFrame().split("\n");
+      for (let row = divider.y; row < divider.y + divider.height; row++)
+        expect(lines[row]![divider.x]).toBe("│");
+      expect(lines[0]!.trim()).not.toBe("");
+      expect(lines[23]!.trim()).not.toBe("");
+      expect(view.renderer.root.findDescendantById("topbar")?.height).toBe(1);
+      expect(view.renderer.root.findDescendantById("composer-panel")?.height).toBe(2);
+    }
+  });
+  test("wrapped messages reserve the scrollbar cell without clipping words or adding blank rows", async () => {
+    const { fake, view } = await mount();
+    const text =
+      "A longer synthetic message wraps entirely inside the message column. Continuation lines stay aligned with the text, not the timestamp or nickname, while the divider remains fixed.";
+    const model = fake.timelines.get(conversationId)!;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: [{ ...welcomeMessage, id: entityId<"message">("wrapped-grid"), text }],
+    });
+    await view.renderOnce();
+    await view.renderOnce();
+    const body = view.renderer.root.findDescendantById("body-wrapped-grid");
+    if (!(body instanceof TextRenderable)) throw new Error("Missing message text");
+    const rows = view
+      .captureCharFrame()
+      .split("\n")
+      .slice(body.y, body.y + body.height)
+      .map((line) => line.slice(body.x, body.x + body.width).trim());
+    expect(rows.every((row) => row.length > 0)).toBe(true);
+    expect(rows.join(" ")).toBe(text);
+    expect(body.height).toBe(body.virtualLineCount);
+  });
+  test("long Unicode nicknames stay in the gutter and message decorations stay on the right", async () => {
+    const { fake, view } = await mount();
+    const model = fake.timelines.get(conversationId)!;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: [
+        {
+          ...welcomeMessage,
+          id: entityId<"message">("unicode-grid"),
+          sender: { nick: "長い名前👩‍💻-a-very-long-nickname" },
+          text: "Unicode 你好 é 👩‍💻 🇯🇵",
+          replyTo: { serverId: "parent-server-message", localId: welcomeMessage.id },
+          reactions: [{ value: "👍", count: 2, reactedBySelf: false }],
+          sendState: "uncertain",
+        },
+      ],
+    });
+    await view.renderOnce();
+    await view.renderOnce();
+    const divider = view.renderer.root.findDescendantById("transcript-divider")!;
+    const nick = view.renderer.root.findDescendantById("nick-unicode-grid")!;
+    const body = view.renderer.root.findDescendantById("body-unicode-grid")!;
+    expect(nick.height).toBe(1);
+    expect(nick.x + nick.width).toBeLessThan(divider.x);
+    expect(body.x).toBe(divider.x + 2);
+    const frame = view.captureCharFrame();
+    expect(frame).toContain("Unicode 你好");
+    expect(frame).toContain("[uncertain]");
+    expect(frame).toContain("↳ reply to");
+    expect(frame).toContain("👍 2");
+    await click(view, "message-unicode-grid");
+    expect(view.renderer.root.findDescendantById("copy-message")?.id).toBe("copy-message");
+  });
+  test("composer uses one row when empty and grows only for multiline drafts", async () => {
+    const { view } = await mount(true);
+    expect(view.renderer.root.findDescendantById("composer-panel")?.height).toBe(2);
+    await view.mockInput.typeText("first");
+    await view.mockInput.pressEnter({ shift: true });
+    await tick();
+    await view.renderOnce();
+    expect(view.renderer.root.findDescendantById("composer-panel")?.height).toBe(3);
+    await view.mockInput.typeText("second");
+    await view.mockInput.pressEnter({ shift: true });
+    await view.mockInput.typeText("third");
+    await view.mockInput.pressEnter({ shift: true });
+    await tick();
+    await view.renderOnce();
+    expect(view.renderer.root.findDescendantById("composer-panel")?.height).toBe(4);
+  });
   test("typing status has its own row above the composer in a full short transcript", async () => {
     const { fake, view } = await mount();
     view.resize(80, 24);

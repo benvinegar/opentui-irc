@@ -12,6 +12,12 @@ const ui = await startUi({ app, commands, external, onQuit: requestShutdown });
 
 `UiHandle` exposes `destroy(): void` and `done: Promise<void>`. The latter is the native renderer's `closed` promise (terminal restoration complete). Main owns SIGINT/SIGTERM; the renderer explicitly sets `exitSignals: []` and `exitOnCtrlC: false`. UI Ctrl+C/Ctrl+Q opens quit confirmation. Without an injected `onQuit`, the UI shuts down the app and destroys its renderer itself.
 
+## Transcript layout
+
+The transcript uses a glirc-style gutter: local 24-hour time, right-aligned nickname, a fixed full-height divider, and wrapped text on the right. The gutter is 24 cells on normal windows and shrinks on narrow ones; long nicknames are truncated only visually and remain available in message actions. Replies, reactions, unread markers and pending/failure/uncertain states stay visible. Echo-observed messages render normally rather than adding a header line; this does not imply delivery.
+
+Nickname colors are deterministic, case-insensitive and theme-aware, not account verification or a promise that every possible nickname has a different color. Samples are contrast-tested against each theme. Top/bottom chrome has no spacer rows. The composer starts at one input line and grows to three for multiline drafts. New profiles default to compact density; existing density preferences are preserved. `tui.density` remains configurable through the control API (`compact` removes inter-message gaps; `comfortable` adds one).
+
 ## Runtime and tests
 
 The installed OpenTUI Solid README requires JSX preserve, `jsxImportSource: "@opentui/solid"`, and `@opentui/solid/preload`. Production gets this from the root Bun config. Bun 1.3.14 **does not apply the top-level preload to `bun test`**. The JSX-free `tests/ui/shell.bun.test.ts` wrapper registers the real compiler before dynamically loading TSX, so no hidden flags or browser conditions are needed:

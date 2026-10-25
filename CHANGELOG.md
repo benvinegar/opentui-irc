@@ -16,6 +16,9 @@
 
 ### Changed
 
+- Compact, glirc-style transcript with aligned 24-hour timestamps/nicknames, a full-height divider, wrapped message text and stable theme-aware nickname colors.
+- Removed empty top/bottom chrome rows; the composer starts at one line and grows for multiline drafts. New profiles default to compact message spacing.
+
 ### Fixed
 
 - Page Up/Down now scroll the active dialog instead of leaving long help/settings content unreachable from the keyboard.

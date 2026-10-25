@@ -33,6 +33,8 @@ import { Button, Dialog, Field, FocusContext, ThemeContext, usePalette } from ".
 import { SettingsForm } from "./settings";
 import { DiscoveryPanel } from "./discovery";
 import { createTypingReporter } from "./typing";
+import { MessageRow } from "./transcript";
+import { transcriptGutterWidth } from "./transcript-style";
 
 export interface UiOptions {
   readonly app: AppApi;
@@ -165,6 +167,13 @@ function Shell(props: UiOptions) {
   });
   // App windows are bounded; impose a second hard cap on mounted layout work.
   const messages = createMemo(() => timeline()?.messages.slice(-300) ?? []);
+  const sidebarWidth = createMemo(() =>
+    dimensions().width < 65 ? 18 : (settings()?.tui.sidebarWidth ?? 26),
+  );
+  const gutterWidth = createMemo(() => transcriptGutterWidth(dimensions().width - sidebarWidth()));
+  const composerRows = createMemo(() =>
+    Math.min(3, 1 + (timeline()?.draft.match(/\n/g)?.length ?? 0)),
+  );
   const orderedControls = (layer: string) => {
     const ids: string[] = [];
     const visit = (parent: Renderable) => {
@@ -773,7 +782,8 @@ function Shell(props: UiOptions) {
     >
       <box width="100%" height="100%" flexDirection="column" backgroundColor={colors.bg}>
         <box
-          height={3}
+          id="topbar"
+          height={1}
           flexShrink={0}
           paddingX={1}
           flexDirection="row"
@@ -781,7 +791,7 @@ function Shell(props: UiOptions) {
           justifyContent="space-between"
           backgroundColor={colors.panel}
         >
-          <text fg={colors.accent}>
+          <text height={1} wrapMode="none" truncate fg={colors.accent}>
             <b>OpenIRC</b> a little closer to your community
           </text>
           <box flexDirection="row">
@@ -807,7 +817,7 @@ function Shell(props: UiOptions) {
         </box>
         <box flexDirection="row" flexGrow={1} minHeight={0}>
           <scrollbox
-            width={dimensions().width < 65 ? 18 : (settings()?.tui.sidebarWidth ?? 26)}
+            width={sidebarWidth()}
             flexShrink={0}
             backgroundColor={colors.panel}
             contentOptions={{ flexDirection: "column", paddingX: 1 }}
@@ -816,8 +826,8 @@ function Shell(props: UiOptions) {
             <For each={state().networks}>
               {(net) => (
                 <>
-                  <box height={2} paddingTop={1} flexShrink={0}>
-                    <text fg={colors.accent}>
+                  <box height={1} flexShrink={0}>
+                    <text height={1} wrapMode="none" truncate fg={colors.accent}>
                       <b>{net.name}</b>
                     </text>
                   </box>
@@ -901,31 +911,32 @@ function Shell(props: UiOptions) {
           </scrollbox>
           <box flexGrow={1} minWidth={0} flexDirection="column">
             <box
-              height={4}
+              height={active()?.kind === "direct" ? 3 : 2}
               flexShrink={0}
-              paddingX={2}
-              paddingTop={1}
+              paddingX={1}
               border={false}
               backgroundColor={colors.raised}
             >
-              <text fg={colors.text}>
+              <text height={1} flexShrink={0} wrapMode="none" truncate fg={colors.text}>
                 <b>{active()?.name ?? "Welcome to OpenIRC"}</b>{" "}
                 {network()?.nick ? `as ${network()!.nick}` : ""}
               </text>
-              <text fg={colors.muted}>
+              <text height={1} flexShrink={0} wrapMode="none" truncate fg={colors.muted}>
                 {active()?.topic ||
                   (active()
                     ? `${network()?.name ?? ""} · ${network()?.phase ?? "disconnected"}`
                     : "Add a network, connect securely, and join a channel.")}
               </text>
               <Show when={active()?.kind === "direct"}>
-                <text fg={colors.muted}>Nicknames can be reused. Verify accounts.</text>
+                <text height={1} flexShrink={0} wrapMode="none" truncate fg={colors.muted}>
+                  Nicknames can be reused. Verify accounts.
+                </text>
               </Show>
             </box>
             <Show
               when={active()}
               fallback={
-                <box flexGrow={1} padding={3} flexDirection="column" gap={1}>
+                <box flexGrow={1} paddingX={1} flexDirection="column" gap={1}>
                   <text fg={colors.accent}>
                     <b>Your next conversation starts here.</b>
                   </text>
@@ -987,79 +998,54 @@ function Shell(props: UiOptions) {
                   onPress={() => openModal("messages")}
                 />
               </box>
-              <scrollbox
-                id="transcript"
-                ref={(element) => (transcript = element)}
-                flexGrow={1}
-                minHeight={0}
-                scrollX={false}
-                stickyScroll
-                stickyStart="bottom"
-                contentOptions={{
-                  flexDirection: "column",
-                  paddingX: 2,
-                  gap: settings()?.tui.density === "compact" ? 0 : 1,
-                }}
-              >
-                <Show when={(timeline()?.messages.length ?? 0) > 300}>
-                  <text fg={colors.muted}>
-                    Showing the latest 300 messages to keep terminal layout bounded. Use Search to
-                    reveal older context.
-                  </text>
-                </Show>
-                <For each={messages()}>
-                  {(message) => (
-                    <box
-                      id={`message-${message.id}`}
-                      flexDirection="column"
-                      flexShrink={0}
-                      onMouseUp={() => {
-                        setSelectedMessage(message);
-                        openModal("message");
-                      }}
-                    >
-                      <Show when={timeline()?.firstUnreadId === message.id}>
-                        <text fg={colors.accent}>──────── New messages ────────</text>
-                      </Show>
-                      <text fg={colors.muted}>
-                        <b>{message.sender.nick}</b>{" "}
-                        {new Date(message.serverTime ?? message.receivedAt).toLocaleTimeString([], {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                        {message.source === "playback" ? " · history" : ""}
-                        {message.sendState ? ` · ${message.sendState}` : ""}
-                      </text>
-                      <Show when={message.replyTo}>
-                        <text fg={colors.muted}>
-                          ↳ reply to {message.replyTo?.localId ?? "earlier message"}
-                        </text>
-                      </Show>
-                      <text
-                        selectable
-                        fg={
-                          message.kind === "event"
-                            ? colors.muted
-                            : message.sendState === "failed" || message.sendState === "uncertain"
-                              ? colors.error
-                              : colors.text
-                        }
-                      >
-                        {message.redacted
-                          ? "[message removed]"
-                          : `${message.kind === "action" ? "* " : ""}${message.text}`}
-                      </text>
-                      <Show when={message.reactions.length}>
-                        <text fg={colors.accent}>
-                          {message.reactions
-                            .map((reaction) => `${reaction.value} ${reaction.count}`)
-                            .join("  ")}
-                        </text>
-                      </Show>
-                    </box>
-                  )}
-                </For>
-              </scrollbox>
+              <box id="transcript-frame" flexGrow={1} minHeight={0} flexDirection="column">
+                <scrollbox
+                  id="transcript"
+                  ref={(element) => (transcript = element)}
+                  flexGrow={1}
+                  minHeight={0}
+                  scrollX={false}
+                  stickyScroll
+                  stickyStart="bottom"
+                  contentOptions={{
+                    flexDirection: "column",
+                    // The scrollbar overlays the final cell; keep wrapped text clear of it.
+                    paddingRight: 1,
+                    gap: settings()?.tui.density === "compact" ? 0 : 1,
+                  }}
+                >
+                  <Show when={(timeline()?.messages.length ?? 0) > 300}>
+                    <text fg={colors.muted}>
+                      Showing the latest 300 messages to keep terminal layout bounded. Use Search to
+                      reveal older context.
+                    </text>
+                  </Show>
+                  <For each={messages()}>
+                    {(message) => (
+                      <MessageRow
+                        message={message}
+                        gutterWidth={gutterWidth()}
+                        firstUnread={timeline()?.firstUnreadId === message.id}
+                        onSelect={() => {
+                          setSelectedMessage(message);
+                          openModal("message");
+                        }}
+                      />
+                    )}
+                  </For>
+                </scrollbox>
+                <box
+                  id="transcript-divider"
+                  position="absolute"
+                  left={gutterWidth()}
+                  top={0}
+                  width={1}
+                  height="100%"
+                  border={["left"]}
+                  borderColor={colors.muted}
+                  zIndex={1}
+                />
+              </box>
               <Show when={!atBottom() || timeline()?.atLatest === false}>
                 <Button
                   id="latest"
@@ -1087,10 +1073,10 @@ function Shell(props: UiOptions) {
                 </text>
               </Show>
               <box
-                height={6}
+                id="composer-panel"
+                height={composerRows() + 1}
                 flexShrink={0}
                 paddingX={1}
-                paddingTop={1}
                 backgroundColor={colors.panel}
                 flexDirection="column"
               >
@@ -1105,8 +1091,8 @@ function Shell(props: UiOptions) {
                       }
                     });
                   }}
-                  height={3}
-                  flexGrow={1}
+                  height={composerRows()}
+                  flexShrink={0}
                   focused={!modal() && focusId() === "composer"}
                   onMouseDown={() => focus("composer")}
                   initialValue={untrack(() => timeline()?.draft ?? "")}
@@ -1133,8 +1119,16 @@ function Shell(props: UiOptions) {
             </Show>
           </box>
         </box>
-        <box height={2} flexShrink={0} paddingX={1} backgroundColor={colors.panel}>
+        <box
+          id="status-bar"
+          minHeight={1}
+          maxHeight={2}
+          flexShrink={0}
+          paddingX={1}
+          backgroundColor={colors.panel}
+        >
           <text
+            wrapMode="word"
             fg={
               status() || operations().some((operation) => operation.state === "failed")
                 ? colors.error

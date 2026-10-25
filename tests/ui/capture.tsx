@@ -4,9 +4,33 @@ import { OpenIrc } from "../../src/ui/app";
 import { createCommandService } from "../../src/services/commands";
 import { createExternalActions } from "../../src/services/effects";
 import { createFakeApp } from "../fakes/app";
+import { conversationId, welcomeMessage } from "../fixtures/scenario";
+import { entityId } from "../../src/contracts/common";
 
 // Explicit fake headless preview, not the production startup or a real IRC session.
 const fake = createFakeApp();
+const document = fake.settings.getSnapshot()!;
+fake.settings.publish({ ...document, tui: { ...document.tui, density: "compact" } });
+const timeline = fake.timelines.get(conversationId)!;
+const names = ["joey", "robert", "alice", "長い名前👩‍💻", "kai"];
+const samples = [
+  "Synthetic preview: time and nickname on the left; conversation on the right.",
+  "A longer synthetic message wraps entirely inside the message column. Continuation lines stay aligned with the text, not the timestamp or nickname, while the divider remains fixed.",
+  "Different nicknames get consistent, theme-aware colors.",
+  "Unicode fixture: 你好 é 👩‍💻 🇯🇵",
+  "Click a message to open its existing actions.",
+];
+timeline.publish({
+  ...timeline.getSnapshot(),
+  messages: Array.from({ length: 18 }, (_, index) => ({
+    ...welcomeMessage,
+    id: entityId<"message">(`preview-${index}`),
+    sender: { nick: names[index % names.length]! },
+    receivedAt: welcomeMessage.receivedAt + index * 60_000,
+    text: samples[index % samples.length]!,
+    ...(index === 16 ? { sendState: "uncertain" as const } : {}),
+  })),
+});
 const view = await testRender(
   () => (
     <OpenIrc
