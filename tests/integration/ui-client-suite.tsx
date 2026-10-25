@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { testRender } from "@opentui/solid";
+import { ScrollBoxRenderable } from "@opentui/core";
 import { OpenIrc } from "../../src/ui/app";
 import { createApp } from "../../src/app/create-app";
 import { createSettingsRepository } from "../../src/storage/settings";
@@ -21,8 +22,23 @@ async function until(predicate: () => boolean) {
   }
 }
 async function click(view: TestRendererSetup, id: string) {
-  const target = view.renderer.root.findDescendantById(id);
-  expect(target).toBeDefined();
+  let target = view.renderer.root.findDescendantById(id);
+  if (!target && !view.renderer.root.findDescendantById("modal-backdrop")) {
+    // Secondary actions live in the ctrl+k palette rather than permanent buttons.
+    view.mockInput.pressKey("k", { ctrl: true });
+    await Bun.sleep(5);
+    await view.renderOnce();
+    target = view.renderer.root.findDescendantById(id);
+  }
+  const scroll = view.renderer.root.findDescendantById("modal-scroll");
+  if (target && scroll instanceof ScrollBoxRenderable && scroll.findDescendantById(id)) {
+    const { y, height } = scroll.viewport;
+    if (target.y < y || target.y >= y + height) {
+      scroll.scrollBy(target.y - y - 1);
+      await view.renderOnce();
+    }
+  }
+  expect(target?.id).toBe(id);
   await view.mockMouse.click(target!.x + 1, target!.y);
   await Bun.sleep(5);
   await view.renderOnce();

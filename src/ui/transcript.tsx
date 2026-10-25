@@ -7,6 +7,10 @@ export function MessageRow(props: {
   message: Message;
   gutterWidth: number;
   firstUnread: boolean;
+  /** Same sender shortly after their previous line: omit the repeated gutter. */
+  continuation?: boolean;
+  /** Shown above the row when the calendar day changes. */
+  dayLabel?: string;
   onSelect: () => void;
 }) {
   const colors = usePalette();
@@ -18,16 +22,26 @@ export function MessageRow(props: {
       flexShrink={0}
       onMouseUp={props.onSelect}
     >
-      <Show when={props.firstUnread}>
-        <box flexDirection="row">
+      <Show when={props.dayLabel}>
+        <box flexDirection="row" height={1} flexShrink={0}>
           <box width={props.gutterWidth + 2} flexShrink={0} />
-          <text fg={colors.accent}>── New messages ──</text>
+          <text fg={colors.muted} wrapMode="none" truncate>
+            {props.dayLabel}
+          </text>
+        </box>
+      </Show>
+      <Show when={props.firstUnread}>
+        <box flexDirection="row" height={1} flexShrink={0}>
+          <box width={props.gutterWidth + 2} flexShrink={0} />
+          <text fg={colors.yellow}>── new ──</text>
         </box>
       </Show>
       <box flexDirection="row" flexShrink={0}>
         <box width={props.gutterWidth} flexShrink={0} flexDirection="row" overflow="hidden">
           <text width={5} height={1} wrapMode="none" fg={colors.muted}>
-            {formatMessageTime(props.message.serverTime ?? props.message.receivedAt)}
+            {props.continuation
+              ? ""
+              : formatMessageTime(props.message.serverTime ?? props.message.receivedAt)}
           </text>
           <box width={1} flexShrink={0} />
           <text
@@ -43,7 +57,7 @@ export function MessageRow(props: {
                 : nicknameColor(props.message.sender.nick, theme())
             }
           >
-            <b>{props.message.sender.nick}</b>
+            {props.continuation ? "" : <b>{props.message.sender.nick}</b>}
           </text>
         </box>
         <box width={2} flexShrink={0} />

@@ -46,6 +46,43 @@ export function formatMessageTime(timestamp: number): string {
 }
 
 /** Fixed across rows; reduce the gutter only when the conversation is narrow. */
-export function transcriptGutterWidth(conversationWidth: number): number {
-  return Math.max(8, Math.min(24, Math.floor(conversationWidth / 2)));
+export function transcriptGutterWidth(conversationWidth: number, longestNick = Infinity): number {
+  // Time (5) + space + nick + spacing; no wider than the longest visible nickname needs.
+  return Math.max(
+    8,
+    Math.min(24, Math.floor(conversationWidth / 2), Math.max(12, longestNick + 7)),
+  );
+}
+
+const GROUP_WINDOW = 5 * 60_000;
+
+/** Consecutive chat lines by one sender within a few minutes read as one block. */
+export function continuesGroup(
+  previous: { sender: { nick: string }; kind: string; at: number } | undefined,
+  current: { sender: { nick: string }; kind: string; at: number },
+): boolean {
+  return (
+    !!previous &&
+    (previous.kind === "event") === (current.kind === "event") &&
+    previous.sender.nick === current.sender.nick &&
+    current.at - previous.at >= 0 &&
+    current.at - previous.at < GROUP_WINDOW &&
+    dayKey(previous.at) === dayKey(current.at)
+  );
+}
+
+export function dayKey(timestamp: number): string {
+  const date = new Date(timestamp);
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+export function formatDay(timestamp: number, now = Date.now()): string {
+  const key = dayKey(timestamp);
+  if (key === dayKey(now)) return "Today";
+  if (key === dayKey(now - 86_400_000)) return "Yesterday";
+  return new Date(timestamp).toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
 }

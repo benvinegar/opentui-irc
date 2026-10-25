@@ -2,6 +2,8 @@ import type { InputRenderable, Renderable } from "@opentui/core";
 import {
   createContext,
   createEffect,
+  For,
+  Show,
   onCleanup,
   useContext,
   type Accessor,
@@ -17,6 +19,8 @@ const dark = {
   accent: "#a8b7ff",
   error: "#ffb4b4",
   green: "#a6dfb3",
+  yellow: "#e8d29a",
+  border: "#30354a",
 };
 const light = {
   bg: "#f4f5fa",
@@ -27,6 +31,8 @@ const light = {
   accent: "#3f45a8",
   error: "#9d2020",
   green: "#166138",
+  yellow: "#7a5a00",
+  border: "#c3c9da",
 };
 const contrast = {
   bg: "#000000",
@@ -37,6 +43,8 @@ const contrast = {
   accent: "#ffff00",
   error: "#ff9b9b",
   green: "#80ff80",
+  yellow: "#ffd75f",
+  border: "#bbbbbb",
 };
 export const ThemeContext = createContext<Accessor<"dark" | "light" | "high-contrast">>(
   () => "dark" as const,
@@ -70,6 +78,12 @@ export function usePalette() {
     get green() {
       return palette().green;
     },
+    get yellow() {
+      return palette().yellow;
+    },
+    get border() {
+      return palette().border;
+    },
   };
 }
 export interface FocusManager {
@@ -100,6 +114,8 @@ export function Button(props: {
   active?: boolean;
   disabled?: boolean;
   width?: number;
+  /** Text-only affordance without a filled background. */
+  quiet?: boolean;
 }) {
   const colors = usePalette();
   const control = useControl(props.id, props.layer ?? "main");
@@ -118,7 +134,13 @@ export function Button(props: {
       {...(props.width === undefined ? {} : { width: props.width })}
       height={1}
       paddingX={1}
-      backgroundColor={control.focused() || props.active ? colors.raised : colors.panel}
+      backgroundColor={
+        control.focused() || props.active
+          ? colors.raised
+          : props.quiet
+            ? "transparent"
+            : colors.panel
+      }
       onMouseDown={press}
       onKeyDown={(event) => {
         if (event.name === "return" || event.name === "space") {
@@ -133,7 +155,9 @@ export function Button(props: {
             ? colors.muted
             : control.focused() || props.active
               ? colors.accent
-              : colors.text
+              : props.quiet
+                ? colors.muted
+                : colors.text
         }
       >
         {props.label}
@@ -148,6 +172,8 @@ export function Field(props: {
   onInput: (value: string) => void;
   placeholder?: string;
   onSubmit?: () => void;
+  /** The placeholder alone explains the input (quick pickers). */
+  hideLabel?: boolean;
 }) {
   const colors = usePalette();
   const control = useControl(props.id, "modal");
@@ -157,8 +183,10 @@ export function Field(props: {
     if (input && input.value !== value) input.value = value;
   });
   return (
-    <box flexDirection="column" height={2} flexShrink={0}>
-      <text fg={colors.muted}>{props.label}</text>
+    <box flexDirection="column" height={props.hideLabel ? 1 : 2} flexShrink={0}>
+      <Show when={!props.hideLabel}>
+        <text fg={colors.muted}>{props.label}</text>
+      </Show>
       <input
         id={props.id}
         ref={(element) => {
@@ -185,8 +213,12 @@ export function Dialog(props: {
   onClose: () => void;
   width: number;
   height: number;
+  /** Narrow, top-anchored dialogs read as a quick picker rather than a form. */
+  compact?: boolean;
 }) {
   const colors = usePalette();
+  const width = () => Math.min(props.compact ? 64 : 76, props.width - 2);
+  const height = () => Math.min(props.height - 4, props.compact ? 20 : 34);
   return (
     <box
       id="modal-backdrop"
@@ -195,37 +227,143 @@ export function Dialog(props: {
       left={0}
       width={props.width}
       height={props.height}
-      backgroundColor={`${colors.bg}99`}
+      backgroundColor={`${colors.bg}aa`}
       onMouseDown={(event) => event.stopPropagation()}
       onMouseScroll={(event) => event.stopPropagation()}
     >
       <box
         position="absolute"
-        top={1}
-        left={Math.max(0, Math.floor((props.width - Math.min(76, props.width)) / 2))}
-        width={Math.min(76, props.width)}
-        height={Math.min(props.height - 2, 34)}
+        top={Math.max(1, Math.floor(props.height / 8))}
+        left={Math.max(0, Math.floor((props.width - width()) / 2))}
+        width={width()}
+        height={height()}
         backgroundColor={colors.panel}
         border
+        borderStyle="rounded"
         borderColor={colors.accent}
+        title={` ${props.title} `}
         flexDirection="column"
-        paddingX={2}
+        paddingX={1}
       >
-        <box height={2} flexShrink={0} justifyContent="space-between" flexDirection="row">
-          <text fg={colors.accent}>
-            <b>{props.title}</b>
-          </text>
-          <Button id="dialog-close" layer="modal" label="Close [Esc]" onPress={props.onClose} />
+        <box height={1} flexShrink={0} justifyContent="flex-end" flexDirection="row">
+          <Button id="dialog-close" layer="modal" label="esc" quiet onPress={props.onClose} />
         </box>
         <scrollbox
           id="modal-scroll"
           flexGrow={1}
-          contentOptions={{ flexDirection: "column", gap: 1 }}
+          contentOptions={{ flexDirection: "column", gap: 1, paddingX: 1 }}
           scrollX={false}
         >
           {props.children}
         </scrollbox>
       </box>
     </box>
+  );
+}
+/** A navigable row: sidebar conversations and palette entries. */
+export function ListItem(props: {
+  id: string;
+  layer?: string;
+  label: string;
+  prefix?: string;
+  prefixColor?: string;
+  badge?: string;
+  hint?: string;
+  strong?: boolean;
+  alert?: boolean;
+  dim?: boolean;
+  active?: boolean;
+  onPress: () => void;
+}) {
+  const colors = usePalette();
+  const control = useControl(props.id, props.layer ?? "main");
+  const press = () => {
+    if (!control.active()) return;
+    control.select();
+    props.onPress();
+  };
+  const lit = () => control.focused() || props.active;
+  return (
+    <box
+      id={props.id}
+      ref={control.ref}
+      focusable
+      focused={control.focused()}
+      flexShrink={0}
+      height={1}
+      paddingX={1}
+      flexDirection="row"
+      backgroundColor={lit() ? colors.raised : "transparent"}
+      onMouseDown={press}
+      onKeyDown={(event) => {
+        if (event.name === "return" || event.name === "space") {
+          event.preventDefault();
+          press();
+        }
+      }}
+    >
+      <Show when={props.prefix !== undefined}>
+        <text
+          width={2}
+          flexShrink={0}
+          fg={props.prefixColor ?? (lit() ? colors.accent : colors.muted)}
+        >
+          {props.prefix}
+        </text>
+      </Show>
+      <text
+        flexGrow={1}
+        flexShrink={1}
+        flexBasis={0}
+        minWidth={0}
+        height={1}
+        wrapMode="none"
+        truncate
+        fg={
+          lit()
+            ? colors.accent
+            : props.dim
+              ? colors.muted
+              : props.strong || props.alert
+                ? colors.text
+                : colors.muted
+        }
+      >
+        {props.strong || props.alert || props.active ? <b>{props.label}</b> : props.label}
+      </text>
+      <Show when={props.badge}>
+        <text
+          flexShrink={0}
+          fg={props.alert ? colors.bg : colors.muted}
+          {...(props.alert ? { bg: colors.accent } : {})}
+        >
+          {props.alert ? ` ${props.badge} ` : ` ${props.badge}`}
+        </text>
+      </Show>
+      <Show when={props.hint}>
+        <text flexShrink={0} fg={colors.muted}>
+          {` ${props.hint}`}
+        </text>
+      </Show>
+    </box>
+  );
+}
+/** Footer key legend: keys stand out, descriptions recede. */
+export function KeyHints(props: { hints: readonly (readonly [string, string])[] }) {
+  const colors = usePalette();
+  return (
+    <text height={1} wrapMode="none" truncate>
+      <For each={props.hints}>
+        {([key, label], index) => (
+          <>
+            <span style={{ fg: colors.text }}>{key}</span>
+            <span style={{ fg: colors.muted }}>
+              {` ${label}`}
+              {index() < props.hints.length - 1 ? "   " : ""}
+            </span>
+          </>
+        )}
+      </For>
+    </text>
   );
 }

@@ -788,6 +788,27 @@ describe("one-attempt session", () => {
       error: { code: "unavailable", message: "You cannot send to this channel." },
     });
   });
+  test("welcome, user-count and MOTD numerics show their human-readable text", async () => {
+    const fixture = await harness();
+    await until(() => hasReady(fixture.events));
+    fixture.send(":s 375 me :- s Message of the day -");
+    fixture.send(":s 372 me :- Be kind to each other");
+    fixture.send(":s 372 me :- ");
+    fixture.send(":s 252 me 2 :IRC Operators online");
+    fixture.send(":s 376 me :End of MOTD command");
+    await until(() =>
+      fixture.events.some(
+        (event) => event.payload.type === "notice" && event.payload.text === "End of MOTD command",
+      ),
+    );
+    const notices = fixture.events.flatMap((event) =>
+      event.payload.type === "notice" ? [event.payload.text] : [],
+    );
+    expect(notices).toContain("Be kind to each other");
+    expect(notices).toContain("2 IRC Operators online");
+    expect(notices.some((text) => text.includes("server response"))).toBe(false);
+    expect(notices).not.toContain("");
+  });
   test("query timeouts quarantine late replies; limits fail explicitly; unknown numerics stay safe", async () => {
     const fixture = await harness({
       policy: { queryTimeoutMs: 5, keepaliveMs: 10, staleTimeoutMs: 1000, maxDirectoryItems: 1 },

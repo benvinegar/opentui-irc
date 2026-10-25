@@ -32,9 +32,24 @@ async function mount(kittyKeyboard = false) {
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
 async function click(view: TestRendererSetup, id: string) {
-  const target = view.renderer.root.findDescendantById(id)!;
-  expect(target).toBeDefined();
-  await view.mockMouse.click(target.x + 1, target.y);
+  let target = view.renderer.root.findDescendantById(id);
+  if (!target && !view.renderer.root.findDescendantById("modal-backdrop")) {
+    // Secondary actions live in the ctrl+k palette rather than permanent buttons.
+    view.mockInput.pressKey("k", { ctrl: true });
+    await tick();
+    await view.renderOnce();
+    target = view.renderer.root.findDescendantById(id);
+  }
+  const scroll = view.renderer.root.findDescendantById("modal-scroll");
+  if (target && scroll instanceof ScrollBoxRenderable && scroll.findDescendantById(id)) {
+    const { y, height } = scroll.viewport;
+    if (target.y < y || target.y >= y + height) {
+      scroll.scrollBy(target.y - y - 1);
+      await view.renderOnce();
+    }
+  }
+  expect(target?.id).toBe(id);
+  await view.mockMouse.click(target!.x + 1, target!.y);
   await tick();
   await view.renderOnce();
 }
@@ -83,7 +98,11 @@ describe("real Solid/OpenTUI shell", () => {
     expect(frame).toContain("connection-error-kept");
     expect(frame).not.toContain("hidden-service-notice");
     expect(frame).not.toContain("hidden-service-privmsg");
-    expect(frame).toContain("Show HistServ (2 hidden)");
+    // The reversible toggle lives in the ctrl+k palette and reports the hidden count.
+    await view.mockInput.pressKey("k", { ctrl: true });
+    await tick();
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("Show HistServ (2 hidden)");
     await click(view, "histserv-toggle");
     expect(fake.settings.getSnapshot()?.tui.showHistServ).toBe(true);
     frame = view.captureCharFrame();
@@ -221,8 +240,8 @@ describe("real Solid/OpenTUI shell", () => {
         expect(lines[row]![divider.x]).toBe("│");
       expect(lines[0]!.trim()).not.toBe("");
       expect(lines[23]!.trim()).not.toBe("");
-      expect(view.renderer.root.findDescendantById("topbar")?.height).toBe(1);
-      expect(view.renderer.root.findDescendantById("composer-panel")?.height).toBe(2);
+      expect(view.renderer.root.findDescendantById("conversation-header")?.height).toBe(2);
+      expect(view.renderer.root.findDescendantById("composer-panel")?.height).toBe(3);
     }
   });
   test("wrapped messages reserve the scrollbar cell without clipping words or adding blank rows", async () => {
@@ -282,19 +301,19 @@ describe("real Solid/OpenTUI shell", () => {
   });
   test("composer uses one row when empty and grows only for multiline drafts", async () => {
     const { view } = await mount(true);
-    expect(view.renderer.root.findDescendantById("composer-panel")?.height).toBe(2);
+    expect(view.renderer.root.findDescendantById("composer-panel")?.height).toBe(3);
     await view.mockInput.typeText("first");
     await view.mockInput.pressEnter({ shift: true });
     await tick();
     await view.renderOnce();
-    expect(view.renderer.root.findDescendantById("composer-panel")?.height).toBe(3);
+    expect(view.renderer.root.findDescendantById("composer-panel")?.height).toBe(4);
     await view.mockInput.typeText("second");
     await view.mockInput.pressEnter({ shift: true });
     await view.mockInput.typeText("third");
     await view.mockInput.pressEnter({ shift: true });
     await tick();
     await view.renderOnce();
-    expect(view.renderer.root.findDescendantById("composer-panel")?.height).toBe(4);
+    expect(view.renderer.root.findDescendantById("composer-panel")?.height).toBe(5);
   });
   test("typing status has its own row above the composer in a full short transcript", async () => {
     const { fake, view } = await mount();
@@ -325,7 +344,7 @@ describe("real Solid/OpenTUI shell", () => {
   });
   test("reply and member hints reserve rows beside typing in a full wide transcript", async () => {
     const { fake, view } = await mount();
-    view.resize(110, 24);
+    view.resize(130, 24);
     const document = fake.settings.getSnapshot()!;
     fake.settings.publish({ ...document, tui: { ...document.tui, memberList: true } });
     fake.state.publish({
@@ -357,10 +376,13 @@ describe("real Solid/OpenTUI shell", () => {
     await view.renderOnce();
     await view.renderOnce();
     const frame = view.captureCharFrame();
-    for (const hint of ["People:", "Someone is typing…", "Replying to a message · Esc to cancel"]) {
+    expect(view.renderer.root.findDescendantById("members")?.id).toBe("members");
+    expect(frame).toContain("PEOPLE ·");
+    for (const hint of ["Someone is typing…", "Replying to a message · esc to cancel"]) {
       expect(frame).toContain(hint);
       const line = frame.split("\n").find((line) => line.includes(hint))!;
-      expect(line.slice(line.indexOf(hint)).trim()).toBe(hint);
+      // Hints own their row; only the member panel's border may share it.
+      expect(line.slice(line.indexOf(hint)).split("│")[0]!.trim()).toBe(hint);
     }
   });
   test("saving history preferences closes the form and permits a fresh inverse change", async () => {
@@ -403,17 +425,18 @@ describe("real Solid/OpenTUI shell", () => {
     await view.mockInput.pressTab();
     expect(view.renderer.currentFocusedRenderable?.id).toBe("network-channel");
   });
-  test("a new dialog does not inherit a previous send's acceptance status", async () => {
+  test("a send shows its state on the message, never a delivery claim or a stale dialog status", async () => {
     const { view } = await mount();
     await view.mockInput.typeText("previous send");
     await view.mockInput.pressEnter();
     await tick();
     await view.renderOnce();
-    expect(view.captureCharFrame()).toContain("Accepted locally");
+    expect(view.captureCharFrame()).not.toContain("Accepted locally");
+    expect(view.captureCharFrame()).not.toContain("delivered");
     await view.mockInput.pressKey("F1");
     await tick();
     await view.renderOnce();
-    expect(view.captureCharFrame()).toContain("HELP");
+    expect(view.captureCharFrame()).toContain("Help");
     expect(view.captureCharFrame()).not.toContain("Accepted locally");
   });
   test("disconnected networks do not claim a plaintext or active TLS connection", async () => {
@@ -428,8 +451,8 @@ describe("real Solid/OpenTUI shell", () => {
         })),
       });
       await view.renderOnce();
-      expect(view.captureCharFrame()).not.toContain("Plaintext");
-      expect(view.captureCharFrame()).not.toContain("TLS ·");
+      expect(view.captureCharFrame()).not.toContain("plaintext");
+      expect(view.captureCharFrame()).not.toContain("TLS");
     }
     fake.state.publish({
       ...fake.state.getSnapshot(),
@@ -440,7 +463,7 @@ describe("real Solid/OpenTUI shell", () => {
       })),
     });
     await view.renderOnce();
-    expect(view.captureCharFrame()).toContain("Plaintext · ready");
+    expect(view.captureCharFrame()).toContain("plaintext");
   });
   test("Page Up/Down scroll dialogs without moving the conversation or editing a field", async () => {
     const { view } = await mount();
@@ -515,11 +538,11 @@ describe("real Solid/OpenTUI shell", () => {
     await view.mockInput.pressKey("F1");
     await tick();
     await view.renderOnce();
-    await click(view, "send");
-    await click(view, "add-network");
+    await click(view, `conversation-${conversationId}`);
+    await click(view, "older");
     expect(fake.actions.some((action) => action.type === "message.send")).toBe(false);
     expect(fake.timelines.get(conversationId)?.getSnapshot().draft).toBe("keep this draft private");
-    expect(view.captureCharFrame()).toContain("HELP");
+    expect(view.captureCharFrame()).toContain("Help");
     expect(view.renderer.currentFocusedRenderable?.id).toBe("dialog-close");
     await click(view, "dialog-close");
     await view.mockInput.pressEnter();
@@ -534,7 +557,7 @@ describe("real Solid/OpenTUI shell", () => {
     await view.renderOnce();
     expect(fake.actions.some((action) => action.type === "message.send")).toBe(false);
     expect(fake.timelines.get(conversationId)?.getSnapshot().draft).toBe("not a confirmation");
-    expect(view.captureCharFrame()).toContain("HELP");
+    expect(view.captureCharFrame()).toContain("Help");
   });
   test("channel directory opens from /list, streams bounded/filterable results, and joins the pinned network", async () => {
     const { fake, view } = await mount();
@@ -921,10 +944,7 @@ describe("real Solid/OpenTUI shell", () => {
     view.resize(80, 28);
     await view.renderOnce();
     expect(view.captureCharFrame()).toContain("a draft");
-    const button = view.renderer.root.findDescendantById("settings")!;
-    await view.mockMouse.click(button.x + 1, button.y);
-    await tick();
-    await view.renderOnce();
+    await click(view, "settings");
     expect(view.captureCharFrame()).toContain("Server hostname");
     await view.mockInput.pressEscape();
     await view.renderOnce();

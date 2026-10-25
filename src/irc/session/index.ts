@@ -35,6 +35,23 @@ import {
 } from "./modern";
 import type { ModernPolicy } from "./modern";
 
+/** Informational replies whose text is written for humans; other numerics stay opaque. */
+const READABLE_NUMERICS = new Set([
+  "001",
+  "002",
+  "003",
+  "251",
+  "252",
+  "253",
+  "254",
+  "255",
+  "265",
+  "266",
+  "372",
+  "375",
+  "376",
+]);
+
 export interface SessionPolicy extends ModernPolicy {
   readonly connectTimeoutMs: number;
   readonly registrationTimeoutMs: number;
@@ -884,7 +901,11 @@ class Attempt {
           rejection[input.command] ?? `IRC server rejected a request (${input.command}).`,
         ),
       });
-    else if (/^[0-9]{3}$/.test(input.command))
+    else if (READABLE_NUMERICS.has(input.command)) {
+      // Welcome, user counts and MOTD are prose meant for people; show it instead of a code.
+      const text = plain(p.slice(1).join(" ")).replace(/^- ?/u, "").trimEnd();
+      if (text.trim()) this.emit({ type: "notice", text });
+    } else if (/^[0-9]{3}$/.test(input.command))
       this.emit({ type: "notice", text: `IRC server response ${input.command}.` });
   }
   private isupport(tokens: readonly string[]) {

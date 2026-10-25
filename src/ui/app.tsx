@@ -4,6 +4,7 @@ import {
   createMemo,
   createSignal,
   For,
+  useContext,
   onCleanup,
   onMount,
   Show,
@@ -21,7 +22,7 @@ import {
 import { ScrollBoxRenderable, type Renderable, type TextareaRenderable } from "@opentui/core";
 import type { AppAction, AppApi } from "../contracts/app";
 import type { ConversationId, MessageId, NetworkId } from "../contracts/common";
-import type { Message, TimelineSnapshot } from "../contracts/model";
+import type { ConnectionPhase, Message, TimelineSnapshot } from "../contracts/model";
 import type {
   CommandService,
   Completion,
@@ -29,12 +30,27 @@ import type {
   InputContext,
 } from "../contracts/services";
 import { useReadable } from "./bridge";
-import { Button, Dialog, Field, FocusContext, ThemeContext, usePalette } from "./primitives";
+import {
+  Button,
+  Dialog,
+  Field,
+  FocusContext,
+  KeyHints,
+  ListItem,
+  ThemeContext,
+  usePalette,
+} from "./primitives";
 import { SettingsForm } from "./settings";
 import { DiscoveryPanel } from "./discovery";
 import { createTypingReporter } from "./typing";
 import { MessageRow } from "./transcript";
-import { transcriptGutterWidth } from "./transcript-style";
+import {
+  continuesGroup,
+  dayKey,
+  formatDay,
+  nicknameColor,
+  transcriptGutterWidth,
+} from "./transcript-style";
 import { isHistServMessage } from "../contracts/presentation";
 
 export interface UiOptions {
@@ -61,6 +77,37 @@ type Modal =
 const cleanPaste = (value: string) =>
   value.replace(/\r\n?/gu, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu, "");
 
+const messageTime = (message: Message) => message.serverTime ?? message.receivedAt;
+const phaseLabel = (phase: ConnectionPhase) =>
+  phase === "ready"
+    ? "connected"
+    : phase === "disconnected"
+      ? "offline"
+      : phase === "reconnecting"
+        ? "reconnecting…"
+        : "connecting…";
+const HELP_KEYS = [
+  ["ctrl+k", "jump to a conversation or action"],
+  ["ctrl+f", "search history"],
+  ["ctrl+j", "join a channel"],
+  ["ctrl+,", "settings"],
+  ["alt+↑↓", "previous / next conversation"],
+  ["ctrl+↑↓", "recall messages you sent"],
+  ["tab", "complete nicknames and commands"],
+  ["shift+tab", "move focus out of the composer"],
+  ["pgup pgdn", "scroll"],
+  ["ctrl+end", "jump to latest"],
+  ["esc", "close, or cancel a reply"],
+  ["click", "a message to copy, reply, or open links"],
+] as const;
+interface PaletteEntry {
+  readonly id: string;
+  readonly label: string;
+  readonly group: string;
+  readonly hint?: string;
+  readonly run: () => void;
+}
+
 export function OpenIrc(props: UiOptions) {
   const document = useReadable(props.app.settings);
   return (
@@ -72,6 +119,9 @@ export function OpenIrc(props: UiOptions) {
 
 function Shell(props: UiOptions) {
   const colors = usePalette();
+  const theme = useContext(ThemeContext);
+  const phaseColor = (phase: ConnectionPhase) =>
+    phase === "ready" ? colors.green : phase === "disconnected" ? colors.muted : colors.yellow;
   const renderer = useRenderer();
   const dimensions = useTerminalDimensions();
   const state = useReadable(props.app.state);
@@ -99,6 +149,7 @@ function Shell(props: UiOptions) {
   const [terminalFocused, setTerminalFocused] = createSignal(false);
   const [reveal, setReveal] = createSignal<MessageId>();
   const [revealHistServ, setRevealHistServ] = createSignal(false);
+  const [paletteIndex, setPaletteIndex] = createSignal(0);
   const [savingHistServ, setSavingHistServ] = createSignal(false);
   let composer: TextareaRenderable | undefined;
   let transcript: ScrollBoxRenderable | undefined;
@@ -195,7 +246,12 @@ function Shell(props: UiOptions) {
   const sidebarWidth = createMemo(() =>
     dimensions().width < 65 ? 18 : (settings()?.tui.sidebarWidth ?? 26),
   );
-  const gutterWidth = createMemo(() => transcriptGutterWidth(dimensions().width - sidebarWidth()));
+  const gutterWidth = createMemo(() =>
+    transcriptGutterWidth(
+      dimensions().width - sidebarWidth(),
+      Math.max(0, ...visibleMessages().map((message) => Bun.stringWidth(message.sender.nick))),
+    ),
+  );
   const composerRows = createMemo(() =>
     Math.min(3, 1 + (timeline()?.draft.match(/\n/g)?.length ?? 0)),
   );
@@ -389,7 +445,6 @@ function Shell(props: UiOptions) {
             literalConversations.delete(conversationId);
             setReply(undefined);
           }
-          setStatus("Accepted locally. Socket write and server echo are not delivery receipts.");
         }
         break;
       }
@@ -525,14 +580,24 @@ function Shell(props: UiOptions) {
         const viewport = renderer.root.findDescendantById("modal-scroll");
         if (viewport instanceof ScrollBoxRenderable)
           viewport.scrollBy(event.name === "pageup" ? -1 : 1, "viewport");
+      } else if (
+        modal() === "switch" &&
+        focusId() === "dialog-input" &&
+        (event.name === "up" || event.name === "down")
+      ) {
+        event.preventDefault();
+        const count = filteredPalette().length;
+        if (count)
+          setPaletteIndex((index) => (index + (event.name === "up" ? -1 : 1) + count) % count);
+        const target = renderer.root.findDescendantById(
+          filteredPalette()[paletteIndex()]?.id ?? "",
+        );
+        if (target) revealControl(target);
       } else if (event.name === "return" && focusId() === "dialog-input") {
         event.preventDefault();
         if (modal() === "search") void search();
         else if (modal() === "join" || modal() === "query") void submitTarget();
-        else if (modal() === "switch") {
-          const item = matchingConversations()[0];
-          if (item) activate(item.id);
-        }
+        else if (modal() === "switch") filteredPalette()[paletteIndex()]?.run();
       }
       return;
     }
@@ -540,7 +605,7 @@ function Shell(props: UiOptions) {
       event.preventDefault();
       setHelpCommand(undefined);
       openModal("help");
-    } else if (event.ctrl && event.name === "k") {
+    } else if (event.ctrl && (event.name === "k" || event.name === "p")) {
       event.preventDefault();
       openModal("switch");
     } else if (event.ctrl && event.name === "f") {
@@ -605,10 +670,6 @@ function Shell(props: UiOptions) {
       if (result.ok) closeToComposer();
     }
   };
-  const matchingConversations = () =>
-    state().conversations.filter((item) =>
-      item.name.toLowerCase().includes(formText().toLowerCase()),
-    );
   onResize(() => {
     captureAnchor();
     if (modal()) pendingFocusReveal = controls.get(focusId())?.control;
@@ -792,6 +853,224 @@ function Shell(props: UiOptions) {
       </>
     );
   };
+  const showMembers = createMemo(
+    () =>
+      settings()?.tui.memberList === true &&
+      active()?.kind === "channel" &&
+      dimensions().width - sidebarWidth() >= 100,
+  );
+  const typingLabel = () => {
+    const ids = timeline()?.typing ?? [];
+    const nicks = ids
+      .map((id) => timeline()?.members.find((member) => member.id === id)?.nick)
+      .filter((nick): nick is string => !!nick);
+    if (!nicks.length || nicks.length !== ids.length) return "Someone is typing…";
+    if (nicks.length > 2) return "Several people are typing…";
+    return `${nicks.join(" and ")} ${nicks.length === 1 ? "is" : "are"} typing…`;
+  };
+  const loadOlder = () => {
+    if (active())
+      void run({
+        type: "history.load-older",
+        conversationId: active()!.id,
+        ...(timeline()?.olderCursor ? { cursor: timeline()!.olderCursor } : {}),
+      });
+  };
+  const footerMessage = () =>
+    status() ||
+    [...operations()].reverse().find((operation) => operation.state === "failed")?.error?.message ||
+    state().error?.message ||
+    "";
+  const footerHints = (): readonly (readonly [string, string])[] =>
+    modal() === "switch"
+      ? [
+          ["↑↓", "select"],
+          ["enter", "open"],
+          ["esc", "close"],
+        ]
+      : modal() === "help" || modal() === "messages"
+        ? [
+            ["pgup pgdn", "scroll"],
+            ["esc", "close"],
+          ]
+        : modal()
+          ? [
+              ["tab", "next"],
+              ["enter", "choose"],
+              ["esc", "close"],
+            ]
+          : [
+              ["ctrl+k", "jump to…"],
+              ["ctrl+f", "search"],
+              ["f1", "help"],
+              ["ctrl+q", "quit"],
+            ];
+  const paletteEntries = (): PaletteEntry[] => {
+    const entries: PaletteEntry[] = state().conversations.map((item) => ({
+      id: `switch-${item.id}`,
+      label: item.name,
+      group: "Conversations",
+      ...(item.mentionCount
+        ? { hint: `${item.mentionCount} mention${item.mentionCount === 1 ? "" : "s"}` }
+        : item.unreadCount
+          ? { hint: `${item.unreadCount} new` }
+          : {}),
+      run: () => activate(item.id),
+    }));
+    const now = (action: () => void) => () => {
+      closeToComposer();
+      action();
+    };
+    const conversation = active();
+    entries.push(
+      {
+        id: "join",
+        label: "Join a channel…",
+        group: "Actions",
+        hint: "ctrl+j",
+        run: () => openModal("join"),
+      },
+      { id: "query", label: "Message someone…", group: "Actions", run: () => openModal("query") },
+      {
+        id: "search",
+        label: "Search history…",
+        group: "Actions",
+        hint: "ctrl+f",
+        run: () => {
+          setResults([]);
+          openModal("search");
+        },
+      },
+    );
+    if (conversation) {
+      entries.push(
+        {
+          id: "message-picker",
+          label: "Select a message…",
+          group: conversation.name,
+          run: () => openModal("messages"),
+        },
+        {
+          id: "older",
+          label: "Load older messages",
+          group: conversation.name,
+          run: now(loadOlder),
+        },
+        {
+          id: "mute",
+          label: conversation.muted ? `Unmute ${conversation.name}` : `Mute ${conversation.name}`,
+          group: conversation.name,
+          run: now(() => {
+            void run({
+              type: "conversation.mute",
+              conversationId: conversation.id,
+              muted: !conversation.muted,
+            });
+          }),
+        },
+        {
+          id: "leave",
+          label:
+            conversation.kind === "channel"
+              ? `Leave ${conversation.name}`
+              : `Close ${conversation.name}`,
+          group: conversation.name,
+          run: now(() => {
+            void run({ type: "conversation.close", conversationId: conversation.id });
+          }),
+        },
+      );
+      if (histServCount() > 0 || showHistServ())
+        entries.push({
+          id: "histserv-toggle",
+          label: showHistServ() ? "Hide HistServ" : `Show HistServ (${histServCount()} hidden)`,
+          group: conversation.name,
+          run: now(() => void toggleHistServ()),
+        });
+    }
+    for (const net of state().networks) {
+      const ready = net.phase === "ready";
+      entries.push({
+        id: `connect-${net.id}`,
+        label: `${net.phase === "disconnected" ? "Connect" : "Disconnect"} ${net.name}`,
+        group: "Networks",
+        run: now(() => {
+          void run({
+            type: net.phase === "disconnected" ? "network.connect" : "network.disconnect",
+            networkId: net.id,
+          });
+        }),
+      });
+      if (ready)
+        entries.push(
+          {
+            id: `browse-${net.id}`,
+            label: `Browse channels on ${net.name}…`,
+            group: "Networks",
+            run: () => {
+              void run({ type: "irc.request", networkId: net.id, command: { type: "list" } });
+            },
+          },
+          {
+            id: `people-${net.id}`,
+            label: `Look up a person on ${net.name}…`,
+            group: "Networks",
+            run: () => {
+              setDiscoveryNetwork(net.id);
+              setRequestedNick("");
+              openModal("whois");
+            },
+          },
+        );
+    }
+    entries.push(
+      {
+        id: "add-network",
+        label: "Add a network…",
+        group: "Networks",
+        run: () => openModal("settings"),
+      },
+      {
+        id: "settings",
+        label: "Settings",
+        group: "OpenIRC",
+        hint: "ctrl+,",
+        run: () => openModal("settings"),
+      },
+      {
+        id: "help",
+        label: "Help: keys and commands",
+        group: "OpenIRC",
+        hint: "f1",
+        run: () => {
+          setHelpCommand(undefined);
+          openModal("help");
+        },
+      },
+      { id: "quit", label: "Quit", group: "OpenIRC", hint: "ctrl+q", run: () => openModal("quit") },
+    );
+    return entries;
+  };
+  const filteredPalette = createMemo(() => {
+    const query = formText().trim().toLowerCase();
+    const entries = modal() === "switch" ? paletteEntries() : [];
+    return query
+      ? entries.filter((entry) => `${entry.label} ${entry.group}`.toLowerCase().includes(query))
+      : entries;
+  });
+  createEffect(() => {
+    formText();
+    setPaletteIndex(0);
+  });
+  createEffect(() => {
+    const value = status();
+    if (!value) return;
+    // Transient feedback: fade back to the key legend once read.
+    const timer = setTimeout(() => {
+      if (status() === value) setStatus("");
+    }, 8000);
+    onCleanup(() => clearTimeout(timer));
+  });
   return (
     <FocusContext.Provider
       value={{
@@ -807,167 +1086,156 @@ function Shell(props: UiOptions) {
       }}
     >
       <box width="100%" height="100%" flexDirection="column" backgroundColor={colors.bg}>
-        <box
-          id="topbar"
-          height={1}
-          flexShrink={0}
-          paddingX={1}
-          flexDirection="row"
-          alignItems="center"
-          justifyContent="space-between"
-          backgroundColor={colors.panel}
-        >
-          <text height={1} wrapMode="none" truncate fg={colors.accent}>
-            <b>OpenIRC</b> a little closer to your community
-          </text>
-          <box flexDirection="row">
-            <Button
-              id="search"
-              label="Search"
-              onPress={() => {
-                setResults([]);
-                openModal("search");
-              }}
-            />
-            <Button id="settings" label="Settings" onPress={() => openModal("settings")} />
-            <Button
-              id="help"
-              label="Help"
-              onPress={() => {
-                setHelpCommand(undefined);
-                openModal("help");
-              }}
-            />
-            <Button id="quit" label="Quit" onPress={() => openModal("quit")} />
-          </box>
-        </box>
         <box flexDirection="row" flexGrow={1} minHeight={0}>
           <scrollbox
+            id="sidebar"
             width={sidebarWidth()}
             flexShrink={0}
             backgroundColor={colors.panel}
-            contentOptions={{ flexDirection: "column", paddingX: 1 }}
+            contentOptions={{ flexDirection: "column", paddingTop: 1, paddingX: 1 }}
             scrollX={false}
           >
+            <box height={2} flexShrink={0} paddingX={1}>
+              <text height={1} wrapMode="none" truncate fg={colors.accent}>
+                <b>openirc</b>
+              </text>
+            </box>
             <For each={state().networks}>
-              {(net) => (
-                <>
-                  <box height={1} flexShrink={0}>
-                    <text height={1} wrapMode="none" truncate fg={colors.accent}>
-                      <b>{net.name}</b>
-                    </text>
-                  </box>
-                  <text fg={net.phase === "ready" ? colors.green : colors.muted}>
-                    {["registering", "authenticating", "ready"].includes(net.phase)
-                      ? `${net.secure ? "TLS" : "Plaintext"} · `
-                      : ""}
-                    {net.phase}
-                  </text>
-                  <Show when={net.lastError}>
-                    <text fg={colors.error}>{net.lastError?.message}</text>
-                  </Show>
-                  <Button
-                    id={`connect-${net.id}`}
-                    label={net.phase === "disconnected" ? "Connect" : "Disconnect"}
-                    onPress={() => {
-                      void run({
-                        type:
-                          net.phase === "disconnected" ? "network.connect" : "network.disconnect",
-                        networkId: net.id,
-                      });
-                    }}
-                  />
-                  <Button
-                    id={`browse-${net.id}`}
-                    label="Browse channels"
-                    disabled={net.phase !== "ready"}
-                    onPress={() => {
-                      void run({
-                        type: "irc.request",
-                        networkId: net.id,
-                        command: { type: "list" },
-                      });
-                    }}
-                  />
-                  <Button
-                    id={`people-${net.id}`}
-                    label="Look up a person"
-                    disabled={net.phase !== "ready"}
-                    onPress={() => {
-                      setDiscoveryNetwork(net.id);
-                      setRequestedNick("");
-                      openModal("whois");
-                    }}
-                  />
-                  <For each={["channel", "direct", "status"] as const}>
-                    {(kind) => (
-                      <>
-                        <text fg={colors.muted}>
-                          {kind === "channel"
-                            ? "CHANNELS"
-                            : kind === "direct"
-                              ? "DIRECT MESSAGES"
-                              : "NETWORK"}
+              {(net) => {
+                const conversations = (kind: "channel" | "direct" | "status") =>
+                  state().conversations.filter(
+                    (item) => item.networkId === net.id && item.kind === kind,
+                  );
+                const status = () => conversations("status")[0];
+                return (
+                  <box flexDirection="column" flexShrink={0} paddingBottom={1}>
+                    <ListItem
+                      id={status() ? `conversation-${status()!.id}` : `network-${net.id}`}
+                      prefix="●"
+                      prefixColor={phaseColor(net.phase)}
+                      label={net.name}
+                      strong
+                      {...(net.phase !== "ready"
+                        ? { hint: phaseLabel(net.phase) }
+                        : net.secure
+                          ? {}
+                          : { hint: "plaintext" })}
+                      active={!!status() && active()?.id === status()!.id}
+                      onPress={() => {
+                        if (status()) activate(status()!.id);
+                        else openModal("switch");
+                      }}
+                    />
+                    <Show when={net.lastError}>
+                      <box paddingX={1} flexShrink={0}>
+                        <text wrapMode="word" fg={colors.error}>
+                          {net.lastError?.message}
                         </text>
-                        <For
-                          each={state().conversations.filter(
-                            (item) => item.networkId === net.id && item.kind === kind,
-                          )}
-                        >
-                          {(conversation) => (
-                            <Button
-                              id={`conversation-${conversation.id}`}
-                              label={`${conversation.name}${conversation.mentionCount ? ` !${conversation.mentionCount}` : conversation.unreadCount ? ` (${conversation.unreadCount})` : ""}${conversation.muted ? " [muted]" : ""}`}
-                              active={active()?.id === conversation.id}
-                              onPress={() => activate(conversation.id)}
-                            />
-                          )}
-                        </For>
-                      </>
-                    )}
-                  </For>
-                </>
-              )}
+                      </box>
+                    </Show>
+                    <For each={["channel", "direct"] as const}>
+                      {(kind) => (
+                        <Show when={conversations(kind).length}>
+                          <box height={1} flexShrink={0} paddingX={1} marginTop={1}>
+                            <text fg={colors.muted}>
+                              {kind === "channel" ? "CHANNELS" : "DIRECT"}
+                            </text>
+                          </box>
+                          <For each={conversations(kind)}>
+                            {(conversation) => (
+                              <ListItem
+                                id={`conversation-${conversation.id}`}
+                                prefix={kind === "channel" ? "#" : "@"}
+                                label={
+                                  kind === "channel"
+                                    ? conversation.name.replace(/^#/u, "")
+                                    : conversation.name
+                                }
+                                {...(conversation.mentionCount
+                                  ? { badge: String(conversation.mentionCount), alert: true }
+                                  : conversation.unreadCount && !conversation.muted
+                                    ? { badge: String(conversation.unreadCount), strong: true }
+                                    : {})}
+                                dim={conversation.muted || !conversation.joined}
+                                active={active()?.id === conversation.id}
+                                onPress={() => activate(conversation.id)}
+                              />
+                            )}
+                          </For>
+                        </Show>
+                      )}
+                    </For>
+                    <Show
+                      when={
+                        net.phase === "ready" &&
+                        !conversations("channel").length &&
+                        !conversations("direct").length
+                      }
+                    >
+                      <box paddingX={1} flexShrink={0}>
+                        <text wrapMode="word" fg={colors.muted}>
+                          No channels yet. Press ctrl+j to join one.
+                        </text>
+                      </box>
+                    </Show>
+                  </box>
+                );
+              }}
             </For>
-            <box height={1} />
-            <Button id="join" label="+ Join channel" onPress={() => openModal("join")} />
-            <Button id="query" label="+ Message someone" onPress={() => openModal("query")} />
-            <Button id="add-network" label="+ Add network" onPress={() => openModal("settings")} />
-            <Button id="switch" label="Switch [Ctrl+K]" onPress={() => openModal("switch")} />
           </scrollbox>
           <box flexGrow={1} minWidth={0} flexDirection="column">
             <box
-              height={active()?.kind === "direct" ? 3 : 2}
+              id="conversation-header"
+              height={2}
               flexShrink={0}
-              paddingX={1}
-              border={false}
-              backgroundColor={colors.raised}
+              paddingX={2}
+              flexDirection="row"
+              border={["bottom"]}
+              borderColor={colors.border}
             >
-              <text height={1} flexShrink={0} wrapMode="none" truncate fg={colors.text}>
-                <b>{active()?.name ?? "Welcome to OpenIRC"}</b>{" "}
-                {network()?.nick ? `as ${network()!.nick}` : ""}
+              <text flexGrow={1} minWidth={0} height={1} wrapMode="none" truncate>
+                <b>
+                  <span style={{ fg: colors.text }}>{active()?.name ?? "Welcome to OpenIRC"}</span>
+                </b>
+                <span style={{ fg: colors.muted }}>
+                  {"  "}
+                  {active()?.kind === "direct"
+                    ? "Nicknames can be reused. Verify accounts."
+                    : active()?.kind === "status"
+                      ? [
+                          ["registering", "authenticating", "ready"].includes(
+                            network()?.phase ?? "",
+                          )
+                            ? network()?.secure
+                              ? "TLS"
+                              : "plaintext"
+                            : "",
+                          phaseLabel(network()?.phase ?? "disconnected"),
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")
+                      : active()?.topic || ""}
+                </span>
               </text>
-              <text height={1} flexShrink={0} wrapMode="none" truncate fg={colors.muted}>
-                {active()?.topic ||
-                  (active()
-                    ? `${network()?.name ?? ""} · ${network()?.phase ?? "disconnected"}`
-                    : "Add a network, connect securely, and join a channel.")}
-              </text>
-              <Show when={active()?.kind === "direct"}>
-                <text height={1} flexShrink={0} wrapMode="none" truncate fg={colors.muted}>
-                  Nicknames can be reused. Verify accounts.
+              <Show
+                when={active()?.kind === "channel" && timeline()?.members.length && !showMembers()}
+              >
+                <text flexShrink={0} height={1} fg={colors.muted}>
+                  {"  "}
+                  {timeline()!.members.length}{" "}
+                  {timeline()!.members.length === 1 ? "person" : "people"}
                 </text>
               </Show>
             </box>
             <Show
               when={active()}
               fallback={
-                <box flexGrow={1} paddingX={1} flexDirection="column" gap={1}>
+                <box flexGrow={1} paddingX={2} paddingTop={1} flexDirection="column" gap={1}>
                   <text fg={colors.accent}>
                     <b>Your next conversation starts here.</b>
                   </text>
-                  <text fg={colors.text}>1. Add your IRC network in Settings.</text>
-                  <text fg={colors.text}>2. Choose Connect beside the network.</text>
+                  <text fg={colors.text}>1. Add your IRC network.</text>
+                  <text fg={colors.text}>2. Connect to it.</text>
                   <text fg={colors.text}>3. Join a channel or message a nickname.</text>
                   <text fg={colors.muted}>
                     Local history is {settings()?.user.history.enabled ? "enabled" : "disabled"}.
@@ -984,206 +1252,213 @@ function Shell(props: UiOptions) {
                 </box>
               }
             >
-              <box height={1} flexShrink={0} flexDirection="row">
-                <Button
-                  id="older"
-                  label={timeline()?.loadingOlder ? "Loading…" : "Load older"}
-                  disabled={!!timeline()?.loadingOlder}
-                  onPress={() => {
-                    if (active())
-                      void run({
-                        type: "history.load-older",
-                        conversationId: active()!.id,
-                        ...(timeline()?.olderCursor ? { cursor: timeline()!.olderCursor } : {}),
-                      });
-                  }}
-                />
-                <Button
-                  id="mute"
-                  label={active()?.muted ? "Unmute" : "Mute"}
-                  onPress={() => {
-                    if (active())
-                      void run({
-                        type: "conversation.mute",
-                        conversationId: active()!.id,
-                        muted: !active()!.muted,
-                      });
-                  }}
-                />
-                <Button
-                  id="leave"
-                  label="Close"
-                  onPress={() => {
-                    if (active())
-                      void run({ type: "conversation.close", conversationId: active()!.id });
-                  }}
-                />
-                <Button
-                  id="message-picker"
-                  label="Messages…"
-                  onPress={() => openModal("messages")}
-                />
-              </box>
-              <Show when={histServCount() > 0 || showHistServ()}>
-                <Button
-                  id="histserv-toggle"
-                  label={
-                    showHistServ() ? "Hide HistServ" : `Show HistServ (${histServCount()} hidden)`
-                  }
-                  disabled={savingHistServ()}
-                  onPress={() => void toggleHistServ()}
-                />
-              </Show>
-              <box id="transcript-frame" flexGrow={1} minHeight={0} flexDirection="column">
-                <scrollbox
-                  id="transcript"
-                  ref={(element) => (transcript = element)}
-                  flexGrow={1}
-                  minHeight={0}
-                  scrollX={false}
-                  stickyScroll
-                  stickyStart="bottom"
-                  contentOptions={{
-                    flexDirection: "column",
-                    // The scrollbar overlays the final cell; keep wrapped text clear of it.
-                    paddingRight: 1,
-                    gap: settings()?.tui.density === "compact" ? 0 : 1,
-                  }}
-                >
-                  <Show when={(timeline()?.messages.length ?? 0) > 300}>
-                    <text fg={colors.muted}>
-                      Showing the latest 300 messages to keep terminal layout bounded. Use Search to
-                      reveal older context.
-                    </text>
-                  </Show>
-                  <Show when={messages().length > 0 && visibleMessages().length === 0}>
-                    <box paddingLeft={gutterWidth() + 2}>
-                      <text wrapMode="word" fg={colors.muted}>
-                        Only HistServ entries are loaded. Load older for chat.
+              <box flexDirection="row" flexGrow={1} minHeight={0}>
+                <box flexGrow={1} minWidth={0} flexDirection="column">
+                  <box id="transcript-frame" flexGrow={1} minHeight={0} flexDirection="column">
+                    <scrollbox
+                      id="transcript"
+                      ref={(element) => (transcript = element)}
+                      flexGrow={1}
+                      minHeight={0}
+                      scrollX={false}
+                      stickyScroll
+                      stickyStart="bottom"
+                      contentOptions={{
+                        flexDirection: "column",
+                        // The scrollbar overlays the final cell; keep wrapped text clear of it.
+                        paddingRight: 1,
+                        gap: settings()?.tui.density === "compact" ? 0 : 1,
+                      }}
+                    >
+                      <box flexDirection="row" flexShrink={0} paddingLeft={gutterWidth() + 1}>
+                        <Button
+                          id="older"
+                          quiet
+                          label={
+                            timeline()?.loadingOlder
+                              ? "loading older messages…"
+                              : "↑ load older messages"
+                          }
+                          disabled={!!timeline()?.loadingOlder}
+                          onPress={loadOlder}
+                        />
+                      </box>
+                      <Show when={(timeline()?.messages.length ?? 0) > 300}>
+                        <box paddingLeft={gutterWidth() + 2}>
+                          <text fg={colors.muted}>
+                            Showing the latest 300 messages to keep terminal layout bounded. Use
+                            Search to reveal older context.
+                          </text>
+                        </box>
+                      </Show>
+                      <Show when={messages().length > 0 && visibleMessages().length === 0}>
+                        <box paddingLeft={gutterWidth() + 2}>
+                          <text wrapMode="word" fg={colors.muted}>
+                            Only HistServ entries are loaded. Load older for chat.
+                          </text>
+                        </box>
+                      </Show>
+                      <For each={visibleMessages()}>
+                        {(message, index) => {
+                          const previous = () => visibleMessages()[index() - 1];
+                          const unread = () => timeline()?.firstUnreadId === message.id;
+                          return (
+                            <MessageRow
+                              message={message}
+                              gutterWidth={gutterWidth()}
+                              firstUnread={unread()}
+                              continuation={
+                                !unread() &&
+                                continuesGroup(
+                                  previous() && { ...previous()!, at: messageTime(previous()!) },
+                                  { ...message, at: messageTime(message) },
+                                )
+                              }
+                              {...(previous() &&
+                              dayKey(messageTime(previous()!)) !== dayKey(messageTime(message))
+                                ? { dayLabel: `── ${formatDay(messageTime(message))} ──` }
+                                : {})}
+                              onSelect={() => {
+                                setSelectedMessage(message);
+                                openModal("message");
+                              }}
+                            />
+                          );
+                        }}
+                      </For>
+                    </scrollbox>
+                    <box
+                      id="transcript-divider"
+                      position="absolute"
+                      left={gutterWidth()}
+                      top={0}
+                      width={1}
+                      height="100%"
+                      border={["left"]}
+                      borderColor={colors.border}
+                      zIndex={1}
+                    />
+                  </box>
+                  <Show when={timeline()?.typing.length}>
+                    <box height={1} flexShrink={0} paddingX={2}>
+                      <text height={1} wrapMode="none" truncate fg={colors.muted}>
+                        {typingLabel()}
                       </text>
                     </box>
                   </Show>
-                  <For each={visibleMessages()}>
-                    {(message) => (
-                      <MessageRow
-                        message={message}
-                        gutterWidth={gutterWidth()}
-                        firstUnread={timeline()?.firstUnreadId === message.id}
-                        onSelect={() => {
-                          setSelectedMessage(message);
-                          openModal("message");
-                        }}
-                      />
-                    )}
-                  </For>
-                </scrollbox>
-                <box
-                  id="transcript-divider"
-                  position="absolute"
-                  left={gutterWidth()}
-                  top={0}
-                  width={1}
-                  height="100%"
-                  border={["left"]}
-                  borderColor={colors.muted}
-                  zIndex={1}
-                />
-              </box>
-              <Show when={!atBottom() || timeline()?.atLatest === false}>
-                <Button
-                  id="latest"
-                  label="Jump to latest [Ctrl+End]"
-                  onPress={() => void jumpLatest()}
-                />
-              </Show>
-              <Show when={settings()?.tui.memberList && dimensions().width > 100}>
-                <text height={1} flexShrink={0} fg={colors.muted}>
-                  People:{" "}
-                  {timeline()
-                    ?.members.slice(0, 30)
-                    .map((member) => member.nick)
-                    .join(", ")}
-                </text>
-              </Show>
-              <Show when={timeline()?.typing.length}>
-                <text height={1} flexShrink={0} fg={colors.muted}>
-                  Someone is typing…
-                </text>
-              </Show>
-              <Show when={reply()}>
-                <text height={1} flexShrink={0} fg={colors.accent}>
-                  Replying to a message · Esc to cancel
-                </text>
-              </Show>
-              <box
-                id="composer-panel"
-                height={composerRows() + 1}
-                flexShrink={0}
-                paddingX={1}
-                backgroundColor={colors.panel}
-                flexDirection="column"
-              >
-                <textarea
-                  ref={(element) => {
-                    composer = element;
-                    controls.set("composer", { layer: "main", control: element });
-                    onCleanup(() => {
-                      if (composer === element) {
-                        composer = undefined;
-                        controls.delete("composer");
-                      }
-                    });
-                  }}
-                  height={composerRows()}
-                  flexShrink={0}
-                  focused={!modal() && focusId() === "composer"}
-                  onMouseDown={() => focus("composer")}
-                  initialValue={untrack(() => timeline()?.draft ?? "")}
-                  placeholder="Write a message… /help for commands"
-                  wrapMode="word"
-                  backgroundColor={colors.raised}
-                  focusedBackgroundColor={colors.raised}
-                  textColor={colors.text}
-                  onContentChange={syncDraft}
-                  keyBindings={[
-                    { name: "return", action: "submit" },
-                    { name: "return", shift: true, action: "newline" },
-                  ]}
-                  onSubmit={() => void send()}
-                />
-                <box height={1} flexDirection="row" justifyContent="space-between">
-                  <text fg={colors.muted}>
-                    {literalDraft() ? "Pasted text sends literally · " : ""}Enter send · Shift+Enter
-                    newline · Tab complete
-                  </text>
-                  <Button id="send" label="Send" onPress={() => void send()} />
+                  <Show when={reply()}>
+                    <box height={1} flexShrink={0} paddingX={2}>
+                      <text height={1} fg={colors.accent}>
+                        ↳ Replying to a message · esc to cancel
+                      </text>
+                    </box>
+                  </Show>
+                  <box
+                    id="composer-panel"
+                    height={composerRows() + 2}
+                    flexShrink={0}
+                    marginX={1}
+                    paddingX={1}
+                    flexDirection="row"
+                    border
+                    borderStyle="rounded"
+                    borderColor={
+                      !modal() && focusId() === "composer" ? colors.accent : colors.border
+                    }
+                    {...(literalDraft() ? { title: " pasted text sends literally " } : {})}
+                  >
+                    <text width={2} flexShrink={0} fg={colors.accent}>
+                      ›
+                    </text>
+                    <textarea
+                      ref={(element) => {
+                        composer = element;
+                        controls.set("composer", { layer: "main", control: element });
+                        onCleanup(() => {
+                          if (composer === element) {
+                            composer = undefined;
+                            controls.delete("composer");
+                          }
+                        });
+                      }}
+                      height={composerRows()}
+                      flexGrow={1}
+                      minWidth={0}
+                      focused={!modal() && focusId() === "composer"}
+                      onMouseDown={() => focus("composer")}
+                      initialValue={untrack(() => timeline()?.draft ?? "")}
+                      placeholder={`Message ${active()?.name ?? ""}`}
+                      wrapMode="word"
+                      backgroundColor={colors.bg}
+                      focusedBackgroundColor={colors.bg}
+                      textColor={colors.text}
+                      onContentChange={syncDraft}
+                      keyBindings={[
+                        { name: "return", action: "submit" },
+                        { name: "return", shift: true, action: "newline" },
+                      ]}
+                      onSubmit={() => void send()}
+                    />
+                  </box>
                 </box>
+                <Show when={showMembers()}>
+                  <scrollbox
+                    id="members"
+                    width={22}
+                    flexShrink={0}
+                    border={["left"]}
+                    borderColor={colors.border}
+                    contentOptions={{ flexDirection: "column", paddingX: 1 }}
+                    scrollX={false}
+                  >
+                    <text height={1} flexShrink={0} fg={colors.muted}>
+                      PEOPLE · {timeline()?.members.length ?? 0}
+                    </text>
+                    <For each={(timeline()?.members ?? []).slice(0, 200)}>
+                      {(member) => (
+                        <text
+                          height={1}
+                          flexShrink={0}
+                          wrapMode="none"
+                          truncate
+                          fg={member.away ? colors.muted : nicknameColor(member.nick, theme())}
+                        >
+                          {member.prefixes[0] ?? " "}
+                          {member.nick}
+                        </text>
+                      )}
+                    </For>
+                  </scrollbox>
+                </Show>
               </box>
             </Show>
           </box>
         </box>
         <box
           id="status-bar"
-          minHeight={1}
-          maxHeight={2}
+          height={1}
           flexShrink={0}
-          paddingX={1}
+          paddingX={2}
+          flexDirection="row"
           backgroundColor={colors.panel}
         >
-          <text
-            wrapMode="word"
-            fg={
-              status() || operations().some((operation) => operation.state === "failed")
-                ? colors.error
-                : colors.muted
-            }
-          >
-            {status() ||
-              [...operations()].reverse().find((operation) => operation.state === "failed")?.error
-                ?.message ||
-              state().error?.message ||
-              "Ctrl+K switch · Ctrl+F search · Ctrl+J join · F1 help · Ctrl+Q quit"}
-          </text>
+          <box flexGrow={1} minWidth={0}>
+            <Show when={footerMessage()} fallback={<KeyHints hints={footerHints()} />}>
+              <text height={1} wrapMode="none" truncate fg={colors.error}>
+                {footerMessage()}
+              </text>
+            </Show>
+          </box>
+          <Show when={!atBottom() || timeline()?.atLatest === false}>
+            <Button id="latest" quiet label="↓ latest" onPress={() => void jumpLatest()} />
+          </Show>
+          <Show when={network()}>
+            <text flexShrink={0} height={1} fg={colors.muted}>
+              {"  "}
+              {network()!.nick}
+              <span style={{ fg: phaseColor(network()!.phase) }}> ●</span>
+            </text>
+          </Show>
         </box>
         <Show when={modal()}>
           <Dialog
@@ -1196,8 +1471,19 @@ function Shell(props: UiOptions) {
                     ? "Message actions"
                     : modal() === "quit"
                       ? "Disconnect and quit?"
-                      : `${modal()?.toUpperCase()}`
+                      : modal() === "switch"
+                        ? "Jump to…"
+                        : modal() === "redact"
+                          ? "Remove message"
+                          : modal() === "whois"
+                            ? "Look up a person"
+                            : modal() === "messages"
+                              ? "Select a message"
+                              : modal() === "query"
+                                ? "Message someone"
+                                : `${modal()!.charAt(0).toUpperCase()}${modal()!.slice(1)}`
             }
+            compact={["switch", "join", "query", "quit", "redact"].includes(modal() ?? "")}
             width={dimensions().width}
             height={dimensions().height}
             onClose={closeModal}
@@ -1224,18 +1510,42 @@ function Shell(props: UiOptions) {
               </Show>
             </Show>
             <Show when={modal() === "help"}>
-              <text fg={colors.muted}>
-                Tab moves focus (in composer: complete; Shift+Tab leaves). Alt+Up/Down switches
-                conversation. Ctrl+Up/Down recalls sent inputs. PgUp/PgDown scrolls. Mouse: click a
-                message for copy, links, and supported actions.
-              </text>
-              <For each={props.commands.help(helpCommand())}>
-                {(entry) => (
-                  <text fg={colors.text}>
-                    <b>{entry.usage}</b> {entry.description}
+              <Show when={!helpCommand()}>
+                <box flexDirection="column" flexShrink={0}>
+                  <text fg={colors.accent}>
+                    <b>Keys</b>
                   </text>
-                )}
-              </For>
+                  <For each={HELP_KEYS}>
+                    {([key, description]) => (
+                      <box flexDirection="row" height={1} flexShrink={0}>
+                        <text width={12} flexShrink={0} fg={colors.text}>
+                          {key}
+                        </text>
+                        <text fg={colors.muted} wrapMode="none" truncate>
+                          {description}
+                        </text>
+                      </box>
+                    )}
+                  </For>
+                </box>
+              </Show>
+              <box flexDirection="column" flexShrink={0}>
+                <text fg={colors.accent}>
+                  <b>Commands</b>
+                </text>
+                <For each={props.commands.help(helpCommand())}>
+                  {(entry) => (
+                    <box flexDirection="row" flexShrink={0}>
+                      <text width={24} flexShrink={0} fg={colors.text}>
+                        {entry.usage}
+                      </text>
+                      <text flexGrow={1} minWidth={0} wrapMode="word" fg={colors.muted}>
+                        {entry.description}
+                      </text>
+                    </box>
+                  )}
+                </For>
+              </box>
             </Show>
             <Show when={modal() === "join" || modal() === "query"}>
               <text fg={colors.muted}>
@@ -1258,20 +1568,36 @@ function Shell(props: UiOptions) {
             <Show when={modal() === "switch"}>
               <Field
                 id="dialog-input"
-                label="Find a conversation"
+                label="Filter"
+                hideLabel
+                placeholder="Type a channel, person, or action…"
                 value={formText()}
                 onInput={setFormText}
               />
-              <For each={matchingConversations()}>
-                {(item) => (
-                  <Button
-                    id={`switch-${item.id}`}
-                    layer="modal"
-                    label={item.name}
-                    onPress={() => activate(item.id)}
-                  />
-                )}
-              </For>
+              <box flexDirection="column" flexShrink={0}>
+                <For each={filteredPalette()}>
+                  {(entry, index) => (
+                    <>
+                      <Show when={filteredPalette()[index() - 1]?.group !== entry.group}>
+                        <box height={1} flexShrink={0} paddingX={1} marginTop={index() ? 1 : 0}>
+                          <text fg={colors.muted}>{entry.group}</text>
+                        </box>
+                      </Show>
+                      <ListItem
+                        id={entry.id}
+                        layer="modal"
+                        label={entry.label}
+                        {...(entry.hint ? { hint: entry.hint } : {})}
+                        active={index() === paletteIndex()}
+                        onPress={entry.run}
+                      />
+                    </>
+                  )}
+                </For>
+                <Show when={!filteredPalette().length}>
+                  <text fg={colors.muted}>Nothing matches. Try /join or /msg in the composer.</text>
+                </Show>
+              </box>
             </Show>
             <Show when={modal() === "search"}>
               <Field
