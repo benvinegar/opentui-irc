@@ -276,6 +276,10 @@ export function configurationSchema(): JsonObject {
         immediate,
       ),
       memberList: boolean("Show the live channel member panel.", tui.memberList),
+      showHistServ: boolean(
+        "Show messages from the HistServ nickname in the transcript; hidden by default, never deleted from history/search/control reads.",
+        tui.showHistServ,
+      ),
       sidebarWidth: field(
         "Live sidebar width in terminal cells.",
         { type: "integer", minimum: 12, maximum: 80, default: tui.sidebarWidth },

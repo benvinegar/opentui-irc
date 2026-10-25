@@ -45,6 +45,7 @@ export const settings: SettingsDocument = {
     mouse: true,
     density: "comfortable",
     memberList: false,
+    showHistServ: false,
     sidebarWidth: 24,
     keybindings: {},
   },

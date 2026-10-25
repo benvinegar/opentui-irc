@@ -40,6 +40,123 @@ async function click(view: TestRendererSetup, id: string) {
 }
 
 describe("real Solid/OpenTUI shell", () => {
+  test("HistServ is hidden by default, reversibly, without hiding normal notices or errors", async () => {
+    const { fake, view } = await mount();
+    const model = fake.timelines.get(conversationId)!;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: [
+        { ...welcomeMessage, text: "real-user-message" },
+        {
+          ...welcomeMessage,
+          id: entityId<"message">("hist-notice"),
+          sender: { nick: "HistServ" },
+          kind: "notice",
+          text: "hidden-service-notice",
+        },
+        {
+          ...welcomeMessage,
+          id: entityId<"message">("normal-notice"),
+          sender: { nick: "robert" },
+          kind: "notice",
+          text: "ordinary-notice-kept",
+        },
+        {
+          ...welcomeMessage,
+          id: entityId<"message">("hist-privmsg"),
+          sender: { nick: "hIsTsErV" },
+          text: "hidden-service-privmsg",
+        },
+        {
+          ...welcomeMessage,
+          id: entityId<"message">("network-error"),
+          sender: { nick: "OpenIRC" },
+          kind: "event",
+          text: "connection-error-kept",
+        },
+      ],
+    });
+    await view.renderOnce();
+    let frame = view.captureCharFrame();
+    expect(frame).toContain("real-user-message");
+    expect(frame).toContain("ordinary-notice-kept");
+    expect(frame).toContain("connection-error-kept");
+    expect(frame).not.toContain("hidden-service-notice");
+    expect(frame).not.toContain("hidden-service-privmsg");
+    expect(frame).toContain("Show HistServ (2 hidden)");
+    await click(view, "histserv-toggle");
+    expect(fake.settings.getSnapshot()?.tui.showHistServ).toBe(true);
+    frame = view.captureCharFrame();
+    expect(frame).toContain("hidden-service-notice");
+    expect(frame).toContain("hidden-service-privmsg");
+    await click(view, "histserv-toggle");
+    expect(fake.settings.getSnapshot()?.tui.showHistServ).toBe(false);
+    expect(view.captureCharFrame()).not.toContain("hidden-service-privmsg");
+    expect(model.getSnapshot().messages).toHaveLength(5);
+  });
+  test("a service-only window explains that older chat may still exist", async () => {
+    const { fake, view } = await mount();
+    const model = fake.timelines.get(conversationId)!;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: [{ ...welcomeMessage, sender: { nick: "HistServ" }, text: "service-only-body" }],
+    });
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("Only HistServ entries are loaded.");
+    expect(view.captureCharFrame()).not.toContain("service-only-body");
+    expect(view.renderer.root.findDescendantById("older")?.id).toBe("older");
+  });
+  test("visibility reports reference the rendered user message, not a hidden service tail", async () => {
+    const { fake, view } = await mount();
+    const model = fake.timelines.get(conversationId)!;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: [
+        welcomeMessage,
+        {
+          ...welcomeMessage,
+          id: entityId<"message">("hidden-tail"),
+          sender: { nick: "HistServ" },
+          text: "hidden-tail-body",
+        },
+      ],
+    });
+    await view.renderOnce();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(
+      fake.actions.some(
+        (action) =>
+          action.type === "view.report" && action.lastVisibleMessageId === welcomeMessage.id,
+      ),
+    ).toBe(true);
+    expect(
+      fake.actions.some(
+        (action) =>
+          action.type === "view.report" &&
+          action.lastVisibleMessageId === entityId<"message">("hidden-tail"),
+      ),
+    ).toBe(false);
+  });
+  test("explicit search reveal can show a service entry without changing the saved default", async () => {
+    const { fake, view } = await mount();
+    const model = fake.timelines.get(conversationId)!;
+    const id = entityId<"message">("search-service");
+    model.publish({
+      ...model.getSnapshot(),
+      messages: [
+        { ...welcomeMessage, id, sender: { nick: "HistServ" }, text: "service-search-marker" },
+      ],
+    });
+    await click(view, "search");
+    await view.mockInput.typeText("service-search-marker");
+    await click(view, "search-submit");
+    await click(view, `result-${id}`);
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("service-search-marker");
+    expect(fake.settings.getSnapshot()?.tui.showHistServ).toBe(false);
+    await click(view, "histserv-toggle");
+    expect(view.captureCharFrame()).not.toContain("service-search-marker");
+  });
   test("compact transcript aligns time/nicks beside a full-height fixed divider at every width", async () => {
     const { fake, view } = await mount();
     const document = fake.settings.getSnapshot()!;

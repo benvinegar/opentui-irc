@@ -35,6 +35,7 @@ import { DiscoveryPanel } from "./discovery";
 import { createTypingReporter } from "./typing";
 import { MessageRow } from "./transcript";
 import { transcriptGutterWidth } from "./transcript-style";
+import { isHistServMessage } from "../contracts/presentation";
 
 export interface UiOptions {
   readonly app: AppApi;
@@ -97,6 +98,8 @@ function Shell(props: UiOptions) {
   const [atBottom, setAtBottom] = createSignal(true);
   const [terminalFocused, setTerminalFocused] = createSignal(false);
   const [reveal, setReveal] = createSignal<MessageId>();
+  const [revealHistServ, setRevealHistServ] = createSignal(false);
+  const [savingHistServ, setSavingHistServ] = createSignal(false);
   let composer: TextareaRenderable | undefined;
   let transcript: ScrollBoxRenderable | undefined;
   let draftGuard = false;
@@ -167,6 +170,28 @@ function Shell(props: UiOptions) {
   });
   // App windows are bounded; impose a second hard cap on mounted layout work.
   const messages = createMemo(() => timeline()?.messages.slice(-300) ?? []);
+  const showHistServ = createMemo(() => settings()?.tui.showHistServ === true || revealHistServ());
+  const visibleMessages = createMemo(() =>
+    messages().filter((message) => showHistServ() || !isHistServMessage(message)),
+  );
+  const histServCount = createMemo(() => messages().filter(isHistServMessage).length);
+  const toggleHistServ = async () => {
+    const document = settings();
+    if (!document || savingHistServ()) return;
+    setSavingHistServ(true);
+    captureAnchor();
+    try {
+      const result = await props.app.saveSettings(
+        { section: "tui", value: { ...document.tui, showHistServ: !showHistServ() } },
+        document.revision,
+        abort.signal,
+      );
+      if (result.ok) setRevealHistServ(false);
+      else setStatus(result.error.message);
+    } finally {
+      setSavingHistServ(false);
+    }
+  };
   const sidebarWidth = createMemo(() =>
     dimensions().width < 65 ? 18 : (settings()?.tui.sidebarWidth ?? 26),
   );
@@ -294,6 +319,7 @@ function Shell(props: UiOptions) {
     }
     if (changed) {
       previousConversation = value.conversationId;
+      setRevealHistServ(false);
       setReply(undefined);
       setLiteralDraft(literalConversations.has(value.conversationId));
       historyIndex = 0;
@@ -622,7 +648,7 @@ function Shell(props: UiOptions) {
       const bottom =
         transcript.scrollTop + transcript.viewport.height >= transcript.scrollHeight - 1;
       setAtBottom(bottom);
-      const last = messages().at(-1)?.id;
+      const last = visibleMessages().at(-1)?.id;
       const key = `${active()!.id}:${terminalFocused()}:${bottom}:${last}:${modal()}:${timeline()?.atLatest}`;
       if (lastReport === key) return;
       lastReport = key;
@@ -638,7 +664,7 @@ function Shell(props: UiOptions) {
   });
   createEffect(() => {
     const id = reveal();
-    const mounted = messages();
+    const mounted = visibleMessages();
     if (id && mounted.some((message) => message.id === id)) {
       pendingReveal = id;
       renderer.requestRender();
@@ -998,6 +1024,16 @@ function Shell(props: UiOptions) {
                   onPress={() => openModal("messages")}
                 />
               </box>
+              <Show when={histServCount() > 0 || showHistServ()}>
+                <Button
+                  id="histserv-toggle"
+                  label={
+                    showHistServ() ? "Hide HistServ" : `Show HistServ (${histServCount()} hidden)`
+                  }
+                  disabled={savingHistServ()}
+                  onPress={() => void toggleHistServ()}
+                />
+              </Show>
               <box id="transcript-frame" flexGrow={1} minHeight={0} flexDirection="column">
                 <scrollbox
                   id="transcript"
@@ -1020,7 +1056,14 @@ function Shell(props: UiOptions) {
                       reveal older context.
                     </text>
                   </Show>
-                  <For each={messages()}>
+                  <Show when={messages().length > 0 && visibleMessages().length === 0}>
+                    <box paddingLeft={gutterWidth() + 2}>
+                      <text wrapMode="word" fg={colors.muted}>
+                        Only HistServ entries are loaded. Load older for chat.
+                      </text>
+                    </box>
+                  </Show>
+                  <For each={visibleMessages()}>
                     {(message) => (
                       <MessageRow
                         message={message}
@@ -1254,6 +1297,7 @@ function Shell(props: UiOptions) {
                     onPress={() => {
                       void run({ type: "history.reveal", messageId: message.id }).then((result) => {
                         if (result.ok) {
+                          if (isHistServMessage(message)) setRevealHistServ(true);
                           setReveal(message.id);
                           closeToComposer();
                         }
@@ -1298,7 +1342,7 @@ function Shell(props: UiOptions) {
                 Select a message for copy, person details, or supported reply/reaction/removal
                 actions.
               </text>
-              <For each={messages()}>
+              <For each={visibleMessages()}>
                 {(message) => (
                   <Button
                     id={`pick-${message.id}`}

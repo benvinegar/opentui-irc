@@ -54,6 +54,8 @@ export interface TuiSettings {
   readonly mouse: boolean;
   readonly density: "comfortable" | "compact";
   readonly memberList: boolean;
+  /** Presentation only; history/search/control retain service messages. Defaults false. */
+  readonly showHistServ: boolean;
   readonly sidebarWidth: number;
   readonly keybindings: Readonly<Record<string, readonly string[]>>;
 }

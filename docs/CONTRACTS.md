@@ -53,6 +53,7 @@ No text-equality echo matching. A missing echo does not prove rejection. A succe
 - Timeline readables are app-owned. Querying one does not load from disk or request server history; use an explicit action to load older data.
 - `view.report` is an observation, not a request to mark all received messages read. Validate active conversation, focus, bottom/visibility and ID membership; never regress a durable read marker.
 - Terminal focus detection is best effort. If unavailable, prefer conservative unread behavior over claiming attention.
+- `tui.showHistServ` defaults false and filters the HistServ nickname only in presentation. Retain full history/search/control data. Service entries do not create chat unread/notifications. A bottom/focused view may reference the last non-HistServ message before a hidden service tail; persist that actually rendered message's position, never pretend the hidden tail was seen. Explicit search reveal may show service entries temporarily.
 
 ## Session and transport lifecycle
 

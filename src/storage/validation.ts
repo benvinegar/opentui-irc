@@ -184,6 +184,7 @@ export function validTuiSettings(value: unknown): value is TuiSettings {
       "mouse",
       "density",
       "memberList",
+      "showHistServ",
       "sidebarWidth",
       "keybindings",
     ]) ||
@@ -192,6 +193,7 @@ export function validTuiSettings(value: unknown): value is TuiSettings {
     !oneOf(value.density, ["comfortable", "compact"]) ||
     typeof value.mouse !== "boolean" ||
     typeof value.memberList !== "boolean" ||
+    typeof value.showHistServ !== "boolean" ||
     !integer(value.sidebarWidth, 12, 80) ||
     !record(value.keybindings) ||
     Object.keys(value.keybindings).length > 200

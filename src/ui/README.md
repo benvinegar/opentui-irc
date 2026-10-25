@@ -18,6 +18,12 @@ The transcript uses a glirc-style gutter: local 24-hour time, right-aligned nick
 
 Nickname colors are deterministic, case-insensitive and theme-aware, not account verification or a promise that every possible nickname has a different color. Samples are contrast-tested against each theme. Top/bottom chrome has no spacer rows. The composer starts at one input line and grows to three for multiline drafts. New profiles default to compact density; existing density preferences are preserved. `tui.density` remains configurable through the control API (`compact` removes inter-message gaps; `comfortable` adds one).
 
+## History-service visibility
+
+`HistServ` is hidden by default in the transcript and message picker. The Show/Hide HistServ button persists `tui.showHistServ`; agents can use `ctl config set tui.showHistServ true` (plan first with `--dry-run`). This is an exact, case-insensitive nickname display filter, not service/account verification or a generic NOTICE filter. It covers Ergo replay delivered as either PRIVMSG or NOTICE. All original messages remain in history, search and authorized control timeline reads. An explicit search reveal temporarily shows service entries without changing the saved default; switching conversations resets that exception.
+
+HistServ entries do not generate chat unread counts or notifications. Visibility reports still reference the actual rendered message, not a hidden tail. If the loaded window contains only service entries, the UI explains that older chat may exist instead of implying an empty channel. Connection errors and other senders' messages/notices are unaffected. Existing schema-v1 settings files default the new flag to false in memory without a startup rewrite.
+
 ## Runtime and tests
 
 The installed OpenTUI Solid README requires JSX preserve, `jsxImportSource: "@opentui/solid"`, and `@opentui/solid/preload`. Production gets this from the root Bun config. Bun 1.3.14 **does not apply the top-level preload to `bun test`**. The JSX-free `tests/ui/shell.bun.test.ts` wrapper registers the real compiler before dynamically loading TSX, so no hidden flags or browser conditions are needed:

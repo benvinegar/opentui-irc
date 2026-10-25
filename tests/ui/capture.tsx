@@ -28,6 +28,14 @@ timeline.publish({
     sender: { nick: names[index % names.length]! },
     receivedAt: welcomeMessage.receivedAt + index * 60_000,
     text: samples[index % samples.length]!,
+    ...(index % 6 === 0
+      ? {
+          sender: { nick: "HistServ" },
+          text: "Synthetic membership replay: preview joined the channel.",
+          kind: "notice" as const,
+          source: "playback" as const,
+        }
+      : {}),
     ...(index === 16 ? { sendState: "uncertain" as const } : {}),
   })),
 });

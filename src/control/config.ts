@@ -334,6 +334,7 @@ export function prepareConfigChange(
         "theme",
         "density",
         "memberList",
+        "showHistServ",
         "sidebarWidth",
         "mouse",
         "keybindings",

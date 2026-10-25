@@ -35,6 +35,7 @@ export function defaultTuiSettings(): TuiSettings {
     mouse: true,
     density: "compact",
     memberList: true,
+    showHistServ: false,
     sidebarWidth: 24,
     keybindings: {},
   };
@@ -91,7 +92,12 @@ function revision(sources: Sources): ConfigRevision {
 }
 function document(sources: Sources): SettingsDocument {
   const user = parseSource(sources.user, defaultUserSettings());
-  const tui = parseSource(sources.tui, defaultTuiSettings());
+  const storedTui = parseSource(sources.tui, defaultTuiSettings());
+  // Older schema-v1 files remain valid without rewriting their JSONC on load.
+  const tui =
+    record(storedTui) && !("showHistServ" in storedTui)
+      ? { ...storedTui, showHistServ: false }
+      : storedTui;
   if (!validUserSettings(user) || !validTuiSettings(tui))
     throw new StorageFault(
       "invalid-input",

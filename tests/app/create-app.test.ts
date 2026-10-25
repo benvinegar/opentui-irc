@@ -93,6 +93,72 @@ const historySupport: SessionPayload = {
   },
 };
 describe("application coordinator", () => {
+  it("retains HistServ without chat unread/notifications and accepts a visible user before a hidden tail", async () => {
+    const h = await connected({
+      ...settings,
+      user: { ...settings.user, notifications: { ...settings.user.notifications, desktop: true } },
+    });
+    h.session.emit(chat("hello newcomer", "user-chat"));
+    h.session.emit({
+      type: "chat",
+      message: {
+        target: "#welcome",
+        sender: { nick: "HistServ" },
+        kind: "text",
+        text: "newcomer joined the channel",
+        receivedAt: 1_700_000_003_000,
+        serverId: "service-tail",
+        source: "live",
+      },
+    });
+    await settle();
+    const messages = timeline(h.app, h.conversationId).messages;
+    const userMessage = messages.find((message) => message.serverId === "user-chat")!;
+    const serviceMessage = messages.find((message) => message.serverId === "service-tail")!;
+    expect(serviceMessage.text).toContain("joined the channel");
+    expect(h.messages.has(serviceMessage.id)).toBe(true);
+    expect(
+      h.app.state.getSnapshot().conversations.find((c) => c.id === h.conversationId)?.unreadCount,
+    ).toBe(1);
+    expect(h.notifications).toHaveLength(1);
+    value(
+      await h.app.dispatch(
+        {
+          type: "view.report",
+          conversationId: h.conversationId,
+          focused: true,
+          atBottom: true,
+          lastVisibleMessageId: userMessage.id,
+        },
+        signal(),
+      ),
+    );
+    expect(
+      h.app.state.getSnapshot().conversations.find((c) => c.id === h.conversationId)?.unreadCount,
+    ).toBe(0);
+    expect(h.readPositions.get(h.conversationId)?.messageId).toBe(userMessage.id);
+    const config = h.app.settings.getSnapshot()!;
+    value(
+      await h.app.saveSettings(
+        { section: "tui", value: { ...config.tui, showHistServ: true } },
+        config.revision,
+        signal(),
+      ),
+    );
+    value(
+      await h.app.dispatch(
+        {
+          type: "view.report",
+          conversationId: h.conversationId,
+          focused: true,
+          atBottom: true,
+          lastVisibleMessageId: serviceMessage.id,
+        },
+        signal(),
+      ),
+    );
+    expect(h.readPositions.get(h.conversationId)?.messageId).toBe(serviceMessage.id);
+  });
   it("serializes automatic history for joined channels and advances after completion or failure", async () => {
     const h = await connected();
     h.session.emit(historySupport);

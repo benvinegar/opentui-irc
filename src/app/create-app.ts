@@ -30,6 +30,7 @@ import { compareMessageIds, mergeWindow, mentionsNick, plainText } from "../doma
 import { admitSessionEvent, startSessionCursor } from "../domain/session-cursor";
 import type { SessionCursor } from "../domain/session-cursor";
 import { createReadModel } from "./read-model";
+import { isHistServMessage } from "../contracts/presentation";
 import type { ReadModel } from "./read-model";
 
 const FEATURES: FeatureSet = {
@@ -513,7 +514,8 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     }
   };
   const trackUnread = (c: Conversation, message: Message, mention: boolean) => {
-    if (c.unread.has(message.id)) return;
+    // History-service chatter is retained, but is not chat unread/notification activity.
+    if (isHistServMessage(message) || c.unread.has(message.id)) return;
     const entry: UnreadEntry = {
       id: message.id,
       time: message.serverTime ?? message.receivedAt,
@@ -976,7 +978,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
               ) > 0
             : incoming.source === "live");
         // Focus/bottom observations can suppress notifications, not prove a new message rendered.
-        if (isNew) {
+        if (isNew && !isHistServMessage(message)) {
           const mention =
             c.view.kind === "direct" ||
             mentionsNick(message.text, network.nick, mapping(networkId));
@@ -1795,7 +1797,10 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
               action.focused &&
               action.atBottom &&
               action.lastVisibleMessageId &&
-              timeline(c).messages.at(-1)?.id === action.lastVisibleMessageId
+              (timeline(c).messages.at(-1)?.id === action.lastVisibleMessageId ||
+                (!settings.tui.showHistServ &&
+                  timeline(c).messages.findLast((message) => !isHistServMessage(message))?.id ===
+                    action.lastVisibleMessageId))
             ) {
               publishAfter = c.view.unreadCount > 0 || c.view.mentionCount > 0;
               await markRead(c, action.lastVisibleMessageId);

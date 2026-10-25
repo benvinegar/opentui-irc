@@ -406,6 +406,17 @@ describe("pure configuration plans", () => {
 });
 
 describe("effect and permission planning", () => {
+  it("HistServ visibility is a validated immediate configure-only preference", () => {
+    const result = success({ section: "tui", patch: { showHistServ: true } });
+    expect(result.effects.map(({ path, effect }) => [path, effect])).toEqual([
+      ["tui.showHistServ", "immediate"],
+    ]);
+    expect(result.requiredPermissions).toEqual(["configure"]);
+    expect(result.reconnectNetworkIds).toEqual([]);
+    expect(
+      prepareConfigChange(settings, { section: "tui", patch: { showHistServ: "yes" } }).ok,
+    ).toBe(false);
+  });
   it("classifies live UI fields and restart-only mouse support", () => {
     const result = success({
       section: "tui",
@@ -413,6 +424,7 @@ describe("effect and permission planning", () => {
         theme: "light",
         density: "compact",
         memberList: true,
+        showHistServ: true,
         sidebarWidth: 32,
         mouse: false,
       },
@@ -421,6 +433,7 @@ describe("effect and permission planning", () => {
       ["tui.theme", "immediate"],
       ["tui.density", "immediate"],
       ["tui.memberList", "immediate"],
+      ["tui.showHistServ", "immediate"],
       ["tui.sidebarWidth", "immediate"],
       ["tui.mouse", "restart"],
     ]);

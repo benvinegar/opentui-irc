@@ -59,6 +59,27 @@ describe("JSONC settings", () => {
     expect(value(await repository.load(signal)).revision).toBe(loaded.revision);
   });
 
+  test("legacy tui files hide HistServ without startup rewrites and can persist a reveal", async () => {
+    const { directory, repository } = await setup();
+    const { showHistServ: _newField, ...legacy } = defaultTuiSettings();
+    const path = join(directory, "tui.jsonc");
+    const original = "// preserved legacy settings\n" + JSON.stringify(legacy, null, 2);
+    await writeFile(path, original);
+    const loaded = value(await repository.load(signal));
+    expect(loaded.tui.showHistServ).toBe(false);
+    expect(await readFile(path, "utf8")).toBe(original);
+    value(
+      await repository.save(
+        { section: "tui", value: { ...loaded.tui, showHistServ: true } },
+        loaded.revision,
+        signal,
+      ),
+    );
+    expect(value(await repository.load(signal)).tui.showHistServ).toBe(true);
+    expect(await readFile(path, "utf8")).toContain("// preserved legacy settings");
+    await writeFile(path, JSON.stringify({ ...legacy, showHistServ: "yes" }));
+    expect((await repository.load(signal)).ok).toBe(false);
+  });
   test("atomic single-section saves preserve JSONC comments and restrictive file permissions", async () => {
     const { directory, repository } = await setup();
     const source = `// user heading\n${JSON.stringify(defaultUserSettings(), null, 2).replace('"enabled": true', '"enabled": true, // keep history comment').replace("true, // keep history comment,", "true, // keep history comment")}`;
