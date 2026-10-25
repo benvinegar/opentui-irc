@@ -37,6 +37,7 @@ export function defaultTuiSettings(): TuiSettings {
     memberList: true,
     showHistServ: false,
     sidebarWidth: 24,
+    memberListWidth: 22,
     keybindings: {},
   };
 }
@@ -94,10 +95,13 @@ function document(sources: Sources): SettingsDocument {
   const user = parseSource(sources.user, defaultUserSettings());
   const storedTui = parseSource(sources.tui, defaultTuiSettings());
   // Older schema-v1 files remain valid without rewriting their JSONC on load.
-  const tui =
-    record(storedTui) && !("showHistServ" in storedTui)
-      ? { ...storedTui, showHistServ: false }
-      : storedTui;
+  const tui = record(storedTui)
+    ? {
+        ...storedTui,
+        ...("showHistServ" in storedTui ? {} : { showHistServ: false }),
+        ...("memberListWidth" in storedTui ? {} : { memberListWidth: 22 }),
+      }
+    : storedTui;
   if (!validUserSettings(user) || !validTuiSettings(tui))
     throw new StorageFault(
       "invalid-input",

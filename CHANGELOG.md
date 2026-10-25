@@ -16,12 +16,22 @@
 
 ### Changed
 
+- Calmer, keyboard-first layout: the top bar, per-network buttons, conversation toolbar, Send button and duplicate hint rows are gone. Secondary actions live in a `ctrl+k` palette; one footer shows contextual keys, status and a plaintext-connection warning.
+- Sidebar shows connection status dots, `#`/`@` prefixes and unread/mention badges; the header is one line with the topic and member count; wide windows show a sorted member panel.
+- Consecutive messages from one sender are grouped, day changes get separators, and the nickname gutter fits the visible nicknames.
+- Dialogs are rounded and titled, list their actions compactly, support ↑/↓ navigation and focus their primary action; help is a key/command table; search results show conversation and time.
+- The first-run screen is shorter and leads with "Set up a network".
+- Sidebar and member list widths can be dragged with the mouse and are saved (`tui.sidebarWidth`, new `tui.memberListWidth`).
+
 - HistServ messages are hidden by default, with a persistent Show/Hide toggle. History, search and authorized control reads retain them; ordinary notices and connection errors stay visible.
 
 - Compact, glirc-style transcript with aligned 24-hour timestamps/nicknames, a full-height divider, wrapped message text and stable theme-aware nickname colors.
 - Removed empty top/bottom chrome rows; the composer starts at one line and grows for multiline drafts. New profiles default to compact message spacing.
 
 ### Fixed
+
+- The server's message of the day and user counts now show their text instead of "IRC server response 372.".
+- Releasing a dialog press or divider drag no longer opens the message underneath.
 
 - Page Up/Down now scroll the active dialog instead of leaving long help/settings content unreachable from the keyboard.
 - Keyboard focus stays visible when tabbing through long forms or resizing short dialogs.

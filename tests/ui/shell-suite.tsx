@@ -159,6 +159,29 @@ describe("real Solid/OpenTUI shell", () => {
     await tick();
     expect(view.renderer.currentFocusedRenderable?.id).toBe("copy-message");
   });
+  test("dragging column dividers resizes and persists sidebar and member widths", async () => {
+    const { fake, view } = await mount();
+    view.resize(150, 36);
+    const document = fake.settings.getSnapshot()!;
+    fake.settings.publish({ ...document, tui: { ...document.tui, memberList: true } });
+    await view.renderOnce();
+    const sidebar = view.renderer.root.findDescendantById("sidebar-splitter")!;
+    expect(sidebar.x).toBe(24);
+    // Move several cells in one motion: the pointer leaves the one-cell divider immediately.
+    await view.mockMouse.drag(sidebar.x, 10, sidebar.x + 8, 10);
+    await tick();
+    await view.renderOnce();
+    expect(fake.settings.getSnapshot()?.tui.sidebarWidth).toBe(32);
+    expect(view.renderer.root.findDescendantById("sidebar-splitter")?.x).toBe(32);
+    expect(view.renderer.root.findDescendantById("modal-backdrop")).toBeUndefined();
+    const members = view.renderer.root.findDescendantById("members-splitter")!;
+    await view.mockMouse.drag(members.x, 10, members.x - 6, 10);
+    await tick();
+    await view.renderOnce();
+    expect(fake.settings.getSnapshot()?.tui.memberListWidth).toBe(28);
+    expect(view.renderer.root.findDescendantById("members")?.width).toBe(28);
+    expect(view.renderer.root.findDescendantById("modal-backdrop")).toBeUndefined();
+  });
   test("a service-only window explains that older chat may still exist", async () => {
     const { fake, view } = await mount();
     const model = fake.timelines.get(conversationId)!;

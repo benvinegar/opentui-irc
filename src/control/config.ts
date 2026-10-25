@@ -336,6 +336,7 @@ export function prepareConfigChange(
         "memberList",
         "showHistServ",
         "sidebarWidth",
+        "memberListWidth",
         "mouse",
         "keybindings",
       ] as const) {

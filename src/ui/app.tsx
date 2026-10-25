@@ -19,12 +19,7 @@ import {
   useRenderer,
   useTerminalDimensions,
 } from "@opentui/solid";
-import {
-  InputRenderable,
-  ScrollBoxRenderable,
-  type Renderable,
-  type TextareaRenderable,
-} from "@opentui/core";
+import { ScrollBoxRenderable, type Renderable, type TextareaRenderable } from "@opentui/core";
 import type { AppAction, AppApi } from "../contracts/app";
 import type { ConversationId, MessageId, NetworkId } from "../contracts/common";
 import type { ConnectionPhase, Message, TimelineSnapshot } from "../contracts/model";
@@ -42,6 +37,7 @@ import {
   FocusContext,
   KeyHints,
   ListItem,
+  Splitter,
   ThemeContext,
   usePalette,
 } from "./primitives";
@@ -53,6 +49,7 @@ import {
   continuesGroup,
   dayKey,
   formatDay,
+  formatMessageTime,
   nicknameColor,
   transcriptGutterWidth,
 } from "./transcript-style";
@@ -248,13 +245,66 @@ function Shell(props: UiOptions) {
       setSavingHistServ(false);
     }
   };
-  const sidebarWidth = createMemo(() =>
-    dimensions().width < 65
-      ? 16
-      : dimensions().width < 100
-        ? Math.min(20, settings()?.tui.sidebarWidth ?? 26)
-        : (settings()?.tui.sidebarWidth ?? 26),
+  // Live widths while a divider is dragged; persisted to tui settings on release.
+  const [dragWidths, setDragWidths] = createSignal<{ sidebar?: number; members?: number }>({});
+  const sidebarWidth = createMemo(() => {
+    const dragged = dragWidths().sidebar;
+    const preferred = dragged ?? settings()?.tui.sidebarWidth ?? 26;
+    const cap = Math.max(12, Math.floor(dimensions().width * 0.45));
+    // Small terminals shrink the saved width unless the user is resizing right now.
+    const fit =
+      dragged !== undefined
+        ? preferred
+        : dimensions().width < 65
+          ? Math.min(16, preferred)
+          : dimensions().width < 100
+            ? Math.min(20, preferred)
+            : preferred;
+    return Math.max(12, Math.min(cap, fit));
+  });
+  const memberWidth = createMemo(() =>
+    Math.max(
+      12,
+      Math.min(
+        60,
+        Math.floor(dimensions().width * 0.4),
+        dragWidths().members ?? settings()?.tui.memberListWidth ?? 22,
+      ),
+    ),
   );
+  const [resizing, setResizing] = createSignal<"sidebar" | "members">();
+  const followResize = (x: number) => {
+    const target = resizing();
+    if (target === "sidebar")
+      setDragWidths((widths) => ({ ...widths, sidebar: Math.min(80, Math.max(12, x)) }));
+    else if (target === "members")
+      setDragWidths((widths) => ({
+        ...widths,
+        members: Math.min(60, Math.max(12, dimensions().width - x - 1)),
+      }));
+  };
+  const finishResize = () => {
+    const target = resizing();
+    if (!target) return;
+    ignoreClicksUntil = Date.now() + 300;
+    setResizing(undefined);
+    if (target === "sidebar") void saveWidth("sidebarWidth", sidebarWidth());
+    else void saveWidth("memberListWidth", memberWidth());
+  };
+  const saveWidth = async (key: "sidebarWidth" | "memberListWidth", value: number) => {
+    const document = settings();
+    if (!document || document.tui[key] === value) {
+      setDragWidths({});
+      return;
+    }
+    const result = await props.app.saveSettings(
+      { section: "tui", value: { ...document.tui, [key]: value } },
+      document.revision,
+      abort.signal,
+    );
+    if (!result.ok) setStatus(result.error.message);
+    setDragWidths({});
+  };
   const gutterWidth = createMemo(() =>
     transcriptGutterWidth(
       dimensions().width - sidebarWidth(),
@@ -300,10 +350,10 @@ function Shell(props: UiOptions) {
     // Recheck against measured layout, not a field's stale pre-focus coordinates.
     pendingFocusReveal = control;
   };
-  // Dialog controls act on mouse-down; ignore the matching mouse-up on what lies beneath.
-  let modalClosedAt = 0;
+  // Dialog presses and divider drags end with a mouse-up on whatever lies beneath; ignore it.
+  let ignoreClicksUntil = 0;
   const closeModal = () => {
-    modalClosedAt = Date.now();
+    ignoreClicksUntil = Date.now() + 300;
     setModal(null);
     setPaste("");
     queueMicrotask(() => focus(returnFocus));
@@ -611,12 +661,8 @@ function Shell(props: UiOptions) {
           filteredPalette()[paletteIndex()]?.id ?? "",
         );
         if (target) revealControl(target);
-      } else if (
-        (event.name === "up" || event.name === "down") &&
-        !(controls.get(focusId())?.control instanceof InputRenderable) &&
-        modal() !== "settings"
-      ) {
-        // Arrow keys walk dialog lists; text fields keep their own cursor keys.
+      } else if ((event.name === "up" || event.name === "down") && modal() !== "settings") {
+        // Arrow keys walk dialog lists; single-line fields have no vertical cursor movement.
         event.preventDefault();
         const ids = orderedControls("modal").filter((id) => id !== "dialog-close");
         const current = ids.indexOf(focusId());
@@ -1130,7 +1176,17 @@ function Shell(props: UiOptions) {
         },
       }}
     >
-      <box width="100%" height="100%" flexDirection="column" backgroundColor={colors.bg}>
+      <box
+        width="100%"
+        height="100%"
+        flexDirection="column"
+        backgroundColor={colors.bg}
+        onMouseDrag={(event) => {
+          if (resizing()) followResize(event.x);
+        }}
+        onMouseDragEnd={finishResize}
+        onMouseUp={finishResize}
+      >
         <box flexDirection="row" flexGrow={1} minHeight={0}>
           <scrollbox
             id="sidebar"
@@ -1224,6 +1280,11 @@ function Shell(props: UiOptions) {
               }}
             </For>
           </scrollbox>
+          <Splitter
+            id="sidebar-splitter"
+            active={resizing() === "sidebar"}
+            onStart={() => setResizing("sidebar")}
+          />
           <box flexGrow={1} minWidth={0} flexDirection="column">
             <box
               id="conversation-header"
@@ -1236,7 +1297,7 @@ function Shell(props: UiOptions) {
             >
               <text flexGrow={1} minWidth={0} height={1} wrapMode="none">
                 <b>
-                  <span style={{ fg: colors.text }}>{active()?.name ?? "Welcome to OpenIRC"}</span>
+                  <span style={{ fg: colors.text }}>{active()?.name ?? "Welcome"}</span>
                 </b>
                 <span style={{ fg: colors.muted }}>
                   {"  "}
@@ -1271,25 +1332,39 @@ function Shell(props: UiOptions) {
             <Show
               when={active()}
               fallback={
-                <box flexGrow={1} paddingX={2} paddingTop={1} flexDirection="column" gap={1}>
-                  <text fg={colors.accent}>
-                    <b>Your next conversation starts here.</b>
-                  </text>
-                  <text fg={colors.text}>1. Add your IRC network.</text>
-                  <text fg={colors.text}>2. Connect to it.</text>
-                  <text fg={colors.text}>3. Join a channel or message a nickname.</text>
-                  <text fg={colors.muted}>
-                    Local history is {settings()?.user.history.enabled ? "enabled" : "disabled"}.
-                    {settings()?.user.history.enabled
-                      ? ` Messages are retained ${settings()?.user.history.retentionDays === null ? "indefinitely" : `for ${settings()?.user.history.retentionDays} days`}.`
-                      : ""}{" "}
-                    Review privacy in Settings before connecting.
-                  </text>
-                  <Button
-                    id="welcome-setup"
-                    label="Set up a network"
-                    onPress={() => openModal("settings")}
-                  />
+                <box flexGrow={1} paddingX={4} paddingTop={2} flexDirection="column">
+                  <box flexDirection="column" maxWidth={64} gap={1}>
+                    <text fg={colors.accent}>
+                      <b>Your next conversation starts here.</b>
+                    </text>
+                    <box flexDirection="column">
+                      <text fg={colors.text}>
+                        <span style={{ fg: colors.muted }}>1 </span> Add your IRC network
+                      </text>
+                      <text fg={colors.text}>
+                        <span style={{ fg: colors.muted }}>2 </span> Connect to it
+                      </text>
+                      <text fg={colors.text}>
+                        <span style={{ fg: colors.muted }}>3 </span> Join a channel or message
+                        someone
+                      </text>
+                    </box>
+                    <box flexDirection="row">
+                      <Button
+                        id="welcome-setup"
+                        label="Set up a network →"
+                        active
+                        onPress={() => openModal("settings")}
+                      />
+                    </box>
+                    <text fg={colors.muted} wrapMode="word">
+                      Local history is {settings()?.user.history.enabled ? "enabled" : "disabled"}.
+                      {settings()?.user.history.enabled
+                        ? ` Messages are retained ${settings()?.user.history.retentionDays === null ? "indefinitely" : `for ${settings()?.user.history.retentionDays} days`}.`
+                        : ""}{" "}
+                      Review privacy in Settings before connecting.
+                    </text>
+                  </box>
                 </box>
               }
             >
@@ -1360,7 +1435,7 @@ function Shell(props: UiOptions) {
                                 ? { dayLabel: `── ${formatDay(messageTime(message))} ──` }
                                 : {})}
                               onSelect={() => {
-                                if (modal() || Date.now() - modalClosedAt < 300) return;
+                                if (modal() || resizing() || Date.now() < ignoreClicksUntil) return;
                                 setSelectedMessage(message);
                                 openModal("message");
                               }}
@@ -1444,12 +1519,15 @@ function Shell(props: UiOptions) {
                   </box>
                 </box>
                 <Show when={showMembers()}>
+                  <Splitter
+                    id="members-splitter"
+                    active={resizing() === "members"}
+                    onStart={() => setResizing("members")}
+                  />
                   <scrollbox
                     id="members"
-                    width={22}
+                    width={memberWidth()}
                     flexShrink={0}
-                    border={["left"]}
-                    borderColor={colors.border}
                     contentOptions={{ flexDirection: "column", paddingX: 1 }}
                     scrollX={false}
                   >
@@ -1663,35 +1741,51 @@ function Shell(props: UiOptions) {
               <Field
                 id="dialog-input"
                 label="Search local history (all conversations)"
+                hideLabel
+                placeholder="Search all conversations, then press enter…"
                 value={formText()}
                 onInput={setFormText}
               />
-              <Button
-                id="search-submit"
-                layer="modal"
-                label={searching() ? "Searching…" : "Search"}
-                disabled={searching()}
-                onPress={() => void search()}
-              />
-              <text fg={colors.muted}>Up to 50 results. Select one to reveal context.</text>
-              <For each={results()}>
-                {(message) => (
-                  <Button
-                    id={`result-${message.id}`}
-                    layer="modal"
-                    label={`${message.sender.nick}: ${message.text}`}
-                    onPress={() => {
-                      void run({ type: "history.reveal", messageId: message.id }).then((result) => {
-                        if (result.ok) {
-                          if (isHistServMessage(message)) setRevealHistServ(true);
-                          setReveal(message.id);
-                          closeToComposer();
-                        }
-                      });
-                    }}
-                  />
-                )}
-              </For>
+              <box flexDirection="row" flexShrink={0} height={1} justifyContent="space-between">
+                <text fg={colors.muted}>
+                  {searching()
+                    ? "Searching…"
+                    : results().length
+                      ? `${results().length}${results().length === 50 ? "+" : ""} result${results().length === 1 ? "" : "s"} · enter to reveal in context`
+                      : "Up to 50 results from local history."}
+                </text>
+                <Button
+                  id="search-submit"
+                  layer="modal"
+                  quiet
+                  label="search"
+                  disabled={searching()}
+                  onPress={() => void search()}
+                />
+              </box>
+              <box flexDirection="column" flexShrink={0}>
+                <For each={results()}>
+                  {(message) => (
+                    <ListItem
+                      id={`result-${message.id}`}
+                      layer="modal"
+                      label={`${message.sender.nick}: ${message.text}`}
+                      hint={`${state().conversations.find((item) => item.id === message.conversationId)?.name ?? ""} ${formatMessageTime(messageTime(message))}`.trim()}
+                      onPress={() => {
+                        void run({ type: "history.reveal", messageId: message.id }).then(
+                          (result) => {
+                            if (result.ok) {
+                              if (isHistServMessage(message)) setRevealHistServ(true);
+                              setReveal(message.id);
+                              closeToComposer();
+                            }
+                          },
+                        );
+                      }}
+                    />
+                  )}
+                </For>
+              </box>
             </Show>
             <Show when={modal() === "paste"}>
               <text fg={colors.muted}>

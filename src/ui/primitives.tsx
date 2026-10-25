@@ -2,6 +2,7 @@ import type { InputRenderable, Renderable } from "@opentui/core";
 import {
   createContext,
   createEffect,
+  createSignal,
   For,
   Show,
   onCleanup,
@@ -345,6 +346,29 @@ export function ListItem(props: {
         </text>
       </Show>
     </box>
+  );
+}
+/** A one-cell column divider; pressing it starts a drag the shell follows. */
+export function Splitter(props: { id: string; active: boolean; onStart: () => void }) {
+  const colors = usePalette();
+  const [hot, setHot] = createSignal(false);
+  return (
+    <box
+      id={props.id}
+      width={1}
+      flexShrink={0}
+      height="100%"
+      border={["left"]}
+      borderColor={hot() || props.active ? colors.accent : colors.border}
+      onMouseOver={() => setHot(true)}
+      onMouseOut={() => setHot(false)}
+      onMouseDown={(event) => {
+        event.preventDefault();
+        // Pointer capture during the drag suppresses mouse-out; let `active` carry the highlight.
+        setHot(false);
+        props.onStart();
+      }}
+    />
   );
 }
 /** Footer key legend: keys stand out, descriptions recede. */

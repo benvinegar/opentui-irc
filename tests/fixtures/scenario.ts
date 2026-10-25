@@ -47,6 +47,7 @@ export const settings: SettingsDocument = {
     memberList: false,
     showHistServ: false,
     sidebarWidth: 24,
+    memberListWidth: 22,
     keybindings: {},
   },
 };

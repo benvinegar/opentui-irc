@@ -281,8 +281,13 @@ export function configurationSchema(): JsonObject {
         tui.showHistServ,
       ),
       sidebarWidth: field(
-        "Live sidebar width in terminal cells.",
+        "Live sidebar width in terminal cells; also adjustable by dragging its divider.",
         { type: "integer", minimum: 12, maximum: 80, default: tui.sidebarWidth },
+        immediate,
+      ),
+      memberListWidth: field(
+        "Live channel member panel width in terminal cells; also adjustable by dragging its divider.",
+        { type: "integer", minimum: 12, maximum: 60, default: tui.memberListWidth },
         immediate,
       ),
       keybindings: field(

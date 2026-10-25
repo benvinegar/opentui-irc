@@ -57,6 +57,8 @@ export interface TuiSettings {
   /** Presentation only; history/search/control retain service messages. Defaults false. */
   readonly showHistServ: boolean;
   readonly sidebarWidth: number;
+  /** Live member panel width in terminal cells. Older files default to 22. */
+  readonly memberListWidth: number;
   readonly keybindings: Readonly<Record<string, readonly string[]>>;
 }
 
