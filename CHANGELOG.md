@@ -41,6 +41,8 @@
 - `/me` actions without a closing marker, empty actions and messages with stray control characters are shown instead of silently dropped. CTCP requests are still never answered, but now appear as a status notice.
 - Messages sent only to channel operators or voiced users (`@#channel`) appear in that channel.
 - Messages to a nickname that is not online now say so (401) instead of failing silently; more server rejections have readable explanations, and WARN/NOTE standard replies are shown.
+- Being kicked from or leaving a channel clears its member list instead of still showing the old members.
+- An optional SASL login no longer disconnects from servers that finish registration before capability negotiation ends.
 - Joining a channel no longer adds "IRC server response 333."-style lines for topic setter, creation time and channel modes; login and displayed-host replies read as sentences.
 
 - Page Up/Down now scroll the active dialog instead of leaving long help/settings content unreachable from the keyboard.
