@@ -165,6 +165,121 @@ describe("real Solid/OpenTUI shell", () => {
       .map((line) => line.slice(sidebar.x, sidebar.x + sidebar.width));
     expect(rows.some((row) => row.includes("…"))).toBe(true);
   });
+  test("clicking a message opens a small menu at the click with letter shortcuts", async () => {
+    const { fake, view } = await mount();
+    const row = view.renderer.root.findDescendantById(`body-${welcomeMessage.id}`)!;
+    await view.mockMouse.click(row.x + 4, row.y);
+    await tick();
+    await view.renderOnce();
+    const popover = view.renderer.root.findDescendantById("popover")!;
+    expect(view.renderer.root.findDescendantById("modal-backdrop")).toBeUndefined();
+    expect(popover.y).toBe(row.y + 1);
+    expect(popover.x).toBe(row.x + 3);
+    expect(popover.width).toBeLessThan(40);
+    expect(view.renderer.currentFocusedRenderable?.id).toBe("copy-message");
+    expect(view.captureCharFrame()).toContain("About guide");
+    // No reply/react without capabilities, no link item without links.
+    for (const id of ["reply-message", "react-message", "url-0", "open-links"])
+      expect(view.renderer.root.findDescendantById(id)).toBeUndefined();
+    view.mockInput.pressKey("c");
+    await tick();
+    await view.renderOnce();
+    expect(view.renderer.root.findDescendantById("popover")).toBeUndefined();
+    expect(view.captureCharFrame()).toContain("Copied.");
+    // A press outside closes it without opening anything underneath.
+    await view.mockMouse.click(row.x + 4, row.y);
+    await tick();
+    await view.renderOnce();
+    await view.mockMouse.click(1, 1);
+    await tick();
+    await view.renderOnce();
+    expect(view.renderer.root.findDescendantById("popover")).toBeUndefined();
+    expect(fake.actions.some((action) => action.type === "conversation.activate")).toBe(false);
+  });
+  test("the react submenu sends the chosen emoji and links get their own submenu", async () => {
+    const { fake, view } = await mount();
+    fake.state.publish({
+      ...fake.state.getSnapshot(),
+      networks: fake.state.getSnapshot().networks.map((network) => ({
+        ...network,
+        features: { ...network.features, reactions: true, replies: true },
+      })),
+    });
+    const model = fake.timelines.get(conversationId)!;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: [
+        {
+          ...welcomeMessage,
+          serverId: "server-1",
+          text: "see https://example.com/a and https://example.com/b",
+        },
+      ],
+    });
+    await view.renderOnce();
+    await click(view, `body-${welcomeMessage.id}`);
+    expect(view.renderer.root.findDescendantById("reply-message")?.id).toBe("reply-message");
+    view.mockInput.pressKey("o");
+    await tick();
+    await view.renderOnce();
+    expect(view.captureCharFrame()).toContain("https://example.com/b");
+    await view.mockInput.pressEscape();
+    await Bun.sleep(50);
+    await view.renderOnce();
+    expect(view.renderer.root.findDescendantById("copy-message")?.id).toBe("copy-message");
+    view.mockInput.pressKey("e");
+    await tick();
+    await view.renderOnce();
+    expect(view.renderer.currentFocusedRenderable?.id).toBe("react-0");
+    view.mockInput.pressKey("2");
+    await tick();
+    expect(fake.actions.find((action) => action.type === "message.react")).toMatchObject({
+      value: "🎉",
+      remove: false,
+    });
+    expect(view.renderer.root.findDescendantById("popover")).toBeUndefined();
+  });
+  test("clicking a nickname shows a person card from WHOIS and can start a DM", async () => {
+    const { fake, view } = await mount();
+    await click(view, `nick-${welcomeMessage.id}`);
+    expect(view.renderer.root.findDescendantById("popover")?.id).toBe("popover");
+    expect(
+      fake.actions.some(
+        (action) =>
+          action.type === "irc.request" &&
+          action.command.type === "whois" &&
+          action.command.nick === "guide",
+      ),
+    ).toBe(true);
+    expect(view.captureCharFrame()).toContain("Looking up…");
+    const discovery = fake.discoveries.get(welcomeMessage.networkId)!;
+    discovery.publish({
+      ...discovery.getSnapshot(),
+      user: {
+        state: "ready",
+        details: {
+          nick: "guide",
+          username: "g",
+          hostname: "example.test",
+          realname: "Community guide",
+          channels: ["#welcome"],
+        },
+      },
+    });
+    await view.renderOnce();
+    const frame = view.captureCharFrame();
+    expect(frame).toContain("g@example.test");
+    expect(frame).toContain('"Community guide"');
+    expect(frame).toContain("not identified");
+    expect(view.renderer.currentFocusedRenderable?.id).toBe("person-message");
+    view.mockInput.pressKey("m");
+    await tick();
+    expect(
+      fake.actions.some(
+        (action) => action.type === "conversation.query" && action.nick === "guide",
+      ),
+    ).toBe(true);
+  });
   test("ctrl+k filters conversations and actions and Enter runs the highlighted entry", async () => {
     const { view } = await mount();
     view.mockInput.pressKey("k", { ctrl: true });

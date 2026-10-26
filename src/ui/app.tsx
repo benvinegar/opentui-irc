@@ -23,6 +23,7 @@ import { ScrollBoxRenderable, type Renderable, type TextareaRenderable } from "@
 import type { AppAction, AppApi } from "../contracts/app";
 import type { ConversationId, MessageId, NetworkId } from "../contracts/common";
 import type { ConnectionPhase, Message, TimelineSnapshot } from "../contracts/model";
+import type { DiscoverySnapshot } from "../contracts/discovery";
 import type {
   CommandService,
   Completion,
@@ -38,6 +39,7 @@ import {
   FitText,
   KeyHints,
   ListItem,
+  Popover,
   Splitter,
   ThemeContext,
   usePalette,
@@ -74,6 +76,7 @@ type Modal =
   | "messages"
   | "directory"
   | "whois"
+  | "person"
   | "redact"
   | "quit"
   | null;
@@ -101,8 +104,20 @@ const HELP_KEYS = [
   ["pgup pgdn", "scroll"],
   ["ctrl+end", "jump to latest"],
   ["esc", "close, or cancel a reply"],
-  ["click", "a message to copy, reply, or open links"],
+  ["click", "a message to copy, reply, react, or open links"],
+  ["click name", "see who someone is, or message them"],
 ] as const;
+const REACTIONS = ["👍", "🎉", "😂", "👀", "🔥", "✅"] as const;
+interface MenuEntry {
+  readonly id: string;
+  readonly icon: string;
+  readonly label: string;
+  /** Single-key shortcut while the menu is open. */
+  readonly key: string;
+  /** Opens a submenu rather than acting. */
+  readonly more?: boolean;
+  readonly run: () => void;
+}
 interface PaletteEntry {
   readonly id: string;
   readonly label: string;
@@ -398,13 +413,15 @@ function Shell(props: UiOptions) {
               ? "directory-filter"
               : value === "message"
                 ? "copy-message"
-                : value === "quit"
-                  ? "quit-confirm"
-                  : value === "redact"
-                    ? "redact-cancel"
-                    : ["join", "query", "switch", "search"].includes(value ?? "")
-                      ? "dialog-input"
-                      : "dialog-close";
+                : value === "person"
+                  ? "person-message"
+                  : value === "quit"
+                    ? "quit-confirm"
+                    : value === "redact"
+                      ? "redact-cancel"
+                      : ["join", "query", "switch", "search"].includes(value ?? "")
+                        ? "dialog-input"
+                        : "dialog-close";
       focus(target);
     });
   };
@@ -638,7 +655,8 @@ function Shell(props: UiOptions) {
     }
     if (event.name === "escape") {
       event.preventDefault();
-      if (modal()) closeModal();
+      if (modal() === "message" && menuPage() !== "main") choose("main", "copy-message");
+      else if (modal()) closeModal();
       else {
         setReply(undefined);
         focus("composer");
@@ -663,7 +681,21 @@ function Shell(props: UiOptions) {
         event.preventDefault();
         return;
       }
-      if (event.name === "pageup" || event.name === "pagedown") {
+      const shortcut =
+        popoverOpen() && !event.ctrl && !event.meta
+          ? (modal() === "person" ? personMenu() : messageMenu()).find(
+              (entry) => entry.key === event.name,
+            )
+          : undefined;
+      const reaction =
+        modal() === "message" && menuPage() === "react" && /^[1-6]$/u.test(event.name)
+          ? REACTIONS[Number(event.name) - 1]
+          : undefined;
+      if (shortcut || reaction) {
+        event.preventDefault();
+        if (reaction) react(reaction);
+        else shortcut!.run();
+      } else if (event.name === "pageup" || event.name === "pagedown") {
         event.preventDefault();
         pendingFocusReveal = undefined;
         const viewport = renderer.root.findDescendantById("modal-scroll");
@@ -682,14 +714,22 @@ function Shell(props: UiOptions) {
           filteredPalette()[paletteIndex()]?.id ?? "",
         );
         if (target) revealControl(target);
-      } else if ((event.name === "up" || event.name === "down") && modal() !== "settings") {
+      } else if (
+        (event.name === "up" ||
+          event.name === "down" ||
+          (popoverOpen() && (event.name === "left" || event.name === "right"))) &&
+        modal() !== "settings"
+      ) {
         // Arrow keys walk dialog lists; single-line fields have no vertical cursor movement.
         event.preventDefault();
         const ids = orderedControls("modal").filter((id) => id !== "dialog-close");
         const current = ids.indexOf(focusId());
         const next =
           ids[
-            current < 0 ? 0 : (current + (event.name === "up" ? -1 : 1) + ids.length) % ids.length
+            current < 0
+              ? 0
+              : (current + (event.name === "up" || event.name === "left" ? -1 : 1) + ids.length) %
+                ids.length
           ];
         if (next) focus(next);
       } else if (event.name === "return" && focusId() === "dialog-input") {
@@ -857,105 +897,238 @@ function Shell(props: UiOptions) {
       setStatus("Removal requested. Other clients or logs may still retain a copy.");
     }
   };
-  const messageActions = () => {
-    const selected = selectedMessage();
-    const message = selected && (messages().find((item) => item.id === selected.id) ?? selected);
-    if (!message) return null;
-    const links = message.text.match(/https?:\/\/[^\s<>]+/gu) ?? [];
-    return (
-      <>
-        <text fg={colors.muted}>
-          {message.sender.nick} ·{" "}
-          {new Date(message.serverTime ?? message.receivedAt).toLocaleString()}
-        </text>
-        <text selectable fg={colors.text}>
-          {message.redacted ? "[message removed]" : message.text}
-        </text>
-        <box flexDirection="column" flexShrink={0}>
-          <ListItem
-            id="copy-message"
-            layer="modal"
-            label="Copy message text"
-            onPress={() => {
-              void props.external
-                .copyText(message.text, abort.signal)
-                .then((result) => setStatus(result.ok ? "Copied." : result.error.message));
-            }}
-          />
-          <Show when={network()?.features.replies && message.serverId && !message.redacted}>
-            <ListItem
-              id="reply-message"
-              layer="modal"
-              label="Reply to this message"
-              onPress={() => {
-                setReply(message.id);
-                closeToComposer();
-              }}
-            />
-          </Show>
-          <Show when={network()?.features.reactions && message.serverId && !message.redacted}>
-            <ListItem
-              id="react-message"
-              layer="modal"
-              label="React +1"
-              onPress={() => {
-                void run({
-                  type: "message.react",
-                  messageId: message.id,
-                  value: "👍",
-                  remove: false,
-                });
-              }}
-            />
-          </Show>
-          <ListItem
-            id="message-whois"
-            layer="modal"
-            label={`Look up ${message.sender.nick}`}
-            onPress={() => {
-              void run({
-                type: "irc.request",
-                networkId: message.networkId,
-                command: { type: "whois", nick: message.sender.nick },
-              });
-            }}
-          />
-          <Show when={canRedact(message)}>
-            <ListItem
-              id="redact-message"
-              layer="modal"
-              label="Remove my message…"
-              onPress={() => {
-                setSelectedMessage(message);
-                openModal("redact");
-              }}
-            />
-          </Show>
-          <For each={links.slice(0, 8)}>
-            {(url, index) => (
-              <ListItem
-                id={`url-${index()}`}
-                layer="modal"
-                label={`Open in browser: ${url}`}
-                onPress={() => {
-                  void props.external
-                    .openUrl(url, abort.signal)
-                    .then((result) =>
-                      setStatus(result.ok ? "Opened browser." : result.error.message),
-                    );
-                }}
-              />
-            )}
-          </For>
-        </box>
-        <Show when={links.length}>
-          <text fg={colors.muted}>
-            Opening a link shares it with your default browser. No automatic previews are fetched.
-          </text>
-        </Show>
-      </>
-    );
+  // Message menu and person card: small popovers anchored where they were opened.
+  const [anchor, setAnchor] = createSignal({ x: 0, y: 0 });
+  const [menuPage, setMenuPage] = createSignal<"main" | "react" | "links">("main");
+  const [person, setPerson] = createSignal<{ networkId: NetworkId; nick: string }>();
+  const [personInfo, setPersonInfo] = createSignal<DiscoverySnapshot["user"]>();
+  const popoverOpen = () => modal() === "message" || modal() === "person";
+  /** Keyboard openings anchor beside the message's nickname, or mid-screen when it is hidden. */
+  const anchorFor = (message: Message) => {
+    const nick = renderer.root.findDescendantById(`nick-${message.id}`);
+    const frame = renderer.root.findDescendantById("transcript-frame");
+    if (nick && frame && nick.y >= frame.y && nick.y < frame.y + frame.height)
+      return { x: frame.x + gutterWidth() + 2, y: nick.y };
+    return {
+      x: Math.floor(dimensions().width / 2) - 14,
+      y: Math.floor(dimensions().height / 3),
+    };
   };
+  const openMessageMenu = (message: Message, point?: { x: number; y: number }) => {
+    setSelectedMessage(message);
+    setMenuPage("main");
+    setAnchor(point ?? anchorFor(message));
+    openModal("message");
+  };
+  const openPerson = (networkId: NetworkId, nick: string, point: { x: number; y: number }) => {
+    setPerson({ networkId, nick });
+    setAnchor(point);
+    openModal("person");
+    if (state().networks.find((item) => item.id === networkId)?.phase === "ready")
+      void props.app.dispatch(
+        { type: "irc.request", networkId, command: { type: "whois", nick } },
+        abort.signal,
+      );
+  };
+  createEffect(() => {
+    const target = person();
+    if (!target || modal() !== "person") return;
+    const model = props.app.discovery(target.networkId);
+    setPersonInfo(undefined);
+    if (!model.ok) return;
+    const read = () => setPersonInfo(model.value.getSnapshot().user);
+    read();
+    onCleanup(model.value.subscribe(read));
+  });
+  const choose = (page: "main" | "react" | "links", first: string) => {
+    setMenuPage(page);
+    queueMicrotask(() => focus(first));
+  };
+  const finish = (message?: string) => {
+    closeToComposer();
+    if (message) setStatus(message);
+  };
+  const currentMessage = () => {
+    const selected = selectedMessage();
+    return selected && (messages().find((item) => item.id === selected.id) ?? selected);
+  };
+  const messageLinks = () => currentMessage()?.text.match(/https?:\/\/[^\s<>]+/gu) ?? [];
+  const openLink = (url: string) => {
+    void props.external
+      .openUrl(url, abort.signal)
+      .then((result) => finish(result.ok ? "Opened browser." : result.error.message));
+  };
+  const messageMenu = createMemo((): readonly MenuEntry[] => {
+    const message = currentMessage();
+    if (!message) return [];
+    const links = messageLinks();
+    if (menuPage() === "links")
+      return links.slice(0, 9).map((url, index) => ({
+        id: `url-${index}`,
+        icon: "↗",
+        label: url,
+        key: String(index + 1),
+        run: () => openLink(url),
+      }));
+    const live = !!message.serverId && !message.redacted;
+    const entries: MenuEntry[] = [
+      {
+        id: "copy-message",
+        icon: "□",
+        label: "Copy text",
+        key: "c",
+        run: () => {
+          void props.external
+            .copyText(message.text, abort.signal)
+            .then((result) => finish(result.ok ? "Copied." : result.error.message));
+        },
+      },
+    ];
+    if (network()?.features.replies && live)
+      entries.push({
+        id: "reply-message",
+        icon: "↩",
+        label: "Reply",
+        key: "r",
+        run: () => {
+          setReply(message.id);
+          closeToComposer();
+        },
+      });
+    if (network()?.features.reactions && live)
+      entries.push({
+        id: "react-message",
+        icon: "♥",
+        label: "React",
+        key: "e",
+        more: true,
+        run: () => choose("react", "react-0"),
+      });
+    if (links.length === 1)
+      entries.push({
+        id: "url-0",
+        icon: "↗",
+        label: "Open link",
+        key: "o",
+        run: () => openLink(links[0]!),
+      });
+    else if (links.length > 1)
+      entries.push({
+        id: "open-links",
+        icon: "↗",
+        label: "Open link",
+        key: "o",
+        more: true,
+        run: () => choose("links", "url-0"),
+      });
+    if (message.kind !== "event")
+      entries.push({
+        id: "message-about",
+        icon: "@",
+        label: `About ${message.sender.nick}`,
+        key: "a",
+        run: () => openPerson(message.networkId, message.sender.nick, anchor()),
+      });
+    if (canRedact(message))
+      entries.push({
+        id: "redact-message",
+        icon: "×",
+        label: "Remove mine…",
+        key: "d",
+        run: () => {
+          setSelectedMessage(message);
+          openModal("redact");
+        },
+      });
+    return entries;
+  });
+  const react = (value: string) => {
+    const message = currentMessage();
+    if (!message) return;
+    const mine = message.reactions?.some((item) => item.value === value && item.reactedBySelf);
+    void run({ type: "message.react", messageId: message.id, value, remove: !!mine });
+    closeToComposer();
+  };
+  const personMenu = (): readonly MenuEntry[] => {
+    const target = person();
+    if (!target) return [];
+    return [
+      {
+        id: "person-message",
+        icon: "@",
+        label: "Message",
+        key: "m",
+        run: () => {
+          closeToComposer();
+          void run({ type: "conversation.query", networkId: target.networkId, nick: target.nick });
+        },
+      },
+      {
+        id: "person-copy",
+        icon: "□",
+        label: "Copy nickname",
+        key: "c",
+        run: () => {
+          void props.external
+            .copyText(target.nick, abort.signal)
+            .then((result) => finish(result.ok ? "Copied." : result.error.message));
+        },
+      },
+    ];
+  };
+  /** Card lines from the latest matching WHOIS reply; the network may omit any of them. */
+  const personLines = createMemo((): readonly (readonly [string, "text" | "muted" | "error"])[] => {
+    const target = person();
+    if (!target) return [];
+    const info = personInfo();
+    const details =
+      info?.details && info.details.nick.toLowerCase() === target.nick.toLowerCase()
+        ? info.details
+        : undefined;
+    if (state().networks.find((item) => item.id === target.networkId)?.phase !== "ready")
+      return [["Offline · details unavailable", "muted"]];
+    if (info?.state === "failed" && !details)
+      return [[info.error?.message ?? "No details available.", "error"]];
+    if (!details) return [["Looking up…", "muted"]];
+    const lines: [string, "text" | "muted"][] = [];
+    if (details.username || details.hostname)
+      lines.push([`${details.username ?? "?"}@${details.hostname ?? "?"}`, "muted"]);
+    if (details.realname) lines.push([`"${details.realname}"`, "text"]);
+    lines.push([details.account ? `account: ${details.account}` : "not identified", "muted"]);
+    if (details.awayReason) lines.push([`away: ${details.awayReason}`, "text"]);
+    if (details.channels.length) lines.push([`in ${details.channels.join(" ")}`, "muted"]);
+    return lines;
+  });
+  const personRole = () => {
+    const prefix = timeline()?.members.find(
+      (member) => member.nick.toLowerCase() === person()?.nick.toLowerCase(),
+    )?.prefixes[0];
+    return prefix === "~"
+      ? "owner"
+      : prefix === "&"
+        ? "admin"
+        : prefix === "@"
+          ? "op"
+          : prefix === "%"
+            ? "half-op"
+            : prefix === "+"
+              ? "voice"
+              : "";
+  };
+  const menuItems = (entries: readonly MenuEntry[]) => (
+    <For each={entries}>
+      {(entry) => (
+        <ListItem
+          id={entry.id}
+          layer="modal"
+          prefix={entry.icon}
+          label={entry.label}
+          hint={entry.more ? `${entry.key} ›` : `${entry.key}  `}
+          onPress={entry.run}
+        />
+      )}
+    </For>
+  );
   const showMembers = createMemo(
     () =>
       settings()?.tui.memberList === true &&
@@ -1001,23 +1174,29 @@ function Shell(props: UiOptions) {
           ["enter", "open"],
           ["esc", "close"],
         ]
-      : modal() === "help" || modal() === "messages"
+      : popoverOpen()
         ? [
-            ["pgup pgdn", "scroll"],
-            ["esc", "close"],
+            ["↑↓", "select"],
+            ["letter", "shortcut"],
+            ["esc", modal() === "message" && menuPage() !== "main" ? "back" : "close"],
           ]
-        : modal()
+        : modal() === "help" || modal() === "messages"
           ? [
-              ["tab", "next"],
-              ["enter", "choose"],
+              ["pgup pgdn", "scroll"],
               ["esc", "close"],
             ]
-          : [
-              ["ctrl+k", "jump to…"],
-              ["ctrl+f", "search"],
-              ["f1", "help"],
-              ["ctrl+q", "quit"],
-            ];
+          : modal()
+            ? [
+                ["tab", "next"],
+                ["enter", "choose"],
+                ["esc", "close"],
+              ]
+            : [
+                ["ctrl+k", "jump to…"],
+                ["ctrl+f", "search"],
+                ["f1", "help"],
+                ["ctrl+q", "quit"],
+              ];
   const paletteEntries = (): PaletteEntry[] => {
     const entries: PaletteEntry[] = state().conversations.map((item) => ({
       id: `switch-${item.id}`,
@@ -1469,11 +1648,19 @@ function Shell(props: UiOptions) {
                               dayKey(messageTime(previous()!)) !== dayKey(messageTime(message))
                                 ? { dayLabel: `── ${formatDay(messageTime(message))} ──` }
                                 : {})}
-                              onSelect={() => {
+                              onSelect={(point) => {
                                 if (modal() || resizing() || Date.now() < ignoreClicksUntil) return;
-                                setSelectedMessage(message);
-                                openModal("message");
+                                openMessageMenu(message, point);
                               }}
+                              {...(message.kind === "event"
+                                ? {}
+                                : {
+                                    onNick: (point: { x: number; y: number }) => {
+                                      if (modal() || resizing() || Date.now() < ignoreClicksUntil)
+                                        return;
+                                      openPerson(message.networkId, message.sender.nick, point);
+                                    },
+                                  })}
                             />
                           );
                         }}
@@ -1578,7 +1765,17 @@ function Shell(props: UiOptions) {
                     </text>
                     <For each={sortedMembers()}>
                       {(member) => (
-                        <box height={1} flexShrink={0} flexDirection="row">
+                        <box
+                          height={1}
+                          flexShrink={0}
+                          flexDirection="row"
+                          onMouseUp={(event) => {
+                            const net = network();
+                            if (!net || modal() || resizing() || Date.now() < ignoreClicksUntil)
+                              return;
+                            openPerson(net.id, member.nick, { x: event.x, y: event.y });
+                          }}
+                        >
                           <FitText
                             text={`${member.prefixes[0] ?? " "}${member.nick}`}
                             fg={member.away ? colors.muted : nicknameColor(member.nick, theme())}
@@ -1634,32 +1831,90 @@ function Shell(props: UiOptions) {
             </text>
           </Show>
         </box>
-        <Show when={modal()}>
+        <Show when={modal() === "message" && currentMessage()}>
+          <Popover
+            anchor={anchor()}
+            screenWidth={dimensions().width}
+            screenHeight={dimensions().height}
+            width={
+              menuPage() === "links"
+                ? Math.min(64, Math.max(...messageLinks().map((url) => url.length)) + 10)
+                : 30
+            }
+            height={(menuPage() === "react" ? 1 : messageMenu().length) + 2}
+            title={`${currentMessage()!.sender.nick} · ${formatMessageTime(messageTime(currentMessage()!))}`}
+            onClose={closeModal}
+          >
+            <Show when={menuPage() === "react"} fallback={menuItems(messageMenu())}>
+              <box flexDirection="row" height={1} paddingX={1}>
+                <For each={REACTIONS}>
+                  {(value, index) => (
+                    <Button
+                      id={`react-${index()}`}
+                      layer="modal"
+                      quiet
+                      label={value}
+                      onPress={() => react(value)}
+                    />
+                  )}
+                </For>
+              </box>
+            </Show>
+          </Popover>
+        </Show>
+        <Show when={modal() === "person" && person()}>
+          <Popover
+            anchor={anchor()}
+            screenWidth={dimensions().width}
+            screenHeight={dimensions().height}
+            width={36}
+            height={personLines().length + personMenu().length + 4}
+            onClose={closeModal}
+          >
+            <box flexDirection="row" height={1} paddingX={1}>
+              <FitText text={person()!.nick} bold fg={nicknameColor(person()!.nick, theme())} />
+              <text flexShrink={0} fg={colors.muted}>
+                {personRole()}
+              </text>
+            </box>
+            <For each={personLines()}>
+              {([line, tone]) => (
+                <box flexDirection="row" height={1} paddingX={1}>
+                  <FitText
+                    text={line}
+                    fg={
+                      tone === "error" ? colors.error : tone === "text" ? colors.text : colors.muted
+                    }
+                  />
+                </box>
+              )}
+            </For>
+            <box height={1} border={["bottom"]} borderColor={colors.border} />
+            {menuItems(personMenu())}
+          </Popover>
+        </Show>
+        <Show when={modal() && !popoverOpen()}>
           <Dialog
             title={
               modal() === "settings"
                 ? "Settings · Add network"
                 : modal() === "paste"
                   ? "Review paste — nothing has been sent"
-                  : modal() === "message"
-                    ? "Message actions"
-                    : modal() === "quit"
-                      ? "Disconnect and quit?"
-                      : modal() === "switch"
-                        ? "Jump to…"
-                        : modal() === "redact"
-                          ? "Remove message"
-                          : modal() === "whois"
-                            ? "Look up a person"
-                            : modal() === "messages"
-                              ? "Select a message"
-                              : modal() === "query"
-                                ? "Message someone"
-                                : `${modal()!.charAt(0).toUpperCase()}${modal()!.slice(1)}`
+                  : modal() === "quit"
+                    ? "Disconnect and quit?"
+                    : modal() === "switch"
+                      ? "Jump to…"
+                      : modal() === "redact"
+                        ? "Remove message"
+                        : modal() === "whois"
+                          ? "Look up a person"
+                          : modal() === "messages"
+                            ? "Select a message"
+                            : modal() === "query"
+                              ? "Message someone"
+                              : `${modal()!.charAt(0).toUpperCase()}${modal()!.slice(1)}`
             }
-            compact={["switch", "join", "query", "quit", "redact", "message"].includes(
-              modal() ?? "",
-            )}
+            compact={["switch", "join", "query", "quit", "redact"].includes(modal() ?? "")}
             width={dimensions().width}
             height={dimensions().height}
             onClose={closeModal}
@@ -1864,15 +2119,11 @@ function Shell(props: UiOptions) {
                     id={`pick-${message.id}`}
                     layer="modal"
                     label={`${message.sender.nick}: ${message.redacted ? "[message removed]" : message.text.slice(0, 100)}`}
-                    onPress={() => {
-                      setSelectedMessage(message);
-                      openModal("message");
-                    }}
+                    onPress={() => openMessageMenu(message)}
                   />
                 )}
               </For>
             </Show>
-            <Show when={modal() === "message"}>{messageActions()}</Show>
             <Show when={modal() === "redact"}>
               <text fg={colors.error}>
                 Remove your message from this conversation? This cannot be undone. Other clients,

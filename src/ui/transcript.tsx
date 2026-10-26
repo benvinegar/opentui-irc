@@ -13,7 +13,9 @@ export function MessageRow(props: {
   dayLabel?: string;
   /** Comfortable density: a blank line above each new sender group. */
   spaced?: boolean;
-  onSelect: () => void;
+  onSelect: (point: { x: number; y: number }) => void;
+  /** Pressing the nickname opens the person card instead of the message menu. */
+  onNick?: (point: { x: number; y: number }) => void;
 }) {
   const colors = usePalette();
   const theme = useContext(ThemeContext);
@@ -22,7 +24,7 @@ export function MessageRow(props: {
       id={`message-${props.message.id}`}
       flexDirection="column"
       flexShrink={0}
-      onMouseUp={props.onSelect}
+      onMouseUp={(event) => props.onSelect({ x: event.x, y: event.y })}
     >
       <Show when={props.spaced && !props.continuation}>
         <box height={1} flexShrink={0} />
@@ -47,18 +49,27 @@ export function MessageRow(props: {
               : formatMessageTime(props.message.serverTime ?? props.message.receivedAt)}
           </text>
           <box width={1} flexShrink={0} />
-          <FitText
-            id={`nick-${props.message.id}`}
-            width={Math.max(1, props.gutterWidth - 7)}
-            textAlign="right"
-            bold
-            fg={
-              props.message.kind === "event"
-                ? colors.muted
-                : nicknameColor(props.message.sender.nick, theme())
-            }
-            text={props.continuation ? "" : props.message.sender.nick}
-          />
+          <box
+            flexShrink={0}
+            onMouseUp={(event) => {
+              if (props.continuation || !props.onNick) return;
+              event.stopPropagation();
+              props.onNick({ x: event.x, y: event.y });
+            }}
+          >
+            <FitText
+              id={`nick-${props.message.id}`}
+              width={Math.max(1, props.gutterWidth - 7)}
+              textAlign="right"
+              bold
+              fg={
+                props.message.kind === "event"
+                  ? colors.muted
+                  : nicknameColor(props.message.sender.nick, theme())
+              }
+              text={props.continuation ? "" : props.message.sender.nick}
+            />
+          </box>
         </box>
         <box width={2} flexShrink={0} />
         <box flexGrow={1} minWidth={0} flexDirection="column">

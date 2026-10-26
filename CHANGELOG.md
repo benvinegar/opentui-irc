@@ -18,6 +18,7 @@
 
 - Calmer, keyboard-first layout: the top bar, per-network buttons, conversation toolbar, Send button and duplicate hint rows are gone. Secondary actions live in a `ctrl+k` palette; one footer shows contextual keys, status and a plaintext-connection warning.
 - Comfortable density, now the default for new profiles, puts a blank line above each new sender group; follow-up lines from the same sender stay together.
+- Clicking a message opens a small menu at the click instead of a full-screen dialog (copy, reply, react with a choice of emoji, open links, remove mine), with one-letter shortcuts. Clicking a nickname shows a WHOIS-backed person card with Message and Copy nickname.
 - Text that doesn't fit (sidebar names, nicknames, topics, member names, status messages) ends with a one-cell "…" instead of a mid-string "...", keeping more of the name visible.
 - Sidebar shows connection status dots, `#`/`@` prefixes and unread/mention badges; the header is one line with the topic and member count; wide windows show a sorted member panel.
 - Consecutive messages from one sender are grouped, day changes get separators, and the nickname gutter fits the visible nicknames.

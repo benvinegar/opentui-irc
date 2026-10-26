@@ -262,6 +262,63 @@ export function Dialog(props: {
     </box>
   );
 }
+/**
+ * A small menu or card anchored at a screen point (usually a click). It opens below the point
+ * and flips above or left near the edges; pressing anywhere outside closes it.
+ */
+export function Popover(props: {
+  anchor: { x: number; y: number };
+  width: number;
+  height: number;
+  screenWidth: number;
+  screenHeight: number;
+  title?: string;
+  onClose: () => void;
+  children: JSX.Element;
+}) {
+  const colors = usePalette();
+  const width = () => Math.min(props.width, props.screenWidth);
+  const height = () => Math.min(props.height, props.screenHeight - 1);
+  const left = () => Math.max(0, Math.min(props.anchor.x - 1, props.screenWidth - width()));
+  const top = () =>
+    props.anchor.y + 1 + height() <= props.screenHeight - 1
+      ? props.anchor.y + 1
+      : Math.max(0, props.anchor.y - height());
+  return (
+    <box
+      id="popover-backdrop"
+      position="absolute"
+      top={0}
+      left={0}
+      width={props.screenWidth}
+      height={props.screenHeight}
+      zIndex={20}
+      onMouseDown={(event) => {
+        event.stopPropagation();
+        props.onClose();
+      }}
+      onMouseScroll={(event) => event.stopPropagation()}
+    >
+      <box
+        id="popover"
+        position="absolute"
+        top={top()}
+        left={left()}
+        width={width()}
+        height={height()}
+        backgroundColor={colors.panel}
+        border
+        borderStyle="rounded"
+        borderColor={colors.accent}
+        {...(props.title ? { title: ` ${props.title} ` } : {})}
+        flexDirection="column"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        {props.children}
+      </box>
+    </box>
+  );
+}
 /** A navigable row: sidebar conversations and palette entries. */
 export function ListItem(props: {
   id: string;
