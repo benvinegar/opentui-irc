@@ -1012,7 +1012,10 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
             reject("rate-limited", "Channel member limit exceeded.");
           remaining.push({ ...member, prefixes: payload.change.prefixes });
         }
-        updateTimeline(c, { members: remaining });
+        const selfRemoved =
+          payload.change.kind === "remove" && same(networkId, payload.change.nick, network.nick);
+        // After our own PART/KICK the member list is stale; do not keep showing it.
+        updateTimeline(c, selfRemoved ? { members: [], typing: [] } : { members: remaining });
         if (same(networkId, payload.change.nick, network.nick)) {
           c.view = { ...c.view, joined: payload.change.kind !== "remove" };
           if (
@@ -1093,7 +1096,13 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         await updateSend(payload.operationId, payload.state, payload.error);
         break;
       case "error": {
-        if (!payload.operationId) attempt.error = payload.error;
+        // A rejected command (4xx) is not a connection failure: remembering it would suppress
+        // reconnection if the link later drops.
+        if (
+          !payload.operationId &&
+          !["invalid-input", "unsupported", "conflict"].includes(payload.error.code)
+        )
+          attempt.error = payload.error;
         report(payload.error, networkId);
         if (payload.operationId) {
           operation(payload.operationId, "failed", payload.error);
