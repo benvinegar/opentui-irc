@@ -10,6 +10,7 @@ import {
   type Accessor,
   type JSX,
 } from "solid-js";
+import { ellipsize } from "./transcript-style";
 
 const dark = {
   bg: "#161821",
@@ -312,13 +313,9 @@ export function ListItem(props: {
           {props.prefix}
         </text>
       </Show>
-      <text
-        flexGrow={1}
-        flexShrink={1}
-        flexBasis={0}
-        minWidth={0}
-        height={1}
-        wrapMode="none"
+      <FitText
+        text={props.label}
+        bold={!!(props.strong || props.alert || props.active)}
         fg={
           lit()
             ? colors.accent
@@ -328,9 +325,7 @@ export function ListItem(props: {
                 ? colors.text
                 : colors.muted
         }
-      >
-        {props.strong || props.alert || props.active ? <b>{props.label}</b> : props.label}
-      </text>
+      />
       <Show when={props.badge}>
         <text
           flexShrink={0}
@@ -369,6 +364,46 @@ export function Splitter(props: { id: string; active: boolean; onStart: () => vo
         props.onStart();
       }}
     />
+  );
+}
+/**
+ * One line of text that end-truncates with "…" (OpenTUI's own truncation spends three cells
+ * on "..." mid-string). Without `width` it fills the remaining row space and measures it.
+ */
+export function FitText(props: {
+  text: string;
+  id?: string;
+  width?: number;
+  fg?: string;
+  bold?: boolean;
+  textAlign?: "left" | "center" | "right";
+}) {
+  const [measured, setMeasured] = createSignal<number>();
+  const fitted = () => {
+    const width = props.width ?? measured();
+    return width === undefined ? props.text : ellipsize(props.text, width, Bun.stringWidth);
+  };
+  return (
+    // Text renderables do not report layout resizes; measure a wrapping box instead.
+    <box
+      ref={(element: Renderable) => {
+        element.onSizeChange = () => setMeasured(element.width);
+      }}
+      {...(props.width === undefined
+        ? { flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0 }
+        : { width: props.width, flexShrink: 0 })}
+      height={1}
+    >
+      <text
+        {...(props.id ? { id: props.id } : {})}
+        height={1}
+        wrapMode="none"
+        {...(props.fg ? { fg: props.fg } : {})}
+        {...(props.textAlign ? { textAlign: props.textAlign } : {})}
+      >
+        {props.bold ? <b>{fitted()}</b> : fitted()}
+      </text>
+    </box>
   );
 }
 /** Footer key legend: keys stand out, descriptions recede. */

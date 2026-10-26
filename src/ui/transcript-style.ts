@@ -45,6 +45,25 @@ export function formatMessageTime(timestamp: number): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
+const graphemes = new Intl.Segmenter();
+/** End-truncate to `width` cells with a single-cell "…", cutting only at grapheme boundaries. */
+export function ellipsize(
+  text: string,
+  width: number,
+  measure: (value: string) => number = (value) => [...value].length,
+): string {
+  if (measure(text) <= width) return text;
+  if (width <= 0) return "";
+  let fitted = "";
+  let used = 0;
+  for (const { segment } of graphemes.segment(text)) {
+    used += measure(segment);
+    if (used > width - 1) break;
+    fitted += segment;
+  }
+  return `${fitted.trimEnd()}…`;
+}
+
 /** Fixed across rows; reduce the gutter only when the conversation is narrow. */
 export function transcriptGutterWidth(conversationWidth: number, longestNick = Infinity): number {
   // Time (5) + space + nick + spacing; no wider than the longest visible nickname needs.

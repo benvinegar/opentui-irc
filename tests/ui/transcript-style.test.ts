@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   continuesGroup,
+  ellipsize,
   formatDay,
   formatMessageTime,
   nicknameColor,
@@ -79,5 +80,15 @@ describe("compact transcript styling", () => {
     expect(formatDay(now - 3_600_000, now)).toBe("Today");
     expect(formatDay(now - 86_400_000, now)).toBe("Yesterday");
     expect(formatDay(now - 5 * 86_400_000, now)).not.toBe("Yesterday");
+  });
+  it("end-truncates with a single-cell ellipsis at grapheme boundaries", () => {
+    expect(ellipsize("robert", 10)).toBe("robert");
+    expect(ellipsize("robert", 6)).toBe("robert");
+    expect(ellipsize("Synthetic Lab", 8)).toBe("Synthet…");
+    expect(ellipsize("one two three", 5)).toBe("one…");
+    const cells = (value: string) => value.replace(/\p{M}/gu, "").length;
+    expect(ellipsize("e\u0301e\u0301e\u0301", 2, cells)).toBe("e\u0301…");
+    expect(ellipsize("abc", 1)).toBe("…");
+    expect(ellipsize("abc", 0)).toBe("");
   });
 });

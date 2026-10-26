@@ -35,6 +35,7 @@ import {
   Dialog,
   Field,
   FocusContext,
+  FitText,
   KeyHints,
   ListItem,
   Splitter,
@@ -970,6 +971,7 @@ function Shell(props: UiOptions) {
       )
       .slice(0, 200),
   );
+  const headerName = () => active()?.name ?? "Welcome to OpenIRC";
   const typingLabel = () => {
     const ids = timeline()?.typing ?? [];
     const nicks = ids
@@ -1217,7 +1219,7 @@ function Shell(props: UiOptions) {
             scrollX={false}
           >
             <box height={2} flexShrink={0} paddingX={1}>
-              <text height={1} wrapMode="none" truncate fg={colors.accent}>
+              <text height={1} fg={colors.accent}>
                 <b>openirc</b>
               </text>
             </box>
@@ -1315,13 +1317,20 @@ function Shell(props: UiOptions) {
               border={["bottom"]}
               borderColor={colors.border}
             >
-              <text flexGrow={1} minWidth={0} height={1} wrapMode="none">
-                <b>
-                  <span style={{ fg: colors.text }}>{active()?.name ?? "Welcome to OpenIRC"}</span>
-                </b>
-                <span style={{ fg: colors.muted }}>
-                  {"  "}
-                  {active()?.kind === "direct"
+              <FitText
+                text={headerName()}
+                bold
+                fg={colors.text}
+                width={Math.min(
+                  Bun.stringWidth(headerName()),
+                  Math.max(8, dimensions().width - sidebarWidth() - 5),
+                )}
+              />
+              <box width={2} flexShrink={0} />
+              <FitText
+                fg={colors.muted}
+                text={
+                  active()?.kind === "direct"
                     ? "Nicknames can be reused. Verify accounts."
                     : active()?.kind === "status"
                       ? [
@@ -1336,9 +1345,9 @@ function Shell(props: UiOptions) {
                         ]
                           .filter(Boolean)
                           .join(" · ")
-                      : active()?.topic || ""}
-                </span>
-              </text>
+                      : active()?.topic || ""
+                }
+              />
               <Show
                 when={active()?.kind === "channel" && timeline()?.members.length && !showMembers()}
               >
@@ -1493,9 +1502,7 @@ function Shell(props: UiOptions) {
                   </box>
                   <Show when={timeline()?.typing.length}>
                     <box height={1} flexShrink={0} paddingX={2}>
-                      <text height={1} wrapMode="none" fg={colors.muted}>
-                        {typingLabel()}
-                      </text>
+                      <FitText text={typingLabel()} fg={colors.muted} />
                     </box>
                   </Show>
                   <Show when={reply()}>
@@ -1571,16 +1578,12 @@ function Shell(props: UiOptions) {
                     </text>
                     <For each={sortedMembers()}>
                       {(member) => (
-                        <text
-                          height={1}
-                          flexShrink={0}
-                          wrapMode="none"
-                          truncate
-                          fg={member.away ? colors.muted : nicknameColor(member.nick, theme())}
-                        >
-                          {member.prefixes[0] ?? " "}
-                          {member.nick}
-                        </text>
+                        <box height={1} flexShrink={0} flexDirection="row">
+                          <FitText
+                            text={`${member.prefixes[0] ?? " "}${member.nick}`}
+                            fg={member.away ? colors.muted : nicknameColor(member.nick, theme())}
+                          />
+                        </box>
                       )}
                     </For>
                   </scrollbox>
@@ -1612,9 +1615,9 @@ function Shell(props: UiOptions) {
                 />
               }
             >
-              <text height={1} wrapMode="none" fg={colors.error}>
-                {footerMessage()}
-              </text>
+              <box height={1} flexDirection="row">
+                <FitText text={footerMessage() ?? ""} fg={colors.error} />
+              </box>
             </Show>
           </box>
           <Show when={!atBottom() || timeline()?.atLatest === false}>
@@ -1694,9 +1697,7 @@ function Shell(props: UiOptions) {
                         <text width={12} flexShrink={0} fg={colors.text}>
                           {key}
                         </text>
-                        <text fg={colors.muted} wrapMode="none" truncate>
-                          {description}
-                        </text>
+                        <FitText text={description} fg={colors.muted} />
                       </box>
                     )}
                   </For>

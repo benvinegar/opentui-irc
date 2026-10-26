@@ -1,6 +1,6 @@
 import { Show, useContext } from "solid-js";
 import type { Message } from "../contracts/model";
-import { ThemeContext, usePalette } from "./primitives";
+import { FitText, ThemeContext, usePalette } from "./primitives";
 import { formatMessageTime, nicknameColor } from "./transcript-style";
 
 export function MessageRow(props: {
@@ -30,9 +30,7 @@ export function MessageRow(props: {
       <Show when={props.dayLabel}>
         <box flexDirection="row" height={1} flexShrink={0}>
           <box width={props.gutterWidth + 2} flexShrink={0} />
-          <text fg={colors.muted} wrapMode="none" truncate>
-            {props.dayLabel}
-          </text>
+          <FitText text={props.dayLabel ?? ""} fg={colors.muted} />
         </box>
       </Show>
       <Show when={props.firstUnread}>
@@ -49,21 +47,18 @@ export function MessageRow(props: {
               : formatMessageTime(props.message.serverTime ?? props.message.receivedAt)}
           </text>
           <box width={1} flexShrink={0} />
-          <text
+          <FitText
             id={`nick-${props.message.id}`}
             width={Math.max(1, props.gutterWidth - 7)}
-            height={1}
-            wrapMode="none"
-            truncate
             textAlign="right"
+            bold
             fg={
               props.message.kind === "event"
                 ? colors.muted
                 : nicknameColor(props.message.sender.nick, theme())
             }
-          >
-            {props.continuation ? "" : <b>{props.message.sender.nick}</b>}
-          </text>
+            text={props.continuation ? "" : props.message.sender.nick}
+          />
         </box>
         <box width={2} flexShrink={0} />
         <box flexGrow={1} minWidth={0} flexDirection="column">

@@ -141,6 +141,30 @@ describe("real Solid/OpenTUI shell", () => {
     await view.renderOnce();
     expect([row("grouped-0"), row("grouped-1")]).toEqual([1, 1]);
   });
+  test("long names end-truncate with a single-cell ellipsis", async () => {
+    const { fake, view } = await mount();
+    const model = fake.timelines.get(conversationId)!;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: [{ ...welcomeMessage, sender: { nick: "averyveryverylongnickname" } }],
+    });
+    await view.renderOnce();
+    await view.renderOnce();
+    const frame = view.captureCharFrame();
+    expect(frame).toMatch(/averyveryverylon…/u);
+    expect(frame).not.toContain("...");
+    const document = fake.settings.getSnapshot()!;
+    fake.settings.publish({ ...document, tui: { ...document.tui, sidebarWidth: 12 } });
+    view.resize(60, 24);
+    await view.renderOnce();
+    await view.renderOnce();
+    const sidebar = view.renderer.root.findDescendantById("sidebar")!;
+    const rows = view
+      .captureCharFrame()
+      .split("\n")
+      .map((line) => line.slice(sidebar.x, sidebar.x + sidebar.width));
+    expect(rows.some((row) => row.includes("…"))).toBe(true);
+  });
   test("ctrl+k filters conversations and actions and Enter runs the highlighted entry", async () => {
     const { view } = await mount();
     view.mockInput.pressKey("k", { ctrl: true });
