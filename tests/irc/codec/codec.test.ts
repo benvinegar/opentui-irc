@@ -45,6 +45,23 @@ describe("IRC codec", () => {
     expect(result.ok && result.value[1]?.command).toBe("799");
   });
   test.each([
+    ["PRIVMSG #c :hi", { command: "PRIVMSG", params: ["#c", "hi"] }],
+    [":n!u@h  PRIVMSG   #c   :two  spaces ", { prefix: "n!u@h", params: ["#c", "two  spaces "] }],
+    [":n!u@h PRIVMSG #c word", { params: ["#c", "word"] }],
+    [":n!u@h PRIVMSG #c :", { params: ["#c", ""] }],
+    [":n!u@h PRIVMSG #c ::colon", { params: ["#c", ":colon"] }],
+    [":n!u@h PRIVMSG #c a:b :c", { params: ["#c", "a:b", "c"] }],
+    ["privmsg #c :lower", { command: "PRIVMSG" }],
+    ["PING", { command: "PING", params: [] }],
+    ["@a=b;a=c PING x", { tags: { a: "c" } }],
+    ["@a=x\\ PING x", { tags: { a: "x" } }],
+    ["@+draft/react=👍;+reply=abc TAGMSG #c", { tags: { "+draft/react": "👍", "+reply": "abc" } }],
+    [":s 005 me A B C D E F G H I J K L M :end", { params: ["me", ..."ABCDEFGHIJKLM", "end"] }],
+  ])("parses %j", (line, expected) => {
+    const result = createIrcCodec(limits).push(bytes(`${line}\r\n`));
+    expect(result.ok && result.value[0]).toMatchObject(expected);
+  });
+  test.each([
     "PING x\n",
     "PING x\rZ",
     "PING \0\r\n",

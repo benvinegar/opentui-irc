@@ -36,6 +36,12 @@
 
 - The server's message of the day and user counts now show their text instead of "IRC server response 372.".
 - Releasing a dialog press or divider drag no longer opens the message underneath.
+- A rejected or temporarily unavailable nickname (432/437) during sign-in now tries your alternate nicknames, and running out of nicknames stops with a clear error instead of hanging until the registration timeout.
+- Server notices without a sender (`NOTICE AUTH`) no longer drop the connection, and notices from the server itself appear as status text instead of a conversation with the server.
+- `/me` actions without a closing marker, empty actions and messages with stray control characters are shown instead of silently dropped. CTCP requests are still never answered, but now appear as a status notice.
+- Messages sent only to channel operators or voiced users (`@#channel`) appear in that channel.
+- Messages to a nickname that is not online now say so (401) instead of failing silently; more server rejections have readable explanations, and WARN/NOTE standard replies are shown.
+- Joining a channel no longer adds "IRC server response 333."-style lines for topic setter, creation time and channel modes; login and displayed-host replies read as sentences.
 
 - Page Up/Down now scroll the active dialog instead of leaving long help/settings content unreachable from the keyboard.
 - Keyboard focus stays visible when tabbing through long forms or resizing short dialogs.

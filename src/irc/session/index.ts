@@ -50,7 +50,15 @@ const READABLE_NUMERICS = new Set([
   "372",
   "375",
   "376",
+  "396",
+  "900",
+  "901",
 ]);
+
+// Machine-oriented replies (server info, channel modes/creation, topic setter/URL) with no prose for people.
+const QUIET_NUMERICS = new Set(["004", "042", "324", "328", "329", "333"]);
+// Prose whose leading parameters only repeat our own identity.
+const TRAILING_NUMERICS = new Set(["900", "901"]);
 
 export interface SessionPolicy extends ModernPolicy {
   readonly connectTimeoutMs: number;
@@ -250,6 +258,8 @@ class Attempt {
     channelModeGroups: ["b", "k", "l", "imnpst"],
     capabilities: {},
   };
+  /** ISUPPORT STATUSMSG: member prefixes that may address part of a channel (`@#room`). */
+  private statusPrefixes = "";
   private whois: Whois | undefined;
   private directory: Directory | undefined;
   private lastReceived: number;
@@ -767,13 +777,26 @@ class Attempt {
       case "005":
         this.isupport(p.slice(1, -1));
         return;
+      case "432":
       case "433":
       case "436":
-        if (!this.ready && this.alternate < this.profile.identity.alternateNicks.length) {
+      case "437":
+        if (this.ready) {
+          // 437 also covers temporarily unavailable channels; only nickname replies are conflicts.
+          if (input.command === "432" || (input.command === "437" && !this.isChannel(p[1] ?? "")))
+            break;
+          this.emit({ type: "error", error: problem("conflict", "Nickname is unavailable.") });
+        } else if (this.alternate < this.profile.identity.alternateNicks.length) {
           this.nick = this.profile.identity.alternateNicks[this.alternate++]!;
           await this.control("NICK", [this.nick]);
           this.state(this.phase);
-        } else this.emit({ type: "error", error: problem("conflict", "Nickname is unavailable.") });
+        } else
+          this.stop(
+            problem(
+              "conflict",
+              "Every configured nickname was rejected or is in use; add an alternate nickname.",
+            ),
+          );
         return;
       case "421":
         if (!this.ready && p[1]?.toUpperCase() === "CAP") await this.endCap();
@@ -786,9 +809,23 @@ class Attempt {
       case "ERROR":
         this.stop(problem("network", "Server terminated the IRC connection."));
         return;
-      case "PRIVMSG":
       case "NOTICE":
+        // No prefix means the server itself; nicknames cannot contain dots, server names do.
+        if (!input.prefix || (!input.prefix.includes("!") && sender.includes("."))) {
+          const text = plain(p[1] ?? "").trim();
+          if (text) this.emit({ type: "notice", text });
+          return;
+        }
         this.chat(input, sender);
+        return;
+      case "PRIVMSG":
+        this.chat(input, sender);
+        return;
+      // IRCv3 standard replies; FAIL is handled with labeled requests.
+      case "WARN":
+      case "NOTE":
+        if (p.length >= 3 && plain(p.at(-1)!).trim())
+          this.emit({ type: "notice", text: plain(p.at(-1)!).trim() });
         return;
       case "JOIN":
         if (p[0] && atom(sender)) {
@@ -877,20 +914,29 @@ class Attempt {
       case "330":
       case "318":
       case "401":
-        this.whoisReply(input.command, p);
-        return;
+        // 401 also answers messages to absent nicknames; report those as ordinary rejections.
+        if (this.whoisReply(input.command, p) || input.command !== "401") return;
+        break;
     }
     const rejection: Readonly<Record<string, string>> = {
+      "401": "No such nickname or channel.",
+      "402": "No such server.",
       "403": "The channel does not exist.",
       "404": "You cannot send to this channel.",
       "405": "You have joined too many channels.",
+      "406": "There was no such nickname.",
+      "411": "No recipient was given.",
+      "412": "No text to send.",
       "432": "The nickname is invalid.",
+      "437": "The channel is temporarily unavailable.",
       "442": "You are not joined to this channel.",
       "471": "The channel is full.",
       "473": "The channel requires an invitation.",
       "474": "You are banned from this channel.",
       "475": "A valid channel key is required.",
+      "476": "The channel name is invalid.",
       "477": "The channel requires an authenticated account.",
+      "481": "You need IRC operator privileges.",
       "482": "You do not have permission to change this channel.",
     };
     if (/^[45][0-9]{2}$/.test(input.command))
@@ -903,9 +949,10 @@ class Attempt {
       });
     else if (READABLE_NUMERICS.has(input.command)) {
       // Welcome, user counts and MOTD are prose meant for people; show it instead of a code.
-      const text = plain(p.slice(1).join(" ")).replace(/^- ?/u, "").trimEnd();
+      const prose = TRAILING_NUMERICS.has(input.command) ? (p.at(-1) ?? "") : p.slice(1).join(" ");
+      const text = plain(prose).replace(/^- ?/u, "").trimEnd();
       if (text.trim()) this.emit({ type: "notice", text });
-    } else if (/^[0-9]{3}$/.test(input.command))
+    } else if (/^[0-9]{3}$/.test(input.command) && !QUIET_NUMERICS.has(input.command))
       this.emit({ type: "notice", text: `IRC server response ${input.command}.` });
   }
   private isupport(tokens: readonly string[]) {
@@ -928,10 +975,17 @@ class Attempt {
       } else if (name === "CHANTYPES" && value && /^[^\s\x00-\x1f,]+$/.test(value))
         support = { ...support, channelTypes: plain(value) };
       else if (name === "PREFIX") {
-        const match = /^\(([a-zA-Z]+)\)([^\s]+)$/.exec(value);
-        if (match && match[1]!.length === match[2]!.length)
-          support = { ...support, prefixModes: match[1]!, prefixSymbols: plain(match[2]!) };
-      } else if (name === "CHANMODES") {
+        // An explicitly empty PREFIX means the network has no member prefixes at all.
+        const match = /^(?:\(([a-zA-Z]+)\)([^\s]+))?$/.exec(value);
+        if (match && (match[1] ?? "").length === (match[2] ?? "").length)
+          support = {
+            ...support,
+            prefixModes: match[1] ?? "",
+            prefixSymbols: plain(match[2] ?? ""),
+          };
+      } else if (name === "STATUSMSG" && /^[^\s\x00-\x1f,#&]*$/.test(value))
+        this.statusPrefixes = value;
+      else if (name === "CHANMODES") {
         const groups = value.split(",");
         if (groups.length === 4 && groups.every((group) => /^[a-zA-Z]*$/.test(group)))
           support = {
@@ -943,19 +997,40 @@ class Attempt {
     this.support = support;
     this.publishSupport();
   }
+  private isChannel(name: string) {
+    return name.length > 0 && this.support.channelTypes.includes(name[0]!);
+  }
   private chat(input: IrcFrame, sender: string) {
-    const [target, body] = input.params;
+    let [target, body] = input.params;
     if (!target || body === undefined) return;
     if (!atom(target) || !atom(sender)) {
       this.stop(problem("network", "Malformed IRC chat envelope."));
       return;
     }
+    // STATUSMSG (`@#room`) reaches a subset of the channel; it still belongs in the channel.
+    if (this.statusPrefixes.includes(target[0]!) && this.isChannel(target.slice(1)))
+      target = target.slice(1);
     let text = body;
     let kind: ChatEnvelope["kind"] = input.command === "NOTICE" ? "notice" : "text";
-    if (body.startsWith("\x01ACTION ") && body.endsWith("\x01")) {
-      kind = "action";
-      text = body.slice(8, -1);
-    } else if (body.includes("\x01")) return; // No CTCP execution or automatic privacy-leaking replies.
+    if (body.startsWith("\x01")) {
+      // The closing \x01 is optional in practice. No CTCP is executed or answered: replies leak privacy.
+      const [command = "", ...rest] = body.slice(1).replace(/\x01$/u, "").split(" ");
+      const name = plain(command).toUpperCase().slice(0, 32);
+      if (name === "ACTION") {
+        kind = "action";
+        text = rest.join(" ");
+      } else {
+        if (name)
+          this.emit({
+            type: "notice",
+            text:
+              input.command === "NOTICE"
+                ? `${plain(sender)} sent a CTCP ${name} reply.`
+                : `${plain(sender)} sent a CTCP ${name} request; OpenIRC does not answer CTCP requests.`,
+          });
+        return;
+      }
+    }
     const serverTime = input.tags.time ? Date.parse(input.tags.time) : NaN;
     this.modern.observeChat(input, sender, target);
     const label = this.modern.playback(input) ? undefined : this.modern.label(input);
@@ -1166,16 +1241,17 @@ class Attempt {
       item: { channel: plain(p[1]), userCount: count, topic: plain(p[3] ?? "") },
     });
   }
-  private whoisReply(command: string, p: readonly string[]) {
+  /** Returns false when the reply does not belong to the pending WHOIS. */
+  private whoisReply(command: string, p: readonly string[]): boolean {
     const query = this.whois;
-    if (!query || !p[1] || this.fold(query.nick) !== this.fold(p[1])) return;
+    if (!query || !p[1] || this.fold(query.nick) !== this.fold(p[1])) return false;
     if (command === "318") {
       if (!query.expired)
         this.emit({ type: "user-details", operationId: query.operationId, details: query.details });
       this.whois = undefined;
-      return;
+      return true;
     }
-    if (query.expired) return;
+    if (query.expired) return true;
     if (command === "401") {
       query.expired = true;
       this.emit({
@@ -1183,7 +1259,7 @@ class Attempt {
         operationId: query.operationId,
         error: problem("unavailable", "IRC user was not found."),
       });
-      return;
+      return true;
     }
     if (command === "311")
       query.details = {
@@ -1208,6 +1284,7 @@ class Attempt {
     }
     if (command === "301") query.details = { ...query.details, awayReason: plain(p[2] ?? "") };
     if (command === "330") query.details = { ...query.details, account: plain(p[2] ?? "") };
+    return true;
   }
   private async execute(
     command: SessionCommand,

@@ -19,6 +19,7 @@ const sessions = createSessionFactory({ transport, secrets, clock });
 - ISUPPORT casemapping/prefix/channel modes, JOIN/PART/QUIT/NICK/KICK, NAMES reconciliation with live deltas, privilege modes, topics, accounts, away state, channel/DM chat, NOTICE and CTCP ACTION.
 - Bounded paced outgoing queue, UTF-8 splitting and deliberate LF-only multiline/paste fallback, written/failed/uncertain states; reliable echo only with ACKed message-tags + batch + labeled-response + echo-message. No text-equality matching. A split logical echo is aggregated without inventing one fragment's server ID.
 - Serialized WHOIS and LIST with typed results, timeout quarantine and explicit directory limit errors.
+- Server notices (no prefix or a dotted server source), WARN/NOTE, CTCP requests (shown, never answered), STATUSMSG targets, 432/437 alternate-nickname fallback and readable 4xx rejections. Machine-oriented informational numerics stay quiet. Behavior cases are tracked against WeeChat's suite in [`docs/IRC_TEST_MATRIX.md`](../../docs/IRC_TEST_MATRIX.md).
 - Single-consumer bounded event stream with contiguous sequence numbers and reserved terminal overflow outcomes. Abort/close terminate all sleeps/queries and transport. Close sends bounded best-effort QUIT.
 
 ## Pinned modern wire protocol
