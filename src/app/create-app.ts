@@ -1096,13 +1096,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         await updateSend(payload.operationId, payload.state, payload.error);
         break;
       case "error": {
-        // A rejected command (4xx) is not a connection failure: remembering it would suppress
-        // reconnection if the link later drops.
-        if (
-          !payload.operationId &&
-          !["invalid-input", "unsupported", "conflict"].includes(payload.error.code)
-        )
-          attempt.error = payload.error;
+        if (!payload.operationId) attempt.error = payload.error;
         report(payload.error, networkId);
         if (payload.operationId) {
           operation(payload.operationId, "failed", payload.error);

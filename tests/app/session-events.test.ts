@@ -209,11 +209,17 @@ describe("session events: notices and errors", () => {
     expect(h.statusText()).toContain("No such nick/channel");
     expect(h.app.state.getSnapshot().networks[0]?.lastError?.message).toBe("No such nick/channel");
   });
-  it("a rejected command (4xx) does not suppress reconnecting when the link later drops", async () => {
+  // The session reports server rejections as "unavailable" and always ends a dropped link
+  // with a "network" error, so the error just before disconnecting decides whether to retry.
+  it("a rejected command followed by a dropped link still reconnects", async () => {
     const h = await connected();
     await h.emit({
       type: "error",
-      error: { code: "invalid-input", message: "No such nick/channel", retryable: false },
+      error: { code: "unavailable", message: "No such nickname or channel.", retryable: true },
+    });
+    await h.emit({
+      type: "error",
+      error: { code: "network", message: "Server closed the connection.", retryable: true },
     });
     await h.session.close();
     await settle();
@@ -221,6 +227,23 @@ describe("session events: notices and errors", () => {
     h.advance(60000);
     await settle();
     expect(h.sessions).toHaveLength(2);
+  });
+  it("a terminal nickname conflict stops instead of retrying forever", async () => {
+    const h = await connected();
+    await h.emit({
+      type: "error",
+      error: {
+        code: "conflict",
+        message: "Every configured nickname was rejected.",
+        retryable: false,
+      },
+    });
+    await h.session.close();
+    await settle();
+    h.advance(60000);
+    await settle();
+    expect(h.sessions).toHaveLength(1);
+    expect(h.app.state.getSnapshot().networks[0]?.phase).toBe("disconnected");
   });
   it("an authentication error still stops reconnecting", async () => {
     const h = await connected();
