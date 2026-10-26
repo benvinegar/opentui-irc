@@ -262,6 +262,8 @@ describe("pure configuration plans", () => {
     reject({ section: "tui", patch: { sidebarWidth: 11 } });
     reject({ section: "tui", patch: { memberListWidth: 61 } });
     reject({ section: "tui", patch: { memberListWidth: 11 } });
+    reject({ section: "tui", patch: { authorColumnWidth: 7 } });
+    reject({ section: "tui", patch: { authorColumnWidth: 41 } });
   });
   it("validates foreign keys and cross-field uniqueness using the storage validator", () => {
     reject({ section: "user", patch: { networks: [profile, profile] } });
@@ -429,6 +431,7 @@ describe("effect and permission planning", () => {
         showHistServ: true,
         sidebarWidth: 32,
         memberListWidth: 30,
+        authorColumnWidth: 14,
         mouse: false,
       },
     });
@@ -439,6 +442,7 @@ describe("effect and permission planning", () => {
       ["tui.showHistServ", "immediate"],
       ["tui.sidebarWidth", "immediate"],
       ["tui.memberListWidth", "immediate"],
+      ["tui.authorColumnWidth", "immediate"],
       ["tui.mouse", "restart"],
     ]);
     expect(result.requiredPermissions).toEqual(["configure"]);

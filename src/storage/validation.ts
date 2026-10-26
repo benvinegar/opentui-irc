@@ -187,6 +187,7 @@ export function validTuiSettings(value: unknown): value is TuiSettings {
       "showHistServ",
       "sidebarWidth",
       "memberListWidth",
+      "authorColumnWidth",
       "keybindings",
     ]) ||
     value.schemaVersion !== 1 ||
@@ -197,6 +198,7 @@ export function validTuiSettings(value: unknown): value is TuiSettings {
     typeof value.showHistServ !== "boolean" ||
     !integer(value.sidebarWidth, 12, 80) ||
     !integer(value.memberListWidth, 12, 60) ||
+    !(value.authorColumnWidth === null || integer(value.authorColumnWidth, 8, 40)) ||
     !record(value.keybindings) ||
     Object.keys(value.keybindings).length > 200
   )

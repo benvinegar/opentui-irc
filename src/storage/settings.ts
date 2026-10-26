@@ -38,6 +38,7 @@ export function defaultTuiSettings(): TuiSettings {
     showHistServ: false,
     sidebarWidth: 24,
     memberListWidth: 22,
+    authorColumnWidth: null,
     keybindings: {},
   };
 }
@@ -100,6 +101,7 @@ function document(sources: Sources): SettingsDocument {
         ...storedTui,
         ...("showHistServ" in storedTui ? {} : { showHistServ: false }),
         ...("memberListWidth" in storedTui ? {} : { memberListWidth: 22 }),
+        ...("authorColumnWidth" in storedTui ? {} : { authorColumnWidth: null }),
       }
     : storedTui;
   if (!validUserSettings(user) || !validTuiSettings(tui))

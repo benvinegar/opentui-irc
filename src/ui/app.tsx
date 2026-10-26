@@ -246,7 +246,11 @@ function Shell(props: UiOptions) {
     }
   };
   // Live widths while a divider is dragged; persisted to tui settings on release.
-  const [dragWidths, setDragWidths] = createSignal<{ sidebar?: number; members?: number }>({});
+  const [dragWidths, setDragWidths] = createSignal<{
+    sidebar?: number;
+    members?: number;
+    author?: number;
+  }>({});
   const sidebarWidth = createMemo(() => {
     const dragged = dragWidths().sidebar;
     const preferred = dragged ?? settings()?.tui.sidebarWidth ?? 26;
@@ -272,7 +276,9 @@ function Shell(props: UiOptions) {
       ),
     ),
   );
-  const [resizing, setResizing] = createSignal<"sidebar" | "members">();
+  const [resizing, setResizing] = createSignal<"sidebar" | "members" | "author">();
+  const [railHot, setRailHot] = createSignal(false);
+  let transcriptFrame: Renderable | undefined;
   const followResize = (x: number) => {
     const target = resizing();
     if (target === "sidebar")
@@ -282,6 +288,11 @@ function Shell(props: UiOptions) {
         ...widths,
         members: Math.min(60, Math.max(12, dimensions().width - x - 1)),
       }));
+    else if (target === "author" && transcriptFrame)
+      setDragWidths((widths) => ({
+        ...widths,
+        author: Math.min(40, Math.max(8, x - transcriptFrame!.x)),
+      }));
   };
   const finishResize = () => {
     const target = resizing();
@@ -289,9 +300,13 @@ function Shell(props: UiOptions) {
     ignoreClicksUntil = Date.now() + 300;
     setResizing(undefined);
     if (target === "sidebar") void saveWidth("sidebarWidth", sidebarWidth());
-    else void saveWidth("memberListWidth", memberWidth());
+    else if (target === "members") void saveWidth("memberListWidth", memberWidth());
+    else void saveWidth("authorColumnWidth", gutterWidth());
   };
-  const saveWidth = async (key: "sidebarWidth" | "memberListWidth", value: number) => {
+  const saveWidth = async (
+    key: "sidebarWidth" | "memberListWidth" | "authorColumnWidth",
+    value: number,
+  ) => {
     const document = settings();
     if (!document || document.tui[key] === value) {
       setDragWidths({});
@@ -305,12 +320,17 @@ function Shell(props: UiOptions) {
     if (!result.ok) setStatus(result.error.message);
     setDragWidths({});
   };
-  const gutterWidth = createMemo(() =>
-    transcriptGutterWidth(
-      dimensions().width - sidebarWidth(),
+  const gutterWidth = createMemo(() => {
+    const available = dimensions().width - sidebarWidth();
+    const chosen = dragWidths().author ?? settings()?.tui.authorColumnWidth;
+    // A dragged or saved width wins, but never takes more than half the conversation.
+    if (chosen !== undefined && chosen !== null)
+      return Math.max(8, Math.min(chosen, Math.floor(available / 2)));
+    return transcriptGutterWidth(
+      available,
       Math.max(0, ...visibleMessages().map((message) => Bun.stringWidth(message.sender.nick))),
-    ),
-  );
+    );
+  });
   const composerRows = createMemo(() =>
     Math.min(3, 1 + (timeline()?.draft.match(/\n/g)?.length ?? 0)),
   );
@@ -1370,7 +1390,13 @@ function Shell(props: UiOptions) {
             >
               <box flexDirection="row" flexGrow={1} minHeight={0}>
                 <box flexGrow={1} minWidth={0} flexDirection="column">
-                  <box id="transcript-frame" flexGrow={1} minHeight={0} flexDirection="column">
+                  <box
+                    id="transcript-frame"
+                    ref={(element) => (transcriptFrame = element)}
+                    flexGrow={1}
+                    minHeight={0}
+                    flexDirection="column"
+                  >
                     <scrollbox
                       id="transcript"
                       ref={(element) => (transcript = element)}
@@ -1452,8 +1478,17 @@ function Shell(props: UiOptions) {
                       width={1}
                       height="100%"
                       border={["left"]}
-                      borderColor={colors.border}
+                      borderColor={
+                        railHot() || resizing() === "author" ? colors.accent : colors.border
+                      }
                       zIndex={1}
+                      onMouseOver={() => setRailHot(true)}
+                      onMouseOut={() => setRailHot(false)}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        setRailHot(false);
+                        setResizing("author");
+                      }}
                     />
                   </box>
                   <Show when={timeline()?.typing.length}>

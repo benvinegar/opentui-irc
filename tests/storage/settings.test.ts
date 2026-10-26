@@ -61,12 +61,17 @@ describe("JSONC settings", () => {
 
   test("legacy tui files get the default member panel width without startup rewrites", async () => {
     const { directory, repository } = await setup();
-    const { memberListWidth: _newField, ...legacy } = defaultTuiSettings();
+    const {
+      memberListWidth: _newField,
+      authorColumnWidth: _author,
+      ...legacy
+    } = defaultTuiSettings();
     const path = join(directory, "tui.jsonc");
     const original = JSON.stringify(legacy, null, 2);
     await writeFile(path, original);
     const loaded = value(await repository.load(signal));
     expect(loaded.tui.memberListWidth).toBe(22);
+    expect(loaded.tui.authorColumnWidth).toBeNull();
     expect(await readFile(path, "utf8")).toBe(original);
     await writeFile(path, JSON.stringify({ ...legacy, memberListWidth: 4 }));
     expect((await repository.load(signal)).ok).toBe(false);

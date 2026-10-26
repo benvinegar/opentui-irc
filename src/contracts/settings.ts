@@ -59,6 +59,8 @@ export interface TuiSettings {
   readonly sidebarWidth: number;
   /** Live member panel width in terminal cells. Older files default to 22. */
   readonly memberListWidth: number;
+  /** Transcript time/author column width in cells; null fits the longest visible nickname. */
+  readonly authorColumnWidth: number | null;
   readonly keybindings: Readonly<Record<string, readonly string[]>>;
 }
 

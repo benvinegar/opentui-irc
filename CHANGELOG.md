@@ -21,7 +21,7 @@
 - Consecutive messages from one sender are grouped, day changes get separators, and the nickname gutter fits the visible nicknames.
 - Dialogs are rounded and titled, list their actions compactly, support ↑/↓ navigation and focus their primary action; help is a key/command table; search results show conversation and time.
 - The first-run screen is shorter and leads with "Set up a network".
-- Sidebar and member list widths can be dragged with the mouse and are saved (`tui.sidebarWidth`, new `tui.memberListWidth`).
+- Sidebar, member list and transcript author column widths can be dragged with the mouse and are saved (`tui.sidebarWidth`, new `tui.memberListWidth` and `tui.authorColumnWidth`; a null author width fits the longest visible nickname).
 
 - HistServ messages are hidden by default, with a persistent Show/Hide toggle. History, search and authorized control reads retain them; ordinary notices and connection errors stay visible.
 

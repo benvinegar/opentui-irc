@@ -159,7 +159,7 @@ describe("real Solid/OpenTUI shell", () => {
     await tick();
     expect(view.renderer.currentFocusedRenderable?.id).toBe("copy-message");
   });
-  test("dragging column dividers resizes and persists sidebar and member widths", async () => {
+  test("dragging column dividers resizes and persists sidebar, member and author widths", async () => {
     const { fake, view } = await mount();
     view.resize(150, 36);
     const document = fake.settings.getSnapshot()!;
@@ -180,6 +180,17 @@ describe("real Solid/OpenTUI shell", () => {
     await view.renderOnce();
     expect(fake.settings.getSnapshot()?.tui.memberListWidth).toBe(28);
     expect(view.renderer.root.findDescendantById("members")?.width).toBe(28);
+    expect(view.renderer.root.findDescendantById("modal-backdrop")).toBeUndefined();
+    const rail = view.renderer.root.findDescendantById("transcript-divider")!;
+    const frame = view.renderer.root.findDescendantById("transcript-frame")!;
+    const before = rail.x - frame.x;
+    await view.mockMouse.drag(rail.x, 10, rail.x + 7, 10);
+    await tick();
+    await view.renderOnce();
+    expect(fake.settings.getSnapshot()?.tui.authorColumnWidth).toBe(before + 7);
+    expect(view.renderer.root.findDescendantById("transcript-divider")?.x).toBe(
+      frame.x + before + 7,
+    );
     expect(view.renderer.root.findDescendantById("modal-backdrop")).toBeUndefined();
   });
   test("a service-only window explains that older chat may still exist", async () => {

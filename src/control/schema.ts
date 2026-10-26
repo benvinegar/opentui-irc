@@ -290,6 +290,11 @@ export function configurationSchema(): JsonObject {
         { type: "integer", minimum: 12, maximum: 60, default: tui.memberListWidth },
         immediate,
       ),
+      authorColumnWidth: field(
+        "Transcript time/author column width in terminal cells, or null to fit the longest visible nickname; also adjustable by dragging the transcript divider.",
+        { type: ["integer", "null"], minimum: 8, maximum: 40, default: tui.authorColumnWidth },
+        immediate,
+      ),
       keybindings: field(
         "Reserved; UI does not implement custom shortcuts. Changed nonempty maps are rejected as unsupported; unchanged legacy maps are preserved. Empty maps may be stored but do not rebind the UI. Shortcuts must be globally unique ignoring case.",
         {

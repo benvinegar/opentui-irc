@@ -18,7 +18,7 @@ The shell is deliberately quiet: a sidebar (network status dot, `#` channels, `@
 
 Secondary actions are not permanent buttons. `ctrl+k` (or `ctrl+p`) opens a filterable palette of conversations and actions: join, message someone, search, select a message, load older, mute/leave, HistServ visibility, connect/disconnect, browse channels, WHOIS, add network, settings, help and quit. ↑/↓ move through the palette and other dialog lists; Enter runs the highlighted entry.
 
-The sidebar and member panel (shown from 90 main-area columns) are separated by one-cell dividers. Dragging a divider resizes live and saves `tui.sidebarWidth` / `tui.memberListWidth` on release; both stay configurable through the control API. Small terminals temporarily shrink the saved sidebar width.
+The sidebar and member panel (shown from 90 main-area columns) are separated by one-cell dividers. Dragging a divider resizes live and saves `tui.sidebarWidth` / `tui.memberListWidth` on release; both stay configurable through the control API. The transcript's time/author rail drags the same way and saves `tui.authorColumnWidth`; null (the default) fits the longest visible nickname. Small terminals temporarily shrink the saved sidebar width.
 
 ## Transcript layout
 
