@@ -760,7 +760,9 @@ class Attempt {
         await this.saslFailed();
         return;
       case "001":
-        if (!this.capEnded && !this.profile.sasl && !this.saslStarted) await this.endCap();
+        // Optional SASL must not turn a server that registers us without CAP into a failure.
+        if (!this.capEnded && !this.profile.sasl?.required && !this.saslStarted)
+          await this.endCap();
         if (!this.capEnded || (this.profile.sasl?.required && !this.authenticated)) {
           this.stop(
             problem(

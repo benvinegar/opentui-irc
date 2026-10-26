@@ -2,7 +2,7 @@
 import { entityId } from "../../../src/contracts/common";
 import type { Clock, Result } from "../../../src/contracts/common";
 import type { IrcFrame } from "../../../src/contracts/protocol";
-import type { SessionEvent } from "../../../src/contracts/session";
+import type { SessionEvent, SessionPayload } from "../../../src/contracts/session";
 import type { NetworkProfile, SecretProvider } from "../../../src/contracts/settings";
 import type { ByteConnection } from "../../../src/contracts/transport";
 import { createIrcCodec } from "../../../src/irc/codec";
@@ -65,6 +65,7 @@ export async function harness(
   options: {
     capabilities?: string;
     sasl?: NetworkProfile["sasl"];
+    serverPassword?: NetworkProfile["serverPassword"];
     tls?: boolean;
     secretProvider?: SecretProvider;
     policy?: Partial<SessionPolicy>;
@@ -144,6 +145,7 @@ export async function harness(
         tls: options.tls ?? endpoint.tls,
       })),
       ...(options.sasl ? { sasl: options.sasl } : {}),
+      ...(options.serverPassword ? { serverPassword: options.serverPassword } : {}),
     },
     { networkId, generation: 7 },
     parent.signal,
@@ -164,3 +166,29 @@ export async function harness(
 }
 export const hasReady = (events: SessionEvent[]) =>
   events.some((event) => event.payload.type === "state" && event.payload.phase === "ready");
+export type Fixture = Awaited<ReturnType<typeof harness>>;
+let syncs = 0;
+/** Lines are handled in order, so a PONG for a later PING proves earlier lines were processed. */
+export async function settle(fixture: Fixture) {
+  const token = `sync-${++syncs}`;
+  fixture.send(`PING :${token}`);
+  await until(() =>
+    fixture.written.some((frame) => frame.command === "PONG" && frame.params[0] === token),
+  );
+}
+export async function ready(options: Parameters<typeof harness>[0] = {}) {
+  const fixture = await harness(options);
+  await until(() => hasReady(fixture.events));
+  return fixture;
+}
+/** Feeds server lines after registration and returns only the payloads they produced. */
+export async function receive(fixture: Fixture, ...lines: string[]): Promise<SessionPayload[]> {
+  const start = fixture.events.length;
+  for (const line of lines) fixture.send(line);
+  await settle(fixture);
+  return fixture.events.slice(start).map((event) => event.payload);
+}
+export const of = <T extends SessionPayload["type"]>(payloads: SessionPayload[], type: T) =>
+  payloads.filter(
+    (payload): payload is Extract<SessionPayload, { type: T }> => payload.type === type,
+  );
