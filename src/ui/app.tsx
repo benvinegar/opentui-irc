@@ -1409,7 +1409,6 @@ function Shell(props: UiOptions) {
                         flexDirection: "column",
                         // The scrollbar overlays the final cell; keep wrapped text clear of it.
                         paddingRight: 1,
-                        gap: settings()?.tui.density === "compact" ? 0 : 1,
                       }}
                     >
                       <box flexDirection="row" flexShrink={0} paddingLeft={gutterWidth() + 1}>
@@ -1449,6 +1448,7 @@ function Shell(props: UiOptions) {
                               message={message}
                               gutterWidth={gutterWidth()}
                               firstUnread={unread()}
+                              spaced={settings()?.tui.density !== "compact"}
                               continuation={
                                 !unread() &&
                                 continuesGroup(

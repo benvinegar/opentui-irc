@@ -17,6 +17,7 @@
 ### Changed
 
 - Calmer, keyboard-first layout: the top bar, per-network buttons, conversation toolbar, Send button and duplicate hint rows are gone. Secondary actions live in a `ctrl+k` palette; one footer shows contextual keys, status and a plaintext-connection warning.
+- Comfortable density, now the default for new profiles, puts a blank line above each new sender group; follow-up lines from the same sender stay together.
 - Sidebar shows connection status dots, `#`/`@` prefixes and unread/mention badges; the header is one line with the topic and member count; wide windows show a sorted member panel.
 - Consecutive messages from one sender are grouped, day changes get separators, and the nickname gutter fits the visible nicknames.
 - Dialogs are rounded and titled, list their actions compactly, support ↑/↓ navigation and focus their primary action; help is a key/command table; search results show conversation and time.

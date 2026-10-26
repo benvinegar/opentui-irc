@@ -130,6 +130,16 @@ describe("real Solid/OpenTUI shell", () => {
     const lines = view.captureCharFrame().split("\n");
     expect(lines.find((line) => line.includes("first-grouped-line"))).toContain("groupnick");
     expect(lines.find((line) => line.includes("second-grouped-line"))).not.toContain("groupnick");
+    // Comfortable density: a blank line above each new sender group, none inside it.
+    const first = lines.findIndex((line) => line.includes("first-grouped-line"));
+    expect(lines[first + 1]).toContain("second-grouped-line");
+    expect(lines[first - 1]).not.toMatch(/\d\d:\d\d/u);
+    const row = (id: string) => view.renderer.root.findDescendantById(`message-${id}`)!.height;
+    expect([row("grouped-0"), row("grouped-1")]).toEqual([2, 1]);
+    const document = fake.settings.getSnapshot()!;
+    fake.settings.publish({ ...document, tui: { ...document.tui, density: "compact" } });
+    await view.renderOnce();
+    expect([row("grouped-0"), row("grouped-1")]).toEqual([1, 1]);
   });
   test("ctrl+k filters conversations and actions and Enter runs the highlighted entry", async () => {
     const { view } = await mount();

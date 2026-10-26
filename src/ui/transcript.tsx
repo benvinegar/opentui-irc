@@ -11,6 +11,8 @@ export function MessageRow(props: {
   continuation?: boolean;
   /** Shown above the row when the calendar day changes. */
   dayLabel?: string;
+  /** Comfortable density: a blank line above each new sender group. */
+  spaced?: boolean;
   onSelect: () => void;
 }) {
   const colors = usePalette();
@@ -22,6 +24,9 @@ export function MessageRow(props: {
       flexShrink={0}
       onMouseUp={props.onSelect}
     >
+      <Show when={props.spaced && !props.continuation}>
+        <box height={1} flexShrink={0} />
+      </Show>
       <Show when={props.dayLabel}>
         <box flexDirection="row" height={1} flexShrink={0}>
           <box width={props.gutterWidth + 2} flexShrink={0} />

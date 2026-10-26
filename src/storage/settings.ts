@@ -33,7 +33,7 @@ export function defaultTuiSettings(): TuiSettings {
     schemaVersion: 1,
     theme: "dark",
     mouse: true,
-    density: "compact",
+    density: "comfortable",
     memberList: true,
     showHistServ: false,
     sidebarWidth: 24,
