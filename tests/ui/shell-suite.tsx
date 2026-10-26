@@ -196,6 +196,53 @@ describe("real Solid/OpenTUI shell", () => {
     expect(view.renderer.root.findDescendantById("popover")).toBeUndefined();
     expect(fake.actions.some((action) => action.type === "conversation.activate")).toBe(false);
   });
+  test("dragging across message text copies the selection instead of opening the menu", async () => {
+    const { view } = await mount();
+    const body = view.renderer.root.findDescendantById(`body-${welcomeMessage.id}`)!;
+    await view.mockMouse.drag(body.x, body.y, body.x + 6, body.y);
+    await tick();
+    await view.renderOnce();
+    expect(view.renderer.root.findDescendantById("popover")).toBeUndefined();
+    expect(view.renderer.getSelection()?.getSelectedText()).toBe("Welcome");
+    expect(view.captureCharFrame()).toContain("Copied 7 characters.");
+  });
+  test("multi-row selections copy message text only and never open the menu", async () => {
+    const { fake, view } = await mount();
+    const model = fake.timelines.get(conversationId)!;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: [
+        {
+          ...welcomeMessage,
+          id: entityId<"message">("p1"),
+          sender: { nick: "joey" },
+          text: "first line",
+        },
+        {
+          ...welcomeMessage,
+          id: entityId<"message">("p2"),
+          sender: { nick: "alice" },
+          text: "second line",
+          receivedAt: welcomeMessage.receivedAt + 600_000,
+        },
+      ],
+    });
+    await view.renderOnce();
+    await view.renderOnce();
+    const first = view.renderer.root.findDescendantById("body-p1")!;
+    const second = view.renderer.root.findDescendantById("body-p2")!;
+    await view.mockMouse.drag(first.x, first.y, second.x + 5, second.y);
+    await tick();
+    await view.renderOnce();
+    expect(view.renderer.getSelection()?.getSelectedText()).toBe("first line\nsecond");
+    expect(view.renderer.root.findDescendantById("popover")).toBeUndefined();
+    // Time and nickname are not selectable, and a drag from there is not a click either.
+    const transcript = view.renderer.root.findDescendantById("transcript")!;
+    await view.mockMouse.drag(transcript.x, first.y, second.x + 5, second.y);
+    await tick();
+    await view.renderOnce();
+    expect(view.renderer.root.findDescendantById("popover")).toBeUndefined();
+  });
   test("the react submenu sends the chosen emoji and links get their own submenu", async () => {
     const { fake, view } = await mount();
     fake.state.publish({

@@ -434,6 +434,8 @@ export function FitText(props: {
   fg?: string;
   bold?: boolean;
   textAlign?: "left" | "center" | "right";
+  /** Labels are not drag-selectable unless they carry copyable content (e.g. a topic). */
+  selectable?: boolean;
 }) {
   const [measured, setMeasured] = createSignal<number>();
   const fitted = () => {
@@ -455,6 +457,7 @@ export function FitText(props: {
         {...(props.id ? { id: props.id } : {})}
         height={1}
         wrapMode="none"
+        selectable={props.selectable ?? false}
         {...(props.fg ? { fg: props.fg } : {})}
         {...(props.textAlign ? { textAlign: props.textAlign } : {})}
       >

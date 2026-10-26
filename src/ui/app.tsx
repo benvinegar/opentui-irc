@@ -19,7 +19,12 @@ import {
   useRenderer,
   useTerminalDimensions,
 } from "@opentui/solid";
-import { ScrollBoxRenderable, type Renderable, type TextareaRenderable } from "@opentui/core";
+import {
+  ScrollBoxRenderable,
+  type Renderable,
+  type Selection,
+  type TextareaRenderable,
+} from "@opentui/core";
 import type { AppAction, AppApi } from "../contracts/app";
 import type { ConversationId, MessageId, NetworkId } from "../contracts/common";
 import type { ConnectionPhase, Message, TimelineSnapshot } from "../contracts/model";
@@ -105,6 +110,7 @@ const HELP_KEYS = [
   ["ctrl+end", "jump to latest"],
   ["esc", "close, or cancel a reply"],
   ["click", "a message to copy, reply, react, or open links"],
+  ["drag", "select message text to copy it"],
   ["click name", "see who someone is, or message them"],
 ] as const;
 const REACTIONS = ["👍", "🎉", "😂", "👀", "🔥", "✅"] as const;
@@ -843,6 +849,22 @@ function Shell(props: UiOptions) {
     };
     renderer.on("frame", restoreAnchor);
     onCleanup(() => renderer.off("frame", restoreAnchor));
+    // Drag-selecting text copies it on release; a plain click opens the message menu.
+    const copySelection = (selection: Selection | null) => {
+      const text = selection?.getSelectedText() ?? "";
+      if (!text.trim() || modal()) return;
+      void props.external
+        .copyText(text, abort.signal)
+        .then((result) =>
+          setStatus(
+            result.ok
+              ? `Copied ${[...text].length} character${[...text].length === 1 ? "" : "s"}.`
+              : result.error.message,
+          ),
+        );
+    };
+    renderer.on("selection", copySelection);
+    onCleanup(() => renderer.off("selection", copySelection));
     const timer = setInterval(() => {
       if (!transcript || !active()) return;
       const bottom =
@@ -1650,6 +1672,8 @@ function Shell(props: UiOptions) {
                                 : {})}
                               onSelect={(point) => {
                                 if (modal() || resizing() || Date.now() < ignoreClicksUntil) return;
+                                // A drag selected text: the release copies it instead.
+                                if (renderer.getSelection()?.getSelectedText()) return;
                                 openMessageMenu(message, point);
                               }}
                               {...(message.kind === "event"

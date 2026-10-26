@@ -19,12 +19,21 @@ export function MessageRow(props: {
 }) {
   const colors = usePalette();
   const theme = useContext(ThemeContext);
+  // Only a press and release on the same cell is a click; anything else was a drag.
+  let pressed: { x: number; y: number } | undefined;
+  const clicked = (event: { x: number; y: number }) =>
+    pressed?.x === event.x && pressed.y === event.y;
   return (
     <box
       id={`message-${props.message.id}`}
       flexDirection="column"
       flexShrink={0}
-      onMouseUp={(event) => props.onSelect({ x: event.x, y: event.y })}
+      onMouseDown={(event) => {
+        pressed = { x: event.x, y: event.y };
+      }}
+      onMouseUp={(event) => {
+        if (clicked(event)) props.onSelect({ x: event.x, y: event.y });
+      }}
     >
       <Show when={props.spaced && !props.continuation}>
         <box height={1} flexShrink={0} />
@@ -38,12 +47,14 @@ export function MessageRow(props: {
       <Show when={props.firstUnread}>
         <box flexDirection="row" height={1} flexShrink={0}>
           <box width={props.gutterWidth + 2} flexShrink={0} />
-          <text fg={colors.yellow}>── new ──</text>
+          <text selectable={false} fg={colors.yellow}>
+            ── new ──
+          </text>
         </box>
       </Show>
       <box flexDirection="row" flexShrink={0}>
         <box width={props.gutterWidth} flexShrink={0} flexDirection="row" overflow="hidden">
-          <text width={5} height={1} wrapMode="none" fg={colors.muted}>
+          <text width={5} height={1} wrapMode="none" selectable={false} fg={colors.muted}>
             {props.continuation
               ? ""
               : formatMessageTime(props.message.serverTime ?? props.message.receivedAt)}
@@ -52,7 +63,7 @@ export function MessageRow(props: {
           <box
             flexShrink={0}
             onMouseUp={(event) => {
-              if (props.continuation || !props.onNick) return;
+              if (props.continuation || !props.onNick || !clicked(event)) return;
               event.stopPropagation();
               props.onNick({ x: event.x, y: event.y });
             }}
@@ -74,7 +85,7 @@ export function MessageRow(props: {
         <box width={2} flexShrink={0} />
         <box flexGrow={1} minWidth={0} flexDirection="column">
           <Show when={props.message.replyTo}>
-            <text wrapMode="word" fg={colors.muted}>
+            <text wrapMode="word" selectable={false} fg={colors.muted}>
               ↳ reply to {props.message.replyTo?.localId ?? "earlier message"}
             </text>
           </Show>
@@ -108,7 +119,7 @@ export function MessageRow(props: {
             </Show>
           </text>
           <Show when={props.message.reactions.length}>
-            <text wrapMode="word" fg={colors.accent}>
+            <text wrapMode="word" selectable={false} fg={colors.accent}>
               {props.message.reactions
                 .map((reaction) => `${reaction.value} ${reaction.count}`)
                 .join("  ")}
