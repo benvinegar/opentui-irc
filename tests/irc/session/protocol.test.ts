@@ -3,38 +3,22 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { entityId } from "../../../src/contracts/common";
 import type { IrcFrame } from "../../../src/contracts/protocol";
-import type { SessionEvent, SessionPayload } from "../../../src/contracts/session";
+import type { SessionEvent } from "../../../src/contracts/session";
 import type { SecretProvider } from "../../../src/contracts/settings";
-import { closeSessions, harness, hasReady, op, secrets, until } from "./harness";
+import {
+  closeSessions,
+  harness,
+  hasReady,
+  of,
+  op,
+  ready,
+  receive,
+  secrets,
+  until,
+} from "./harness";
 
 afterEach(closeSessions);
 
-type Fixture = Awaited<ReturnType<typeof harness>>;
-let syncs = 0;
-/** Lines are handled in order, so a PONG for a later PING proves earlier lines were processed. */
-async function settle(fixture: Fixture) {
-  const token = `sync-${++syncs}`;
-  fixture.send(`PING :${token}`);
-  await until(() =>
-    fixture.written.some((frame) => frame.command === "PONG" && frame.params[0] === token),
-  );
-}
-async function ready(options: Parameters<typeof harness>[0] = {}) {
-  const fixture = await harness(options);
-  await until(() => hasReady(fixture.events));
-  return fixture;
-}
-/** Feeds server lines after registration and returns only the payloads they produced. */
-async function receive(fixture: Fixture, ...lines: string[]): Promise<SessionPayload[]> {
-  const start = fixture.events.length;
-  for (const line of lines) fixture.send(line);
-  await settle(fixture);
-  return fixture.events.slice(start).map((event) => event.payload);
-}
-const of = <T extends SessionPayload["type"]>(payloads: SessionPayload[], type: T) =>
-  payloads.filter(
-    (payload): payload is Extract<SessionPayload, { type: T }> => payload.type === type,
-  );
 const stopped = (events: SessionEvent[]) =>
   events.some((event) => event.payload.type === "state" && event.payload.phase === "disconnected");
 

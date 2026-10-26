@@ -59,3 +59,16 @@ Status: **covered** = asserted by a test here; **gap → covered** = added with 
 ## Coverage
 
 `bun run test:coverage` reports V8 coverage for the Node/Vitest suites (`coverage/` holds the HTML report). Bun adapter and OpenTUI suites (`*.bun.test.ts`) are not counted.
+
+## Client-side behavior (not from WeeChat)
+
+| Area                                                                                                                                                      | Status                                                                             | Where                                  |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | -------------------------------------- |
+| Command admission: invalid input, not-ready, duplicate operation IDs, queue/pending bounds, write failures, shutdown reporting for every `SessionCommand` | covered                                                                            | `commands.test.ts`                     |
+| Open-time profile and policy validation                                                                                                                   | covered                                                                            | `commands.test.ts` › opening a session |
+| Server password, CAP LS continuation, 421 CAP, NAK/DEL/echo-message dependency, optional vs required SASL, 464/465                                        | covered (**fix**: optional SASL no longer kills servers that register without CAP) | `negotiation.test.ts`                  |
+| rfc1459/strict/ascii casemapping, casemapping change with channels, malformed ISUPPORT                                                                    | covered                                                                            | `negotiation.test.ts`                  |
+| Channel/member/NAMES bounds, keepalive, stream faults, informational numerics                                                                             | covered                                                                            | `negotiation.test.ts`                  |
+| WHOIS/LIST edge cases, echo timeouts, labeled rejection, NAMES reconciliation, transport faults                                                           | covered (**fix**: 437 after registration had nick/channel inverted)                | `queries.test.ts`                      |
+| ModernSession admission, CLIENTTAGDENY/CHATHISTORY/MSGREFTYPES, batch/label bookkeeping, FAIL, timeouts, close                                            | covered                                                                            | `modern-edge.test.ts`                  |
+| CAP NEW (cap-notify additions after registration)                                                                                                         | **gap**: ignored; capabilities introduced after CAP END are never requested        | —                                      |

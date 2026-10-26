@@ -1,65 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { entityId } from "../../../src/contracts/common";
-import type { AppError } from "../../../src/contracts/common";
-import type { IrcFrame } from "../../../src/contracts/protocol";
-import type { SessionPayload } from "../../../src/contracts/session";
-import {
-  ModernSession,
-  modernCapabilities,
-  modernPolicyDefaults,
-  validServerId,
-} from "../../../src/irc/session/modern";
-const op = (id: string) => entityId<"operation">(id);
-const frame = (
-  command: string,
-  params: readonly string[] = [],
-  tags: Record<string, string | null> = {},
-): IrcFrame => ({ command, params, tags });
-const allCaps = [
-  "message-tags",
-  "server-time",
-  "batch",
-  "labeled-response",
-  "echo-message",
-  "draft/chathistory",
-  "draft/read-marker",
-  "draft/message-redaction",
-];
-function fixture(caps = allCaps, policy = {}) {
-  const events: SessionPayload[] = [];
-  const errors: AppError[] = [];
-  const writes: IrcFrame[] = [];
-  const capabilities = new Map<string, string | null>(caps.map((cap) => [cap, null]));
-  let now = 100_000;
-  let changed = 0;
-  const modern = new ModernSession({
-    policy: { ...modernPolicyDefaults, queryTimeoutMs: 1000, ...policy },
-    now: () => now,
-    capabilities: () => capabilities,
-    self: (nick) => nick === "me",
-    fold: (value) => value.toLowerCase(),
-    emit: (event) => events.push(event),
-    changed: () => {
-      changed++;
-    },
-    fatal: (error) => errors.push(error),
-  });
-  return {
-    modern,
-    events,
-    errors,
-    writes,
-    capabilities,
-    changed: () => changed,
-    time: (value: number) => {
-      now = value;
-    },
-    write: async (frame: IrcFrame) => {
-      writes.push(frame);
-      return { ok: true as const, value: undefined };
-    },
-  };
-}
+import { modernCapabilities, validServerId } from "../../../src/irc/session/modern";
+import { allCaps, fixture, frame, op } from "./modern-fixture";
 describe("pinned modern IRCv3 state", () => {
   test("exact draft names, dependency-derived feature flags, observed IDs and CLIENTTAGDENY", () => {
     expect(modernCapabilities(new Map(allCaps.map((cap) => [cap, null])))).toEqual([
