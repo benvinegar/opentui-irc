@@ -27,7 +27,7 @@ const SHAPES = {
   "message.send": { required: ["conversationId", "text", "kind"], optional: ["replyTo"] },
   "message.react": { required: ["messageId", "value", "remove"] },
   "message.redact": { required: ["messageId"] },
-  "typing.set": { required: ["conversationId", "active"] },
+  "typing.set": { required: ["conversationId", "active"], optional: ["paused"] },
   "history.load-older": { required: ["conversationId"], optional: ["cursor"] },
   "history.latest": { required: ["conversationId"] },
   "history.reveal": { required: ["messageId"] },
@@ -156,7 +156,12 @@ export function parseAppAction(value: unknown): Result<AppAction, ControlError> 
       case "typing.set":
         return {
           ok: true,
-          value: { type, conversationId: conversation(), active: boolean(action.active) },
+          value: {
+            type,
+            conversationId: conversation(),
+            active: boolean(action.active),
+            ...(action.paused !== undefined ? { paused: boolean(action.paused) } : {}),
+          },
         };
       case "history.load-older":
         return {
@@ -293,7 +298,7 @@ function propertiesFor(shape: Shape, type: string): JsonObject {
   return Object.fromEntries(
     [...shape.required, ...(shape.optional ?? [])].map((name) => [
       name,
-      ["muted", "remove", "active", "focused", "atBottom"].includes(name)
+      ["muted", "remove", "active", "paused", "focused", "atBottom"].includes(name)
         ? { type: "boolean" }
         : name === "kind"
           ? { enum: ["text", "action", "notice"] }

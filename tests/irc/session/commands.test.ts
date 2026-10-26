@@ -376,6 +376,30 @@ describe("modern command admission through the session", () => {
     expect(sent[5]?.params).toEqual(["#a", "timestamp=2026-01-01T00:00:00.000Z"]);
     expect(sent.every((frame) => frame.tags.label?.startsWith("oi-modern-"))).toBe(true);
   });
+  test("typing stops as paused when the draft is kept and done when it is cleared", async () => {
+    const fixture = await ready({ capabilities: modernCaps });
+    await until(() =>
+      fixture.events.some(
+        (event) => event.payload.type === "support" && event.payload.features.typing,
+      ),
+    );
+    // Separate targets: each target allows one typing notification per three seconds.
+    const stops: SessionCommand[] = [
+      { type: "typing", target: "#kept", active: false, paused: true },
+      { type: "typing", target: "#cleared", active: false },
+    ];
+    for (const [index, command] of stops.entries())
+      expect(codeOf(await run(fixture, command, `stop-${index}`))).toBe("ok");
+    await until(() => wire(fixture, "TAGMSG").length === 2);
+    expect(
+      fixture.written
+        .filter((frame) => frame.command === "TAGMSG")
+        .map((frame) => [frame.params[0], frame.tags["+typing"]]),
+    ).toEqual([
+      ["#kept", "paused"],
+      ["#cleared", "done"],
+    ]);
+  });
 });
 
 describe("opening a session", () => {

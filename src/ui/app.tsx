@@ -447,8 +447,13 @@ function Shell(props: UiOptions) {
     return result;
   };
   const typing = createTypingReporter({
-    report: (conversationId, active) => {
-      void run({ type: "typing.set", conversationId, active });
+    report: (conversationId, state) => {
+      void run({
+        type: "typing.set",
+        conversationId,
+        active: state === "active",
+        ...(state === "paused" ? { paused: true } : {}),
+      });
     },
   });
   onCleanup(typing.dispose);

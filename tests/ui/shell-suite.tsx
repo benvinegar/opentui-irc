@@ -930,7 +930,7 @@ describe("real Solid/OpenTUI shell", () => {
       ),
     ).toBe(false);
   });
-  test("typing is opt-in/capability gated and stops after a paced dialog transition", async () => {
+  test("typing is opt-in/capability gated and pauses after a paced dialog transition", async () => {
     const { fake, view } = await mount();
     await view.mockInput.typeText("a");
     expect(fake.actions.some((action) => action.type === "typing.set")).toBe(false);
@@ -952,10 +952,12 @@ describe("real Solid/OpenTUI shell", () => {
     ]);
     await view.mockInput.pressKey("F1");
     await new Promise((resolve) => setTimeout(resolve, 4100));
+    // The draft is still there behind the dialog, so this is IRCv3 `paused`, not `done`.
     expect(fake.actions.filter((action) => action.type === "typing.set").at(-1)).toEqual({
       type: "typing.set",
       conversationId,
       active: false,
+      paused: true,
     });
   });
   test("typing does not advertise slash-command input", async () => {

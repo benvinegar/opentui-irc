@@ -592,7 +592,7 @@ export class ModernSession {
       }
       case "typing":
         output = this.output("TAGMSG", [command.target], {
-          [modernProtocol.typing]: command.active ? "active" : "done",
+          [modernProtocol.typing]: command.active ? "active" : command.paused ? "paused" : "done",
         });
         break;
       case "reaction":

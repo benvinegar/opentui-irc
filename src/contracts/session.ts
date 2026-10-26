@@ -114,7 +114,13 @@ export type SessionCommand =
   | { readonly type: "whois"; readonly nick: string }
   | { readonly type: "list" }
   | { readonly type: "topic"; readonly channel: string; readonly text?: string }
-  | { readonly type: "typing"; readonly target: string; readonly active: boolean }
+  | {
+      readonly type: "typing";
+      readonly target: string;
+      readonly active: boolean;
+      /** With `active: false`, sends IRCv3 `paused` (draft kept) instead of `done`. */
+      readonly paused?: boolean;
+    }
   | {
       readonly type: "reaction";
       readonly target: string;

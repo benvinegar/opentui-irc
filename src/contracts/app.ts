@@ -65,6 +65,8 @@ export type AppAction =
       readonly type: "typing.set";
       readonly conversationId: ConversationId;
       readonly active: boolean;
+      /** With `active: false`, the draft was kept (IRCv3 `paused`) rather than cleared (`done`). */
+      readonly paused?: boolean;
     }
   | {
       readonly type: "history.load-older";

@@ -23,6 +23,7 @@ const samples = [
   { type: "message.react", messageId: "message", value: "👍", remove: false },
   { type: "message.redact", messageId: "message" },
   { type: "typing.set", conversationId: "conversation", active: true },
+  { type: "typing.set", conversationId: "conversation", active: false, paused: true },
   { type: "history.load-older", conversationId: "conversation", cursor: "cursor" },
   { type: "history.latest", conversationId: "conversation" },
   { type: "history.reveal", messageId: "message" },
