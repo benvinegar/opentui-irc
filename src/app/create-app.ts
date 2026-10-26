@@ -1044,6 +1044,15 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         const directory = users.get(networkId)!;
         directory.delete(foldIdentifier(payload.previous, mapping(networkId)));
         directory.set(foldIdentifier(payload.next, mapping(networkId)), renamed);
+        // If a DM with the new nickname already exists, it carries on; renaming the old DM
+        // too would leave two conversations with one name, so the old one keeps its name.
+        const taken = [...conversations.values()].some(
+          (c) =>
+            c.view.networkId === networkId &&
+            c.view.kind === "direct" &&
+            same(networkId, c.view.name, payload.next) &&
+            !same(networkId, c.view.name, payload.previous),
+        );
         for (const c of conversations.values())
           if (c.view.networkId === networkId) {
             updateTimeline(c, {
@@ -1051,7 +1060,11 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
                 member.id === old.id ? { ...member, nick: renamed.nick } : member,
               ),
             });
-            if (c.view.kind === "direct" && same(networkId, c.view.name, payload.previous)) {
+            if (
+              !taken &&
+              c.view.kind === "direct" &&
+              same(networkId, c.view.name, payload.previous)
+            ) {
               c.view = { ...c.view, name: renamed.nick };
               dirtyConversations.add(c.view.id);
             }
@@ -1691,7 +1704,12 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
             )
               await execute(
                 c.view.networkId,
-                { type: "typing", target: c.view.name, active: action.active },
+                {
+                  type: "typing",
+                  target: c.view.name,
+                  active: action.active,
+                  ...(action.paused ? { paused: true } : {}),
+                },
                 id,
               );
             break;

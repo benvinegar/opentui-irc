@@ -16,6 +16,8 @@
 
 ### Changed
 
+- Features a server offers after you connect (IRCv3 `cap-notify`, for example chat history on a bouncer) are now enabled without reconnecting.
+- Typing indicators follow IRCv3 more closely: stepping away from a kept draft sends "paused" rather than "done", so others see you paused instead of finished.
 - Calmer, keyboard-first layout: the top bar, per-network buttons, conversation toolbar, Send button and duplicate hint rows are gone. Secondary actions live in a `ctrl+k` palette; one footer shows contextual keys, status and a plaintext-connection warning.
 - Comfortable density, now the default for new profiles, puts a blank line above each new sender group; follow-up lines from the same sender stay together.
 - Clicking a message opens a small menu at the click instead of a full-screen dialog (copy, reply, react with a choice of emoji, open links, remove mine), with one-letter shortcuts. Clicking a nickname shows a WHOIS-backed person card with Message and Copy nickname.
@@ -43,6 +45,9 @@
 - Messages to a nickname that is not online now say so (401) instead of failing silently; more server rejections have readable explanations, and WARN/NOTE standard replies are shown.
 - Being kicked from or leaving a channel clears its member list instead of still showing the old members.
 - An optional SASL login no longer disconnects from servers that finish registration before capability negotiation ends.
+- A message with an invalid sender or target (such as a comma in a nickname) is skipped with a notice instead of disconnecting.
+- When someone changes to a nickname you already have a DM with, that DM continues and the old one keeps its name, instead of two DMs with the same name.
+- Channel member lists for channels you haven't joined (`/names #elsewhere`) no longer count as joined channels.
 - Joining a channel no longer adds "IRC server response 333."-style lines for topic setter, creation time and channel modes; login and displayed-host replies read as sentences.
 
 - Page Up/Down now scroll the active dialog instead of leaving long help/settings content unreachable from the keyboard.

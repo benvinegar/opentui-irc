@@ -55,6 +55,8 @@ const READABLE_NUMERICS = new Set([
   "901",
 ]);
 
+// Reliable own-message echo needs every one of these; echo-message alone is never used.
+const ECHO_DEPENDENCIES = ["message-tags", "batch", "labeled-response", "echo-message"];
 // Machine-oriented replies (server info, channel modes/creation, topic setter/URL) with no prose for people.
 const QUIET_NUMERICS = new Set(["004", "042", "324", "328", "329", "333"]);
 // Prose whose leading parameters only repeat our own identity.
@@ -595,47 +597,57 @@ class Attempt {
       this.stop(problem("authentication", "Required SASL authentication failed."));
     else await this.endCap();
   }
+  /** Capabilities worth requesting from what the server currently advertises. */
+  private wantedCapabilities(): string[] {
+    const wanted = [
+      "message-tags",
+      "server-time",
+      "multi-prefix",
+      "account-tag",
+      "account-notify",
+      "extended-join",
+      "away-notify",
+      "cap-notify",
+    ];
+    if (ECHO_DEPENDENCIES.every((name) => this.advertised.has(name)))
+      wanted.push(...ECHO_DEPENDENCIES);
+    // SASL is only part of registration; re-authenticating a live session is unsupported.
+    if (
+      !this.capEnded &&
+      this.profile.sasl &&
+      this.advertised.has("sasl") &&
+      (this.advertised.get("sasl") === null ||
+        this.advertised.get("sasl")?.split(",").includes("PLAIN"))
+    )
+      wanted.push("sasl");
+    wanted.push(...modernCapabilities(this.advertised));
+    return [...new Set(wanted)].filter((name) => this.advertised.has(name));
+  }
+  /** Records advertised tokens; returns the names, or undefined after stopping on overflow. */
+  private advertise(list: string): string[] | undefined {
+    const names: string[] = [];
+    for (const token of list.split(" ").filter(Boolean)) {
+      const [name, ...value] = token.split("=");
+      if (!name) continue;
+      if (!this.advertised.has(name) && this.advertised.size >= 128) {
+        this.stop(problem("network", "Too many IRC capabilities."));
+        return undefined;
+      }
+      this.advertised.set(name, value.length ? value.join("=") : null);
+      names.push(name);
+    }
+    return names;
+  }
   private async cap(input: IrcFrame) {
     const sub = input.params[1];
     const list = input.params.at(-1) ?? "";
-    if (this.capEnded && sub !== "DEL") return;
+    // After registration only cap-notify updates (NEW/DEL) and answers to our requests matter.
+    if (this.capEnded && !["NEW", "DEL", "ACK", "NAK"].includes(sub ?? "")) return;
     if (sub === "LS") {
-      for (const token of list.split(" ").filter(Boolean)) {
-        if (this.advertised.size >= 128) {
-          this.stop(problem("network", "Too many IRC capabilities."));
-          return;
-        }
-        const [name, ...value] = token.split("=");
-        if (name) this.advertised.set(name, value.length ? value.join("=") : null);
-      }
+      if (!this.advertise(list)) return;
       if (input.params[2] === "*") return;
       this.capLsComplete = true;
-      const wanted = [
-        "message-tags",
-        "server-time",
-        "multi-prefix",
-        "account-tag",
-        "account-notify",
-        "extended-join",
-        "away-notify",
-        "cap-notify",
-      ];
-      if (
-        this.advertised.has("message-tags") &&
-        this.advertised.has("batch") &&
-        this.advertised.has("labeled-response") &&
-        this.advertised.has("echo-message")
-      )
-        wanted.push("batch", "labeled-response", "echo-message");
-      if (
-        this.profile.sasl &&
-        this.advertised.has("sasl") &&
-        (this.advertised.get("sasl") === null ||
-          this.advertised.get("sasl")?.split(",").includes("PLAIN"))
-      )
-        wanted.push("sasl");
-      wanted.push(...modernCapabilities(this.advertised));
-      for (const name of wanted) if (this.advertised.has(name)) this.requested.add(name);
+      for (const name of this.wantedCapabilities()) this.requested.add(name);
       if (this.profile.sasl?.required && !this.requested.has("sasl")) {
         this.stop(
           problem("authentication", "Server does not offer required SASL PLAIN authentication."),
@@ -645,36 +657,54 @@ class Attempt {
       if (this.requested.size) await this.control("CAP", ["REQ", [...this.requested].join(" ")]);
       else await this.endCap();
     } else if (sub === "ACK" || sub === "NAK") {
+      let answered = false;
       for (const token of list.split(" ")) {
         const name = token.replace(/^-/, "").split("=")[0]!;
         if (!this.requested.has(name)) continue;
+        answered = true;
         this.requested.delete(name);
         if (sub === "ACK" && !token.startsWith("-"))
           this.capabilities.set(name, this.advertised.get(name) ?? null);
         else this.capabilities.delete(name);
       }
-      if (!this.requested.size && this.capLsComplete) {
+      if (answered && !this.requested.size && this.capLsComplete) {
         if (
           this.capabilities.has("echo-message") &&
-          !["message-tags", "batch", "labeled-response"].every((name) =>
-            this.capabilities.has(name),
-          )
+          !ECHO_DEPENDENCIES.every((name) => this.capabilities.has(name))
         ) {
           // Do not expose/use echo until reliable correlation dependencies are ACKed.
           this.capabilities.delete("echo-message");
           await this.control("CAP", ["REQ", "-echo-message"]);
         }
-        if (this.profile.sasl && this.capabilities.has("sasl") && !this.saslStarted) {
+        if (this.capEnded) this.publishSupport();
+        else if (this.profile.sasl && this.capabilities.has("sasl") && !this.saslStarted) {
           this.saslStarted = true;
           this.state("authenticating");
           await this.control("AUTHENTICATE", ["PLAIN"]);
         } else if (!this.saslStarted || this.authenticated) await this.endCap();
       }
+    } else if (sub === "NEW") {
+      const added = this.advertise(list);
+      if (!added || !this.capLsComplete) return;
+      // A newly offered dependency can make the whole reliable-echo set worth requesting.
+      const echoUnlocked = added.some((name) => ECHO_DEPENDENCIES.includes(name));
+      const request = this.wantedCapabilities().filter(
+        (name) =>
+          !this.capabilities.has(name) &&
+          !this.requested.has(name) &&
+          (added.includes(name) || (echoUnlocked && ECHO_DEPENDENCIES.includes(name))),
+      );
+      if (!request.length) return;
+      for (const name of request) this.requested.add(name);
+      await this.control("CAP", ["REQ", request.join(" ")]);
     } else if (sub === "DEL") {
-      for (const name of list.split(" ")) this.capabilities.delete(name);
+      for (const name of list.split(" ")) {
+        this.capabilities.delete(name);
+        this.advertised.delete(name);
+      }
       if (
         this.capabilities.has("echo-message") &&
-        !["message-tags", "batch", "labeled-response"].every((name) => this.capabilities.has(name))
+        !ECHO_DEPENDENCIES.every((name) => this.capabilities.has(name))
       ) {
         this.capabilities.delete("echo-message");
         await this.control("CAP", ["REQ", "-echo-message"]);
@@ -1006,7 +1036,8 @@ class Attempt {
     let [target, body] = input.params;
     if (!target || body === undefined) return;
     if (!atom(target) || !atom(sender)) {
-      this.stop(problem("network", "Malformed IRC chat envelope."));
+      // One bad line (e.g. a comma in a nickname) must not cost the whole connection.
+      this.emit({ type: "notice", text: "Ignored a message with an invalid sender or target." });
       return;
     }
     // STATUSMSG (`@#room`) reaches a subset of the channel; it still belongs in the channel.
@@ -1158,7 +1189,8 @@ class Attempt {
     this.emit({ type: "nick", previous: plain(previous), next: plain(next) });
   }
   private names(name: string, list: string) {
-    const channel = this.channel(name);
+    // `/names #elsewhere` answers for channels we are not in; that is not membership.
+    const channel = this.channels.get(this.fold(name));
     if (!channel) return;
     if (!channel.names) {
       channel.names = new Map();

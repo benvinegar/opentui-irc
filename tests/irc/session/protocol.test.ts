@@ -145,6 +145,19 @@ describe("ISUPPORT", () => {
       prefixes: [],
     });
   });
+  test("NAMES for a channel we are not in creates no membership", async () => {
+    const fixture = await ready({ policy: { maxChannels: 1 } });
+    const elsewhere = await receive(
+      fixture,
+      ":s 353 me = #elsewhere :alice bob",
+      ":s 366 me #elsewhere :End of /NAMES list.",
+    );
+    expect(of(elsewhere, "membership")).toEqual([]);
+    // It did not use up the only channel slot either.
+    const joined = await receive(fixture, ":me!u@h JOIN #mine");
+    expect(of(joined, "membership")).toHaveLength(1);
+    expect(stopped(fixture.events)).toBe(false);
+  });
   test("multi-prefix NAMES keeps every prefix in rank order", async () => {
     const fixture = await ready();
     const payloads = await receive(
@@ -316,6 +329,21 @@ describe("messages", () => {
       ":bob!u@h PRIVMSG #a",
     );
     expect(of(payloads, "chat")).toEqual([]);
+    expect(stopped(fixture.events)).toBe(false);
+  });
+  test("a message with an invalid sender or target is skipped, not fatal", async () => {
+    const fixture = await ready();
+    const payloads = await receive(
+      fixture,
+      ":a,b!u@h PRIVMSG #a :comma in the nickname",
+      ":bob!u@h PRIVMSG #a,#b :comma in the target",
+      ":bob!u@h PRIVMSG #a :still here",
+    );
+    expect(of(payloads, "notice").map((notice) => notice.text)).toEqual([
+      "Ignored a message with an invalid sender or target.",
+      "Ignored a message with an invalid sender or target.",
+    ]);
+    expect(of(payloads, "chat").map((event) => event.message.text)).toEqual(["still here"]);
     expect(stopped(fixture.events)).toBe(false);
   });
   test("services notices stay conversations; nick-only prefixes are people", async () => {
@@ -499,5 +527,57 @@ describe("SASL PLAIN", () => {
   test("a server that only offers other mechanisms is not sent credentials", async () => {
     const fixture = await ready({ capabilities: "sasl=EXTERNAL,SCRAM-SHA-256", sasl: sasl(false) });
     expect(fixture.written.some((frame) => frame.command === "AUTHENTICATE")).toBe(false);
+  });
+});
+
+describe("capabilities added after registration (cap-notify)", () => {
+  const requests = (fixture: Awaited<ReturnType<typeof ready>>) =>
+    fixture.written
+      .filter((frame) => frame.command === "CAP" && frame.params[0] === "REQ")
+      .map((frame) => frame.params[1]!.split(" ").sort());
+  test("a newly offered feature is requested and enabled without reconnecting", async () => {
+    const fixture = await ready({ capabilities: "message-tags server-time cap-notify" });
+    const before = requests(fixture).length;
+    const payloads = await receive(fixture, ":s CAP me NEW :batch draft/chathistory");
+    expect(requests(fixture).slice(before)).toEqual([["batch", "draft/chathistory"]]);
+    expect(of(payloads, "support").at(-1)?.features).toMatchObject({ history: true });
+  });
+  test("a newly offered dependency unlocks reliable echo as a set", async () => {
+    const fixture = await ready({ capabilities: "message-tags batch echo-message cap-notify" });
+    expect(requests(fixture).flat()).not.toContain("echo-message");
+    const before = requests(fixture).length;
+    await receive(fixture, ":s CAP me NEW :labeled-response");
+    // batch was offered but unused until the whole set became available.
+    expect(requests(fixture).slice(before)).toEqual([
+      ["batch", "echo-message", "labeled-response"],
+    ]);
+  });
+  test("unwanted capabilities and SASL after registration are not requested", async () => {
+    const fixture = await ready({ capabilities: "cap-notify" });
+    const before = requests(fixture).length;
+    const payloads = await receive(fixture, ":s CAP me NEW :sasl=PLAIN vendor/frobnicate");
+    expect(requests(fixture).slice(before)).toEqual([]);
+    expect(of(payloads, "support")).toEqual([]);
+  });
+  test("a refused late request changes nothing; a later DEL disables the feature", async () => {
+    const fixture = await ready({
+      capabilities: "message-tags server-time cap-notify",
+      onWrite(frame, send) {
+        if (
+          frame.command === "CAP" &&
+          frame.params[0] === "REQ" &&
+          frame.params[1]?.includes("draft/chathistory")
+        ) {
+          send(`:s CAP me NAK :${frame.params[1]}`);
+          return { ok: true, value: undefined };
+        }
+      },
+    });
+    const refused = await receive(fixture, ":s CAP me NEW :batch draft/chathistory");
+    expect(of(refused, "support").at(-1)?.features ?? { history: false }).toMatchObject({
+      history: false,
+    });
+    const removed = await receive(fixture, ":s CAP me DEL :server-time");
+    expect(of(removed, "support").at(-1)?.support.capabilities).not.toHaveProperty("server-time");
   });
 });

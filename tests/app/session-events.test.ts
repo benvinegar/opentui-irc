@@ -153,6 +153,38 @@ describe("session events: membership, nick and quit", () => {
     expect(h.app.state.getSnapshot().networks[0]?.nick).toBe("student");
     expect(h.nicks()).toEqual(["mentor", "student"]);
   });
+  it("renaming onto a nickname that already has a DM keeps one conversation per name", async () => {
+    const h = await connected();
+    const dm = (nick: string, text: string) =>
+      h.emit({
+        type: "chat",
+        message: {
+          target: "newcomer",
+          sender: { nick },
+          kind: "text",
+          text,
+          receivedAt: 1_700_000_002_000,
+          source: "live",
+        },
+      });
+    await dm("guide", "from guide");
+    await dm("mentor", "from mentor");
+    const mentor = h.view("mentor")!.id;
+    await h.emit({ type: "nick", previous: "guide", next: "Mentor" });
+    const names = h.app.state
+      .getSnapshot()
+      .conversations.filter((c) => c.kind === "direct")
+      .map((c) => c.name)
+      .sort();
+    expect(names).toEqual(["guide", "mentor"]);
+    // New messages from the renamed person land in the existing conversation.
+    await dm("Mentor", "after rename");
+    expect(
+      value(h.app.timeline(mentor))
+        .getSnapshot()
+        .messages.map((m) => m.text),
+    ).toContain("after rename");
+  });
   it("quit removes the user from every channel and clears their typing state", async () => {
     const h = await connected();
     await h.join("guide");

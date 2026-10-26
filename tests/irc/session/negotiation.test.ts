@@ -460,7 +460,6 @@ describe("keepalive and stream failures", () => {
     ["ERROR :Closing Link", "network"],
     [":s 464 me :Password incorrect", "authentication"],
     [":s 465 me :You are banned", "authentication"],
-    [":bad,nick!u@h PRIVMSG #c :hi", "network"],
   ])("%s ends the session with a %s error", async (line, code) => {
     const fixture = await ready();
     fixture.send(line);
