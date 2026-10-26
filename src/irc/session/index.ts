@@ -785,7 +785,7 @@ class Attempt {
       case "437":
         if (this.ready) {
           // 437 also covers temporarily unavailable channels; only nickname replies are conflicts.
-          if (input.command === "432" || (input.command === "437" && !this.isChannel(p[1] ?? "")))
+          if (input.command === "432" || (input.command === "437" && this.isChannel(p[1] ?? "")))
             break;
           this.emit({ type: "error", error: problem("conflict", "Nickname is unavailable.") });
         } else if (this.alternate < this.profile.identity.alternateNicks.length) {

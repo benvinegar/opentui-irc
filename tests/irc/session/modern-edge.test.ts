@@ -164,6 +164,13 @@ describe("modern frames", () => {
     expect(f.errors).toHaveLength(1);
   });
 
+  test("batches nested deeper than the bound are fatal", () => {
+    const f = fixture(allCaps, { maxBatchDepth: 1 });
+    f.modern.handle(frame("BATCH", ["+one", "custom"]), "s");
+    f.modern.handle(frame("BATCH", ["+two", "custom"], { batch: "one" }), "s");
+    expect(f.errors).toHaveLength(1);
+  });
+
   test("an unnegotiated batch is fatal", () => {
     const f = fixture(["message-tags"]);
     f.modern.handle(frame("BATCH", ["+one", "custom"]), "s");

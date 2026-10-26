@@ -244,6 +244,19 @@ describe("capability negotiation", () => {
     expect(errorCodes(fixture)).toEqual(["authentication"]);
   });
 
+  test("oversized SASL credentials stop the attempt instead of being truncated", async () => {
+    const fixture = await harness({
+      capabilities: "sasl",
+      sasl: { mechanism: "PLAIN", account: "acct", password: secret, required: false },
+      secretProvider: {
+        ...secrets,
+        resolve: async () => ({ ok: true, value: "x".repeat(17_000) }),
+      },
+    });
+    await fixture.consumption;
+    expect(errorCodes(fixture)).toEqual(["authentication"]);
+  });
+
   test("optional SASL that fails continues as an unauthenticated session", async () => {
     const fixture = await ready({
       capabilities: "sasl",
