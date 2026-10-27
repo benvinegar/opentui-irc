@@ -5,6 +5,7 @@
     "jsxImportSource": "@opentui/solid",
     "module": "Preserve",
     "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
     "lib": ["ES2023"],
     "types": ["bun"],
     "strict": true,
@@ -23,6 +24,7 @@
     "tests/**/*.ts",
     "tests/**/*.tsx",
     "scripts/**/*.ts",
+    "bin/**/*.ts",
     "vitest.config.ts"
   ]
 }

@@ -16,15 +16,20 @@ import time
 project = Path(__file__).resolve().parent.parent
 
 
-def smoke(root, authorized_shutdown=False):
+def smoke(root, authorized_shutdown=False, launcher=None):
+    """`launcher` runs an installed command from outside the project, where bunfig.toml is absent."""
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 38, 110, 0, 0))
     config = root + "/config"
-    args = ["bun", "run", "src/main.ts", "--config-dir", config, "--data-dir", root + "/data"]
+    os.makedirs(root, exist_ok=True)
+    cwd = root if launcher else project
+    app = launcher or ["bun", "run", "src/main.ts"]
+    ctl = launcher or ["bun", "run", "src/ctl.ts"]
+    args = [*app, "--config-dir", config, "--data-dir", root + "/data"]
     if authorized_shutdown:
         args += ["--control-allow", "destructive"]
     child = subprocess.Popen(
-        args, cwd=project, stdin=slave, stdout=slave, stderr=slave,
+        args, cwd=cwd, stdin=slave, stdout=slave, stderr=slave,
         env=dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor"),
         start_new_session=True,
     )
@@ -43,8 +48,8 @@ def smoke(root, authorized_shutdown=False):
 
     def control(*arguments):
         command = subprocess.Popen(
-            ["bun", "run", "src/ctl.ts", "--config-dir", config, *arguments],
-            cwd=project, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            [*ctl, "--config-dir", config, *arguments],
+            cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         try:
             deadline = time.monotonic() + 7
@@ -110,6 +115,7 @@ def smoke(root, authorized_shutdown=False):
         "hasTypeError": "TypeError" in screen,
         "agentControl": True,
         "authorizedShutdown": authorized_shutdown,
+        "launcher": " ".join(launcher) if launcher else "bun run src/main.ts",
     }
     if code != 0 or not result["renderedOpenIRC"] or not result["renderedSettings"] or result["hasTypeError"]:
         raise RuntimeError("Terminal/control smoke test failed; no private config was used")
@@ -117,5 +123,13 @@ def smoke(root, authorized_shutdown=False):
 
 
 with tempfile.TemporaryDirectory(prefix="openirc-pty-") as root:
-    results = [smoke(root + "/default"), smoke(root + "/authorized", authorized_shutdown=True)]
+    results = [
+        smoke(root + "/default"),
+        smoke(root + "/authorized", authorized_shutdown=True),
+        smoke(root + "/installed", launcher=["bun", str(project / "bin" / "openirc.ts")]),
+    ]
+    # Optional: verify a compiled `bun run build` binary, e.g. OPENIRC_SMOKE_BINARY=dist/openirc.
+    if os.environ.get("OPENIRC_SMOKE_BINARY"):
+        binary = str(Path(os.environ["OPENIRC_SMOKE_BINARY"]).resolve())
+        results.append(smoke(root + "/compiled", launcher=[binary]))
     print(json.dumps({"scenarios": results}))

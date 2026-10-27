@@ -20,14 +20,22 @@ Settings work offline or through a private Unix socket while the client is runni
 
 Message/draft reading, chat sending and destructive work require separate explicit server grants **and** caller intent. Default live rights are inspect/configure/network. See [control design](docs/CONTROL.md) for the local trust boundary and [the agent guide](docs/AGENT_GUIDE.md) for setup recipes.
 
-## Run
+## Install and run
 
 Requires Bun **1.3.14+**. The TUI needs an interactive terminal; control commands do not.
 
 ```sh
+git clone https://github.com/benvinegar/openirc.git && cd openirc
 bun install --frozen-lockfile
-bun run start
+bun link        # puts `openirc` on your PATH (~/.bun/bin), pointing at this checkout
+openirc
 ```
+
+`bun link` runs the checkout in place, so `git pull` (plus `bun install` when dependencies change) updates it; `bun unlink` removes it. Without linking, use `bun run start` from the checkout.
+
+For a standalone executable that does not need Bun or the checkout at runtime, run `bun run build` and copy `dist/openirc` anywhere on your PATH. It is built for the current OS and CPU only.
+
+Control commands go through the same command: `openirc help`, `openirc config get`, `openirc status`.
 
 Use **Settings → Add network**, choose a TLS server, enter a nickname, and optionally configure an existing SASL account. Connect, join a channel, or open a direct conversation from the sidebar. You can also type `/help` for commands.
 

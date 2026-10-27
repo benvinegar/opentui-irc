@@ -4,9 +4,13 @@
   "private": true,
   "description": "A newcomer-friendly IRC client built with OpenTUI, SolidJS, and Bun",
   "license": "MIT",
+  "bin": {
+    "openirc": "bin/openirc.ts"
+  },
   "type": "module",
   "scripts": {
     "start": "bun run src/main.ts",
+    "build": "bun run scripts/build.ts",
     "ctl": "bun run src/ctl.ts",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",

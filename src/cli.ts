@@ -87,7 +87,7 @@ export function parseCli(
 
 export const HELP = `OpenIRC — a newcomer-friendly terminal IRC client
 
-Usage: bun run start [options]
+Usage: openirc [options]        (from a checkout: bun run start [options])
 
   --config-dir PATH   Directory for openirc.jsonc and tui.jsonc
   --data-dir PATH     Directory for the local history database
@@ -97,8 +97,7 @@ Usage: bun run start [options]
   -h, --help          Show this help
   -v, --version       Show version
 
-Agent setup: bun run ctl --help (versioned JSON; no TUI needed).
-Control commands also work through this entrypoint: bun run start config schema.
+Agent setup: openirc help (versioned JSON; no TUI needed), e.g. openirc config schema.
 Start without options for the TUI. Local control defaults to inspect/configure/network only.
 Closing OpenIRC disconnects; use an existing bouncer for offline collection.
 Local history defaults to 30 days and can be disabled in Settings.

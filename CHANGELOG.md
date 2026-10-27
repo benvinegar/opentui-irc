@@ -4,6 +4,7 @@
 
 ### Added
 
+- `openirc` command: `bun link` installs it from a checkout, and `bun run build` produces a standalone `dist/openirc` executable. `openirc help` and other control commands work through it.
 - Runnable SolidJS/OpenTUI IRC client with a channel/DM sidebar, mouse and keyboard navigation, safe composer/paste handling, search, discovery, and settings.
 - Verified TLS/SASL connections, multiple networks, automatic reconnects, paced sending and explicit uncertain-send states.
 - Capability-gated IRCv3 history, replies, reactions, typing, read markers, and message removal, plus ordinary-IRC multiline fallback.

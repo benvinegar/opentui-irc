@@ -1,4 +1,6 @@
 import { join } from "node:path";
+// Bundled at build time so a compiled binary does not need package.json on disk.
+import packageMetadata from "../package.json" with { type: "json" };
 import { createApp } from "./app/create-app";
 import { randomIds, systemClock } from "./app/platform-independent-runtime";
 import type { AppApi } from "./contracts/app";
@@ -30,6 +32,7 @@ const CONTROL_COMMANDS = new Set([
   "secrets",
   "status",
   "capabilities",
+  "help",
   "shutdown",
 ]);
 function isControlInvocation(args: readonly string[]): boolean {
@@ -61,10 +64,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
     return 0;
   }
   if (options.mode === "version") {
-    const metadata = (await Bun.file(new URL("../package.json", import.meta.url)).json()) as {
-      version: string;
-    };
-    console.log(`OpenIRC ${metadata.version}`);
+    console.log(`OpenIRC ${packageMetadata.version}`);
     return 0;
   }
   if (process.platform !== "linux" && process.platform !== "darwin") {
