@@ -3,7 +3,26 @@
   "version": "0.0.0",
   "private": true,
   "description": "A newcomer-friendly IRC client built with OpenTUI, SolidJS, and Bun",
+  "keywords": [
+    "bun",
+    "irc",
+    "irc-client",
+    "ircv3",
+    "opentui",
+    "solidjs",
+    "terminal",
+    "tui"
+  ],
+  "homepage": "https://github.com/benvinegar/opentui-irc#readme",
+  "bugs": {
+    "url": "https://github.com/benvinegar/opentui-irc/issues"
+  },
   "license": "MIT",
+  "author": "Ben Vinegar",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/benvinegar/opentui-irc.git"
+  },
   "bin": {
     "openirc": "bin/openirc.ts"
   },

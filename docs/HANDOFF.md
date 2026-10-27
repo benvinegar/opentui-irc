@@ -5,7 +5,7 @@ Read [AGENTS.md](../AGENTS.md) first. This file records the latest checkpoint; [
 ## Current state
 
 - Runnable Bun + TypeScript + Solid/OpenTUI daily-driver alpha. Run `bun run start` from this checkout.
-- GitHub: `benvinegar/openirc`, private. Main development is on `main`; inspect Git status/remotes before changing anything. Do not publish the repository or create a release without approval.
+- GitHub: `benvinegar/opentui-irc`, public (MIT). Main development is on `main`; inspect Git status/remotes before changing anything. Do not create a release without approval.
 - Latest feature checkpoints:
   - Branch `ui/calm-redesign` (not merged): calm keyboard-first shell. Top bar/toolbars/Send button removed; `ctrl+k` palette holds conversations and secondary actions; one contextual footer; grouped transcript; draggable sidebar/member dividers plus the transcript author rail, persisting `tui.sidebarWidth` and new `tui.memberListWidth`/`tui.authorColumnWidth`; readable MOTD/LUSERS numerics. Verified with `bun run check`, `bun run test:terminal` and an isolated Herdr/Ergo QA profile under ignored `.pi/qa/redesign/`.
   - `a158c08`: compact glirc-style transcript. Aligned 24-hour time/nickname gutter, continuous transcript divider, wrapped text on the right, stable theme-aware nickname colors, no top/bottom spacer rows, adaptive multiline composer. New profiles use compact density.

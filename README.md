@@ -1,129 +1,108 @@
 # OpenIRC
 
-A newcomer-friendly IRC client for Linux and macOS, built with Bun, SolidJS, and OpenTUI. Mouse-driven controls, a channel/DM sidebar, and one conversation at a time—with keyboard alternatives throughout.
+A friendly terminal IRC client for Linux and macOS. It has a channel/DM sidebar, one conversation at a time, and full mouse support with keyboard shortcuts throughout. Built with [Bun](https://bun.sh), [SolidJS](https://www.solidjs.com) and [OpenTUI](https://github.com/sst/opentui).
 
-**Status: early daily-driver alpha.** The real terminal client, IRC connection stack, local history, search, and settings are implemented. This is not yet the complete feature set in the product plan.
+[![CI](https://github.com/benvinegar/opentui-irc/actions/workflows/ci.yml/badge.svg)](https://github.com/benvinegar/opentui-irc/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Agent-first configuration
+> **Status: alpha.** It's the author's daily driver, but expect rough edges and breaking config changes before 1.0.
 
-Tell your local coding agent to follow [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md). It can discover, plan, configure and verify OpenIRC without clicking through the TUI or rewriting files blindly:
+## Why OpenIRC
+
+- **Easy for newcomers.** Add a network, join a channel and start chatting from menus. You don't need to know slash commands, but `/help` lists them.
+- **Calm layout.** Grouped messages, a sidebar with unread and mention badges, a member list on wide windows, and one footer showing the keys you can use right now.
+- **Modern IRC where the server supports it.** IRCv3 chat history, replies, reactions, typing indicators, read markers and message removal. Each one turns on only when the server offers it; the rest of IRC works as usual.
+- **Safe by default.** Verified TLS, and SASL only over TLS. Passwords live in your OS keychain or an environment variable, never in plaintext config. Uncertain sends are never replayed automatically.
+- **Agents can configure it.** A versioned JSON control API lets your coding agent read the config schema, preview changes and apply them, even while the client is running.
+
+## Install
+
+Requires [Bun](https://bun.sh) 1.3.14 or newer.
 
 ```sh
-bun run --silent ctl --help
-bun run --silent ctl config schema
-bun run --silent ctl config get
-bun run --silent ctl config set tui.theme '"light"' --dry-run
-bun run --silent ctl config set tui.theme '"light"'
+git clone https://github.com/benvinegar/opentui-irc.git && cd opentui-irc
+bun install --frozen-lockfile
+bun link        # adds `openirc` to your PATH (~/.bun/bin)
 ```
 
-Settings work offline or through a private Unix socket while the client is running. Network profiles can be added, edited and removed; runtime actions share the same API as the UI. JSON responses, revision checks, dry runs and explicit effect plans make changes verifiable. Secrets use references or stdin-only secure storage—never a password argument or retrieval command.
+`bun link` runs straight from the checkout. To update, `git pull` (and `bun install` if dependencies changed). To uninstall, run `bun unlink`.
 
-Message/draft reading, chat sending and destructive work require separate explicit server grants **and** caller intent. Default live rights are inspect/configure/network. See [control design](docs/CONTROL.md) for the local trust boundary and [the agent guide](docs/AGENT_GUIDE.md) for setup recipes.
+**Standalone binary:** run `bun run build` to get `dist/openirc`, a single executable that needs neither Bun nor the source. Copy it anywhere on your PATH. It only runs on the OS and CPU it was built on.
 
-## Install and run
-
-Requires Bun **1.3.14+**. The TUI needs an interactive terminal; control commands do not.
+## Quick start
 
 ```sh
-git clone https://github.com/benvinegar/openirc.git && cd openirc
-bun install --frozen-lockfile
-bun link        # puts `openirc` on your PATH (~/.bun/bin), pointing at this checkout
 openirc
 ```
 
-`bun link` runs the checkout in place, so `git pull` (plus `bun install` when dependencies change) updates it; `bun unlink` removes it. Without linking, use `bun run start` from the checkout.
+1. Choose **Set up a network**. Presets fill in Libera.Chat and OFTC, or enter any TLS server.
+2. Pick a nickname. Optionally add your SASL account.
+3. Connect, then press **Ctrl+J** to join a channel.
 
-For a standalone executable that does not need Bun or the checkout at runtime, run `bun run build` and copy `dist/openirc` anywhere on your PATH. It is built for the current OS and CPU only.
+| Key                 | Action                             |
+| ------------------- | ---------------------------------- |
+| Ctrl+K              | Switch conversation / more actions |
+| Ctrl+J              | Join a channel                     |
+| Ctrl+F              | Search local history               |
+| Enter / Shift+Enter | Send / new line                    |
+| Tab                 | Complete nicknames and commands    |
+| F1                  | Help                               |
+| Ctrl+Q              | Quit                               |
 
-Control commands go through the same command: `openirc help`, `openirc config get`, `openirc status`.
-
-Use **Settings → Add network**, choose a TLS server, enter a nickname, and optionally configure an existing SASL account. Connect, join a channel, or open a direct conversation from the sidebar. You can also type `/help` for commands.
-
-Optional Libera.Chat and OFTC presets fill in server details without connecting automatically. Replies, reactions, typing, history playback, read markers, and message removal are capability-dependent; unsupported controls stay unavailable.
-
-Passwords can be stored in the platform credential vault when available. If that service is unavailable, explicitly reference an environment variable; OpenIRC never falls back to writing plaintext passwords in settings. Account registration itself remains network-specific.
-
-### Keyboard basics
-
-| Shortcut            | Action                                            |
-| ------------------- | ------------------------------------------------- |
-| Ctrl+K              | Switch conversation                               |
-| Ctrl+J              | Join channel                                      |
-| Ctrl+F              | Search local history                              |
-| F1                  | Help                                              |
-| Tab                 | Complete in composer; navigate controls elsewhere |
-| Enter / Shift+Enter | Send / newline                                    |
-| Ctrl+Q              | Confirm quit                                      |
-
-Mouse selection, scrolling, scrollbars, buttons, menus, setup, and conversation switching work without slash commands. Keyboard modifiers, clipboard integration and terminal-focus reporting vary by terminal.
-
-## History and connections
-
-- Local message history is **plaintext**, enabled by default with **30-day retention**. Settings can disable future logging; deleting existing history is a separate explicit action.
-- Closing the client disconnects. Use an existing IRC bouncer for offline collection; OpenIRC does not run a background service.
-- Nicknames can be reused. DMs are nickname-addressed, not verified-person archives; check account details before sharing private information.
-- Reconnects restore open channels. Server playback and modern interactions depend on negotiated server capabilities.
-- Multiline drafts use a bounded, paced ordinary-IRC fallback. Negotiated IRCv3 multiline is not implemented yet.
-- Written or echoed messages are not recipient-delivery/read receipts. Uncertain sends are never automatically resent.
-- No automatic link previews or media fetches; opening an external link requires confirmation.
+Click a message to copy, reply, react or open links. Click a nickname to see who they are. Drag across text to copy it.
 
 ## Configuration
 
-JSONC, in-app settings and the agent control API are supported. All current configuration fields have discoverable schemas and validated control edits. The settings UI covers a smaller subset; use the agent CLI for profile editing/removal and advanced settings. Reserved custom-keybinding changes are explicitly unsupported rather than silently ignored.
-
-| Data                     | Default location                                                      |
-| ------------------------ | --------------------------------------------------------------------- |
-| Settings, both platforms | `${XDG_CONFIG_HOME:-~/.config}/openirc/openirc.jsonc` and `tui.jsonc` |
-| Linux history            | `${XDG_DATA_HOME:-~/.local/share}/openirc/history.sqlite`             |
-| macOS history            | `~/Library/Application Support/OpenIRC/history.sqlite`                |
+Settings are JSONC files you can edit by hand, change in the in-app Settings screen, or change through the control CLI:
 
 ```sh
-bun run start --check-config
-bun run start --config-dir /path/to/config --data-dir /path/to/data
-bun run start --help
+openirc config get                                   # current settings
+openirc config schema                                # every setting, with types and defaults
+openirc config set tui.density '"comfortable"' --dry-run
+openirc config set tui.density '"comfortable"'      # applies live if the client is running
+openirc --check-config                               # validate the files
 ```
 
-There is no automatic project/cwd configuration discovery. Supported in-app/agent changes apply immediately where safe; plans report reconnect/restart requirements. Use `bun run --silent ctl config reload --dry-run` then `config reload` for external file edits. Settings use revision checks to detect conflicting edits. See [persistence guarantees](src/storage/README.md).
+| Data     | Location                                                              |
+| -------- | --------------------------------------------------------------------- |
+| Settings | `${XDG_CONFIG_HOME:-~/.config}/openirc/openirc.jsonc` and `tui.jsonc` |
+| History  | `${XDG_DATA_HOME:-~/.local/share}/openirc/history.sqlite` (Linux)     |
+|          | `~/Library/Application Support/OpenIRC/history.sqlite` (macOS)        |
 
-## Develop
+To have a coding agent set things up for you, point it at [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md). By default the control socket can inspect and configure. Reading messages, sending chat and destructive actions each need a separate, explicit grant.
 
-Node.js 24 is also required for the Vitest tooling.
+## Good to know
+
+- **History is local plaintext SQLite**, kept for 30 days by default. You can turn off logging in Settings.
+- **Closing the client disconnects.** There's no background service; use a bouncer if you want to stay online.
+- **Nicknames aren't identities.** DMs are addressed by nickname, which anyone can take later. Check WHOIS before sharing anything private.
+- **No link previews.** Nothing is fetched automatically, and opening a link asks first.
+- **Not included:** plugins, scripting, DCC, moderation tools, split panes.
+
+## Docs
+
+- [Agent guide](docs/AGENT_GUIDE.md) and [control API](docs/CONTROL.md)
+- [Security and privacy model](docs/SECURITY.md)
+- [Architecture](docs/ARCHITECTURE.md), [contracts](docs/CONTRACTS.md) and [decisions](docs/DECISIONS.md)
+- [Product plan](docs/PLAN.md) and [implementation status](docs/IMPLEMENTATION.md)
+- [IRC behaviour test matrix](docs/IRC_TEST_MATRIX.md)
+- [Changelog](CHANGELOG.md)
+
+## Contributing
+
+Bug reports and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first. In short:
 
 ```sh
-bun run check       # format, lint, types, unit tests, Bun integration/UI tests
-bun run test        # platform-neutral tests under Node/Vitest
-bun run test:bun    # Bun sockets, SQLite, production CLI and real headless OpenTUI
-bun run format
+bun install --frozen-lockfile   # also installs the pre-commit hook
+bun run check                   # format, lint, types and every test
 ```
 
-Tests use local fake IRC servers and temporary files—not public networks or personal credentials. An optional real-server check launches a pinned official Ergo container on loopback only and cleans it up afterward:
+Node.js 24 is also needed for the Vitest suite. Tests use local fake IRC servers and never connect to public networks.
 
-```sh
-bun run test:ergo    # requires Docker; may download the pinned official image
-bun run test:terminal # requires Python 3; real production TTY startup/shutdown
-```
+## Security
 
-Ergo 2.19.1 was verified for registration, JOIN, server IDs/echoes, replies, typing, reactions, and CHATHISTORY playback. Read-marker and redaction protocol tests do not establish every server/bouncer's interoperability. Installation configures a format/lint pre-commit hook. Source execution is the supported development path; standalone binaries are not packaged yet.
-
-## Architecture and scope
-
-- [Latest checkpoint and session handoff](docs/HANDOFF.md)
-- [Agent operation guide](docs/AGENT_GUIDE.md)
-- [Versioned local control API](docs/CONTROL.md)
-- [Implementation status and remaining work](docs/IMPLEMENTATION.md)
-- [Security/privacy model](docs/SECURITY.md)
-- [Product plan](docs/PLAN.md)
-- [Architecture and module ownership](docs/ARCHITECTURE.md)
-- [API behavioral contracts](docs/CONTRACTS.md)
-- [Architecture decisions](docs/DECISIONS.md)
-- [Parallel workstreams](docs/WORKSTREAMS.md)
-- [UI implementation and limitations](src/ui/README.md)
-- [Agent/contributor guidance](AGENTS.md)
-
-The UI sends typed actions and observes framework-neutral read models. IRC sessions, transport, storage and OS effects use replaceable adapters. No plugin system, moderation suite, DCC, split panes, cloud sync, or bundled bouncer is included.
-
-Linux is exercised locally; macOS CI is configured, but real macOS/SSH/tmux manual validation remains outstanding.
+Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) © Ben Vinegar
