@@ -7,6 +7,8 @@ A friendly terminal IRC client for Linux and macOS. It has a channel/DM sidebar,
 
 > **Status: alpha.** It's the author's daily driver, but expect rough edges and breaking config changes before 1.0.
 
+![OpenIRC showing #lounge with a sidebar of channels and DMs, grouped messages with a reply and emoji reactions, and a member list](docs/screenshots/chat-dark.png)
+
 ## Why OpenIRC
 
 - **Easy for newcomers.** Add a network, join a channel and start chatting from menus. You don't need to know slash commands, but `/help` lists them.
@@ -14,6 +16,21 @@ A friendly terminal IRC client for Linux and macOS. It has a channel/DM sidebar,
 - **Modern IRC where the server supports it.** IRCv3 chat history, replies, reactions, typing indicators, read markers and message removal. Each one turns on only when the server offers it; the rest of IRC works as usual.
 - **Safe by default.** Verified TLS, and SASL only over TLS. Passwords live in your OS keychain or an environment variable, never in plaintext config. Uncertain sends are never replayed automatically.
 - **Agents can configure it.** A versioned JSON control API lets your coding agent read the config schema, preview changes and apply them, even while the client is running.
+
+## Screenshots
+
+| Click a message for actions                                                  | Ctrl+K to jump anywhere                                                            |
+| ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| ![Message menu with copy, reply, react and about](docs/screenshots/menu.png) | ![Jump-to palette listing conversations and actions](docs/screenshots/palette.png) |
+
+<details>
+<summary>Light theme</summary>
+
+![OpenIRC in the light theme](docs/screenshots/chat-light.png)
+
+</details>
+
+Screenshots come from a local test server with made-up users.
 
 ## Install
 
