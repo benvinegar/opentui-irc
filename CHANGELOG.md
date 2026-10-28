@@ -39,6 +39,7 @@
 
 ### Fixed
 
+- Upgrading an older history database no longer fails on macOS when creating its backup.
 - The server's message of the day and user counts now show their text instead of "IRC server response 372.".
 - Releasing a dialog press or divider drag no longer opens the message underneath.
 - A rejected or temporarily unavailable nickname (432/437) during sign-in now tries your alternate nicknames, and running out of nicknames stops with a clear error instead of hanging until the registration timeout.

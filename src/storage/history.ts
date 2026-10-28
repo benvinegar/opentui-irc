@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, open, unlink } from "node:fs/promises";
-import { dirname } from "node:path";
+import { chmod, link, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { entityId, type Cursor, type Result } from "../contracts/common";
 import type { Message } from "../contracts/model";
 import type {
@@ -43,6 +43,12 @@ function checkPayload(items: readonly unknown[], limit = MAX_BATCH_BYTES): void 
     if (bytes > limit)
       throw new StorageFault("invalid-input", "Storage payload exceeds the supported size.");
   }
+}
+async function exists(path: string): Promise<boolean> {
+  return lstat(path).then(
+    () => true,
+    (cause: unknown) => !(cause instanceof Error && "code" in cause && cause.code === "ENOENT"),
+  );
 }
 function validLimit(value: number): boolean {
   return Number.isInteger(value) && value > 0 && value <= MAX_PAGE;
@@ -133,27 +139,36 @@ export async function createHistoryRepository(path: string): Promise<Result<Hist
       })();
     }
     if (version === 1) {
-      // VACUUM INTO snapshots committed WAL content too; create the target privately
-      // before SQLite writes it. Never overwrite an earlier migration backup.
+      // VACUUM INTO snapshots committed WAL content too. Some SQLite builds (macOS system
+      // SQLite) refuse an existing target, so write into a private temporary directory and
+      // hard-link it into place: the link never overwrites an earlier migration backup.
       const backupPath = `${path}.schema-v1.bak`;
-      let backup;
+      const conflict = () =>
+        new StorageFault(
+          "conflict",
+          "History migration backup already exists. Preserve it and inspect before retrying.",
+        );
+      if (await exists(backupPath)) throw conflict();
+      let staging;
       try {
-        backup = await open(backupPath, "wx", 0o600);
-      } catch (cause) {
-        if (cause instanceof Error && "code" in cause && cause.code === "EEXIST")
-          throw new StorageFault(
-            "conflict",
-            "History migration backup already exists. Preserve it and inspect before retrying.",
-          );
+        staging = await mkdtemp(join(dirname(path), ".history-migration-"));
+        await chmod(staging, 0o700);
+      } catch {
         throw new StorageFault("storage", "Could not create a private history migration backup.");
       }
       try {
-        await backup.close();
-        db.query("VACUUM INTO ?").run(backupPath);
-      } catch (cause) {
-        await backup.close().catch(() => {});
-        await unlink(backupPath).catch(() => {});
-        throw cause;
+        const snapshot = join(staging, "backup.sqlite");
+        db.query("VACUUM INTO ?").run(snapshot);
+        await chmod(snapshot, 0o600);
+        try {
+          await link(snapshot, backupPath);
+        } catch (cause) {
+          if (cause instanceof Error && "code" in cause && cause.code === "EEXIST")
+            throw conflict();
+          throw cause;
+        }
+      } finally {
+        await rm(staging, { recursive: true, force: true }).catch(() => {});
       }
       db.transaction(() => {
         db!.exec(`

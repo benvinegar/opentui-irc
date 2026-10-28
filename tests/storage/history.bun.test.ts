@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { entityId, type Result } from "../../src/contracts/common";
 import type { Message } from "../../src/contracts/model";
 import type { ConversationRecord, HistoryRepository } from "../../src/contracts/storage";
@@ -81,6 +81,9 @@ describe("SQLite history", () => {
       expect(value(await upgraded.page(first.id, { limit: 10 }, signal)).items).toEqual([wal]);
       const backupPath = `${path}.schema-v1.bak`;
       expect((await stat(backupPath)).mode & 0o777).toBe(0o600);
+      expect(
+        (await readdir(dirname(path))).filter((name) => name.startsWith(".history-migration-")),
+      ).toEqual([]);
       const backup = new Database(backupPath, { readonly: true });
       try {
         expect(
