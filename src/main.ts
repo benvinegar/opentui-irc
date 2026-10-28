@@ -64,11 +64,11 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
     return 0;
   }
   if (options.mode === "version") {
-    console.log(`OpenIRC ${packageMetadata.version}`);
+    console.log(`opentui-irc ${packageMetadata.version}`);
     return 0;
   }
   if (process.platform !== "linux" && process.platform !== "darwin") {
-    console.error("OpenIRC currently supports Linux and macOS.");
+    console.error("opentui-irc currently supports Linux and macOS.");
     return 1;
   }
   const root = new AbortController();
@@ -84,7 +84,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   }
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.error(
-      "OpenIRC needs an interactive terminal. Use --help or --check-config for non-interactive commands.",
+      "opentui-irc needs an interactive terminal. Use --help or --check-config for non-interactive commands.",
     );
     return 1;
   }
@@ -112,7 +112,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
         const result = await owned?.shutdown();
         if (result && !result.ok) failure = result.error.message;
       } catch {
-        failure = "OpenIRC could not flush all local state.";
+        failure = "opentui-irc could not flush all local state.";
       }
       // Never release the profile while the app is still flushing or initializing.
       await server?.close();
@@ -146,7 +146,8 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
                   ok: false,
                   error: {
                     code: "unavailable",
-                    message: "OpenIRC is initializing or shutting down. Retry inspection shortly.",
+                    message:
+                      "opentui-irc is initializing or shutting down. Retry inspection shortly.",
                     retryable: true,
                   },
                 }),
@@ -225,7 +226,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   } catch {
     await stop();
     console.error(
-      "OpenIRC could not start the terminal interface. Check your terminal and configuration.",
+      "opentui-irc could not start the terminal interface. Check your terminal and configuration.",
     );
     return 1;
   } finally {

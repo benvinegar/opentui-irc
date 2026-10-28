@@ -339,7 +339,7 @@ export function actionSchema(): JsonObject {
   };
   return {
     $schema: "https://json-schema.org/draft/2020-12/schema",
-    title: "OpenIRC AppAction",
+    title: "opentui-irc AppAction",
     description:
       "All supported typed actions. Rights require both server grant and request intent. Destructive actions also require confirm:true. IRC away/nick publish presence/identity under network permission; topic writes require send-messages too.",
     "x-runtime-validation":

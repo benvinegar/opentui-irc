@@ -34,7 +34,7 @@ test("TLS accepts a trusted localhost certificate; rejects untrusted CA and wron
       "-days",
       "1",
       "-subj",
-      "/CN=OpenIRC test CA",
+      "/CN=opentui-irc test CA",
     ]);
     openssl([
       "req",

@@ -1171,7 +1171,7 @@ function Shell(props: UiOptions) {
       )
       .slice(0, 200),
   );
-  const headerName = () => active()?.name ?? "Welcome to OpenIRC";
+  const headerName = () => active()?.name ?? "Welcome to opentui-irc";
   const typingLabel = () => {
     const ids = timeline()?.typing ?? [];
     const nicks = ids
@@ -1352,21 +1352,27 @@ function Shell(props: UiOptions) {
       {
         id: "settings",
         label: "Settings",
-        group: "OpenIRC",
+        group: "opentui-irc",
         hint: "ctrl+,",
         run: () => openModal("settings"),
       },
       {
         id: "help",
         label: "Help: keys and commands",
-        group: "OpenIRC",
+        group: "opentui-irc",
         hint: "f1",
         run: () => {
           setHelpCommand(undefined);
           openModal("help");
         },
       },
-      { id: "quit", label: "Quit", group: "OpenIRC", hint: "ctrl+q", run: () => openModal("quit") },
+      {
+        id: "quit",
+        label: "Quit",
+        group: "opentui-irc",
+        hint: "ctrl+q",
+        run: () => openModal("quit"),
+      },
     );
     return entries;
   };
@@ -1426,7 +1432,7 @@ function Shell(props: UiOptions) {
           >
             <box height={2} flexShrink={0} paddingX={1}>
               <text height={1} fg={colors.accent}>
-                <b>openirc</b>
+                <b>opentui-irc</b>
               </text>
             </box>
             <For each={state().networks}>
@@ -2174,7 +2180,7 @@ function Shell(props: UiOptions) {
             </Show>
             <Show when={modal() === "quit"}>
               <text fg={colors.text}>
-                OpenIRC will close its connections and flush local history. It does not remain
+                opentui-irc will close its connections and flush local history. It does not remain
                 connected in the background.
               </text>
               <Button

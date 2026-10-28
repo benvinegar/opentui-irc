@@ -85,7 +85,7 @@ describe("real Solid/OpenTUI shell", () => {
         {
           ...welcomeMessage,
           id: entityId<"message">("network-error"),
-          sender: { nick: "OpenIRC" },
+          sender: { nick: "opentui-irc" },
           kind: "event",
           text: "connection-error-kept",
         },
@@ -1178,9 +1178,9 @@ describe("real Solid/OpenTUI shell", () => {
   });
   test("renders hierarchy, accepts a message, and restores subscriptions", async () => {
     const { fake, view } = await mount();
-    expect(view.captureCharFrame()).toContain("OpenIRC");
+    expect(view.captureCharFrame()).toContain("opentui-irc");
     expect(view.captureCharFrame()).toContain("CHANNELS");
-    expect(view.captureCharFrame()).toContain("Welcome to OpenIRC!");
+    expect(view.captureCharFrame()).toContain("Welcome to opentui-irc!");
     await view.mockInput.pasteBracketedText("Hello 世界 😀");
     await view.mockInput.pressEnter();
     await tick();

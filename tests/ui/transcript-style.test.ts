@@ -66,7 +66,9 @@ describe("compact transcript styling", () => {
     expect(continuesGroup(line("joey", 0), line("alice", 60_000))).toBe(false);
     expect(continuesGroup(line("joey", 0), line("joey", 6 * 60_000))).toBe(false);
     expect(continuesGroup(line("joey", 0), line("joey", 60_000, "event"))).toBe(false);
-    expect(continuesGroup(line("OpenIRC", 0, "event"), line("OpenIRC", 1, "event"))).toBe(true);
+    expect(continuesGroup(line("opentui-irc", 0, "event"), line("opentui-irc", 1, "event"))).toBe(
+      true,
+    );
     const lateNight = new Date(2026, 0, 1, 23, 59).getTime();
     expect(
       continuesGroup(

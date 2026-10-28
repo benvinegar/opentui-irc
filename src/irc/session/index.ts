@@ -333,7 +333,7 @@ class Attempt {
         if (this.connection && this.phase === "ready") {
           const quit = this.codec.encode(
             frame("QUIT", [
-              reason && content(reason) && byteLength(reason) <= 200 ? reason : "OpenIRC",
+              reason && content(reason) && byteLength(reason) <= 200 ? reason : "opentui-irc",
             ]),
           );
           if (quit.ok)
@@ -1059,7 +1059,7 @@ class Attempt {
             text:
               input.command === "NOTICE"
                 ? `${plain(sender)} sent a CTCP ${name} reply.`
-                : `${plain(sender)} sent a CTCP ${name} request; OpenIRC does not answer CTCP requests.`,
+                : `${plain(sender)} sent a CTCP ${name} request; opentui-irc does not answer CTCP requests.`,
           });
         return;
       }

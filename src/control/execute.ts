@@ -94,7 +94,8 @@ export function createControlExecutor(options: ControlExecutorOptions) {
         if (!OFFLINE_METHODS.includes(parsed.value.method))
           return rejected({
             code: "unavailable",
-            message: "This command needs a running OpenIRC instance. No offline changes were made.",
+            message:
+              "This command needs a running opentui-irc instance. No offline changes were made.",
             retryable: false,
           });
         const cacheKey = acquired.value.paths.directory;

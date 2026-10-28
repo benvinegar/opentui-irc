@@ -18,6 +18,7 @@
 
 ### Changed
 
+- The project is now called opentui-irc. The `openirc` command, config and data locations are unchanged; `opentui-irc` also works as a command.
 - Features a server offers after you connect (IRCv3 `cap-notify`, for example chat history on a bouncer) are now enabled without reconnecting.
 - Typing indicators follow IRCv3 more closely: stepping away from a kept draft sends "paused" rather than "done", so others see you paused instead of finished.
 - Calmer, keyboard-first layout: the top bar, per-network buttons, conversation toolbar, Send button and duplicate hint rows are gone. Secondary actions live in a `ctrl+k` palette; one footer shows contextual keys, status and a plaintext-connection warning.

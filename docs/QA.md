@@ -10,7 +10,7 @@ Use the real Solid/OpenTUI client in an explicitly allocated Herdr scratch pane.
 - Use a dedicated local fixture server and synthetic nicknames/channels/messages. The pinned Ergo setup in `scripts/smoke-ergo.ts` is the reference. Bind ports to loopback only. For restart tests, publish **explicit fixed host ports**: Docker-assigned ephemeral ports can change on restart.
 - Trust only the fixture's generated certificate, using `NODE_EXTRA_CA_CERTS` when needed. Never disable TLS verification, reuse operator credentials, or resolve the user's secrets.
 - Additional control launch grants and caller read/send/destructive flags are appropriate only when explicitly testing the corresponding synthetic-profile behavior. Keep normal user-client permissions unchanged.
-- Before each input batch, inspect `herdr pane process-info --pane "$QA_PANE"` and verify that the foreground process is OpenIRC with the exact private config directory. Stop on a crash; never continue typing into its replacement shell.
+- Before each input batch, inspect `herdr pane process-info --pane "$QA_PANE"` and verify that the foreground process is opentui-irc with the exact private config directory. Stop on a crash; never continue typing into its replacement shell.
 
 ## Keys and mouse input
 

@@ -1,5 +1,5 @@
 {
-  "name": "openirc",
+  "name": "opentui-irc",
   "version": "0.0.0",
   "private": true,
   "description": "A newcomer-friendly IRC client built with OpenTUI, SolidJS, and Bun",
@@ -24,7 +24,8 @@
     "url": "git+https://github.com/benvinegar/opentui-irc.git"
   },
   "bin": {
-    "openirc": "bin/openirc.ts"
+    "openirc": "bin/openirc.ts",
+    "opentui-irc": "bin/openirc.ts"
   },
   "type": "module",
   "scripts": {

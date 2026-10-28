@@ -1,4 +1,4 @@
-# OpenIRC
+# opentui-irc
 
 A friendly terminal IRC client for Linux and macOS. It has a channel/DM sidebar, one conversation at a time, and full mouse support with keyboard shortcuts throughout. Built with [Bun](https://bun.sh), [SolidJS](https://www.solidjs.com) and [OpenTUI](https://github.com/sst/opentui).
 
@@ -7,9 +7,9 @@ A friendly terminal IRC client for Linux and macOS. It has a channel/DM sidebar,
 
 > **Status: alpha.** It's the author's daily driver, but expect rough edges and breaking config changes before 1.0.
 
-![OpenIRC showing #lounge with a sidebar of channels and DMs, grouped messages with a reply and emoji reactions, and a member list](docs/screenshots/chat-dark.png)
+![opentui-irc showing #lounge with a sidebar of channels and DMs, grouped messages with a reply and emoji reactions, and a member list](docs/screenshots/chat-dark.png)
 
-## Why OpenIRC
+## Why opentui-irc
 
 - **Easy for newcomers.** Add a network, join a channel and start chatting from menus. You don't need to know slash commands, but `/help` lists them.
 - **Calm layout.** Grouped messages, a sidebar with unread and mention badges, a member list on wide windows, and one footer showing the keys you can use right now.
@@ -26,7 +26,7 @@ A friendly terminal IRC client for Linux and macOS. It has a channel/DM sidebar,
 <details>
 <summary>Light theme</summary>
 
-![OpenIRC in the light theme](docs/screenshots/chat-light.png)
+![opentui-irc in the light theme](docs/screenshots/chat-light.png)
 
 </details>
 
@@ -39,7 +39,7 @@ Requires [Bun](https://bun.sh) 1.3.14 or newer.
 ```sh
 git clone https://github.com/benvinegar/opentui-irc.git && cd opentui-irc
 bun install --frozen-lockfile
-bun link        # adds `openirc` to your PATH (~/.bun/bin)
+bun link        # adds `openirc` (and `opentui-irc`) to your PATH (~/.bun/bin)
 ```
 
 `bun link` runs straight from the checkout. To update, `git pull` (and `bun install` if dependencies changed). To uninstall, run `bun unlink`.

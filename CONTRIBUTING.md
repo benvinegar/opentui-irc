@@ -1,6 +1,6 @@
-# Contributing to OpenIRC
+# Contributing to opentui-irc
 
-Thanks for helping. OpenIRC is a small, opinionated client, so please open an issue to discuss larger changes before writing code.
+Thanks for helping. opentui-irc is a small, opinionated client, so please open an issue to discuss larger changes before writing code.
 
 ## Setup
 

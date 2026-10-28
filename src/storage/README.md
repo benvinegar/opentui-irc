@@ -24,7 +24,7 @@ Strict runtime validation rejects unknown settings fields (including accidental 
 
 Revision hashes cover exact contents of **both** files, including comments and missing-file state. A save creates a 0600 exclusive `.settings.lock`, checks both fingerprints, prepares a unique 0600 temp file, flushes it, checks both fingerprints again, then atomically renames **one** settings file and fsyncs the directory. Cooperating writers serialize; a busy lock yields conflict. Failure before rename leaves the old settings file intact and attempts temp/lock cleanup. A durability error after rename is reported even though replacement may already be visible. Guarantees depend on local Linux/macOS POSIX filesystem semantics; network filesystem semantics are not claimed.
 
-Ordinary filesystems cannot atomically compare two externally edited files and replace one. A non-cooperating editor can still race the final check/rename. After a process crash, a stale `.settings.lock` must be removed explicitly once no OpenIRC writer is active; it is not automatically stolen based on an unsafe age guess. Orphan `.settings-*.tmp` files are never loaded as config and may be removed after confirming no active writer.
+Ordinary filesystems cannot atomically compare two externally edited files and replace one. A non-cooperating editor can still race the final check/rename. After a process crash, a stale `.settings.lock` must be removed explicitly once no opentui-irc writer is active; it is not automatically stolen based on an unsafe age guess. Orphan `.settings-*.tmp` files are never loaded as config and may be removed after confirming no active writer.
 
 ## Secrets
 

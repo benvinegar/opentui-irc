@@ -22,7 +22,7 @@ describe("production CLI", () => {
   test("help/version do not need a TTY", async () => {
     const help = await run("--help");
     expect(help.code).toBe(0);
-    expect(help.stdout).toContain("OpenIRC");
+    expect(help.stdout).toContain("opentui-irc");
     const version = await run("--version");
     expect(version.code).toBe(0);
     expect(version.stdout).toContain("0.0.0");

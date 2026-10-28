@@ -298,9 +298,9 @@ describe("messages", () => {
     );
     expect(of(payloads, "chat")).toEqual([]);
     expect(of(payloads, "notice").map((notice) => notice.text)).toEqual([
-      "bob sent a CTCP VERSION request; OpenIRC does not answer CTCP requests.",
-      "bob sent a CTCP PING request; OpenIRC does not answer CTCP requests.",
-      "bob sent a CTCP DCC request; OpenIRC does not answer CTCP requests.",
+      "bob sent a CTCP VERSION request; opentui-irc does not answer CTCP requests.",
+      "bob sent a CTCP PING request; opentui-irc does not answer CTCP requests.",
+      "bob sent a CTCP DCC request; opentui-irc does not answer CTCP requests.",
     ]);
     expect(fixture.written.filter((frame) => frame.command === "NOTICE")).toEqual([]);
   });

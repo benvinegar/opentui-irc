@@ -195,7 +195,7 @@ describe("effect platform branches", () => {
       await sink.notify({ title: "--evil\u001b[2J\n", body: "b".repeat(5_000), conversationId }),
     ).toMatchObject({ ok: true });
     const argv = spy.calls[0]!.argv;
-    expect(argv.slice(0, 3)).toEqual(["notify-send", "--app-name=OpenIRC", "--"]);
+    expect(argv.slice(0, 3)).toEqual(["notify-send", "--app-name=opentui-irc", "--"]);
     expect(argv[3]).toBe("--evil [2J ");
     expect(argv[4]).toHaveLength(1_024);
     await sink.notify({ title: "no body", conversationId });

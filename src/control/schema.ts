@@ -330,7 +330,7 @@ export function configurationSchema(): JsonObject {
   return {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     $id: "https://openirc.local/schemas/settings-v1.json",
-    title: "OpenIRC SettingsDocument",
+    title: "opentui-irc SettingsDocument",
     ...object(
       "Revisioned settings. Revisions are opaque read-only CAS tokens covering both files, not editable settings.",
       {

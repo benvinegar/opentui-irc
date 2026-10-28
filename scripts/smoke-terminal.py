@@ -109,7 +109,7 @@ def smoke(root, authorized_shutdown=False, launcher=None):
     screen = output.decode("utf8", "replace")
     result = {
         "exitCode": code,
-        "renderedOpenIRC": "OpenIRC" in screen,
+        "renderedName": "opentui-irc" in screen,
         "renderedSettings": "Settings" in screen,
         "capturedBytes": len(output),
         "hasTypeError": "TypeError" in screen,
@@ -117,7 +117,7 @@ def smoke(root, authorized_shutdown=False, launcher=None):
         "authorizedShutdown": authorized_shutdown,
         "launcher": " ".join(launcher) if launcher else "bun run src/main.ts",
     }
-    if code != 0 or not result["renderedOpenIRC"] or not result["renderedSettings"] or result["hasTypeError"]:
+    if code != 0 or not result["renderedName"] or not result["renderedSettings"] or result["hasTypeError"]:
         raise RuntimeError("Terminal/control smoke test failed; no private config was used")
     return result
 

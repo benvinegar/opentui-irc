@@ -8,7 +8,7 @@ Include what you found, how to reproduce it, and the impact you expect. You'll g
 
 ## Supported versions
 
-OpenIRC is alpha software. Only the latest `main` receives fixes.
+opentui-irc is alpha software. Only the latest `main` receives fixes.
 
 ## Scope
 

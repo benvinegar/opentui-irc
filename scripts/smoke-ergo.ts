@@ -75,7 +75,7 @@ try {
                   nick: `${label}${suffix}`,
                   alternateNicks: [],
                   username: "openirc",
-                  realname: "OpenIRC local interoperability test",
+                  realname: "opentui-irc local interoperability test",
                 },
                 autoConnect: true,
                 autoJoin: [{ channel }],

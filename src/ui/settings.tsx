@@ -112,7 +112,7 @@ export function SettingsForm(props: {
                 nick: nick().trim(),
                 alternateNicks: [`${nick().trim()}_`],
                 username: nick().trim(),
-                realname: "OpenIRC user",
+                realname: "opentui-irc user",
               },
               autoConnect: false,
               autoJoin: channel() ? [{ channel: channel() }] : [],

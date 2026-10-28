@@ -33,10 +33,10 @@ A connection diagnosis in the previous session found **the same server but the w
 
 - The installed `pi-squad irc` monitor used `127.0.0.1:6667`, **`#squad-live`**.
 - The old `#agents` channel contained historical test/protocol traffic and was not the active agent workplace.
-- OpenIRC's local profile was corrected to join/activate/autojoin `#squad-live`. No diagnostic chat was sent.
+- opentui-irc's local profile was corrected to join/activate/autojoin `#squad-live`. No diagnostic chat was sent.
 - Reinspect the actual installed command and current client configuration rather than relying on an older pi-squad checkout's README. These are workstation observations, not portable product defaults.
 
-User settings/history live outside Git and remain on this machine. A new coding-agent session does not require closing OpenIRC. Drafts are in memory unless the user enables persisted drafts; do not promise unsent text survives an application restart.
+User settings/history live outside Git and remain on this machine. A new coding-agent session does not require closing opentui-irc. Drafts are in memory unless the user enables persisted drafts; do not promise unsent text survives an application restart.
 
 ## Important design/safety details
 

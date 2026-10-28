@@ -1,8 +1,8 @@
-# Configure and operate OpenIRC as an agent
+# Configure and operate opentui-irc as an agent
 
 Use the supported control interface, not TUI clicks, raw IRC, SQL, or blind configuration-file rewrites. This guide applies to any local coding agent; no MCP server or agent-specific extension is required.
 
-Run commands from the OpenIRC checkout. `bun run --silent ctl …` suppresses Bun's script-command echo; stdout contains exactly one version-1 JSON envelope. A nonzero exit means failure. No TUI is needed for offline setup.
+Run commands from the opentui-irc checkout. `bun run --silent ctl …` suppresses Bun's script-command echo; stdout contains exactly one version-1 JSON envelope. A nonzero exit means failure. No TUI is needed for offline setup.
 
 ## 1. Discover before changing anything
 
@@ -113,7 +113,7 @@ bun run --silent ctl secrets store --stdin < /protected/password-file
 
 The response contains only `{reference}`. The CLI removes exactly one terminal LF/CRLF from stdin; it never accepts a password argv/file-value option. Disable shell tracing and do not print or fetch the password into the model context first. No secret-retrieval command exists. OS vault unavailability is explicit; no plaintext fallback. Environment references require the variable to exist in the **running app's environment**, not merely a later CLI process.
 
-Account registration, MFA and initial secret provisioning can still require the user or a separate trusted credential system. OpenIRC cannot manufacture that access. A successful vault write followed by a failed settings save can leave an unused vault entry.
+Account registration, MFA and initial secret provisioning can still require the user or a separate trusted credential system. opentui-irc cannot manufacture that access. A successful vault write followed by a failed settings save can leave an unused vault entry.
 
 `configure` + `network` is trusted authority: it can change the hosts that receive referenced authentication material. The local permission model is not a sandbox against malicious same-user automation.
 
@@ -157,4 +157,4 @@ A live server must also grant destructive permission. Offline mode can edit sett
 
 The private socket/profile lease prevents offline writers from racing a running app. Provably dead locks can recover safely; ambiguous locks/recovery mutexes fail busy rather than deleting something potentially live. Never recursively delete a runtime directory or force-remove an active lease to bypass it.
 
-OpenIRC still runs as a foreground TUI. This control plane does not launch a detached service or collect IRC messages while closed. See [CONTROL.md](CONTROL.md) for the wire/lifecycle design and [SECURITY.md](SECURITY.md) for the trust model.
+opentui-irc still runs as a foreground TUI. This control plane does not launch a detached service or collect IRC messages while closed. See [CONTROL.md](CONTROL.md) for the wire/lifecycle design and [SECURITY.md](SECURITY.md) for the trust model.

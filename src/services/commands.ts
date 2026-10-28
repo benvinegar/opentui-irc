@@ -24,7 +24,7 @@ const entries = [
   ["unmute", "/unmute", "Restore notifications in this conversation"],
   ["settings", "/settings", "Open network and privacy settings"],
   ["help", "/help [command]", "Show commands and keyboard shortcuts"],
-  ["quit", "/quit", "Disconnect and exit OpenIRC"],
+  ["quit", "/quit", "Disconnect and exit opentui-irc"],
 ].map(([name, usage, description]) => ({ name: name!, usage: usage!, description: description! }));
 
 const invalid = (message: string): Result<InputIntent> => ({

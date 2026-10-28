@@ -126,7 +126,7 @@ export function createNotificationSink(options: EffectOptions = {}): Notificatio
       const body = safe(notification.body ?? "");
       const signal = new AbortController().signal;
       if (platform === "linux")
-        return run({ argv: ["notify-send", "--app-name=OpenIRC", "--", title, body], signal });
+        return run({ argv: ["notify-send", "--app-name=opentui-irc", "--", title, body], signal });
       if (platform === "darwin")
         return run({
           argv: [

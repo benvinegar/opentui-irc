@@ -1,6 +1,6 @@
-# OpenIRC agent guide
+# opentui-irc agent guide
 
-OpenIRC is a newcomer-first Linux/macOS IRC client: Bun + TypeScript + SolidJS + OpenTUI (`@opentui/solid`, not React). MIT. Personal daily driver first; no deadline. Discord-like visual hierarchy, Slack-like channel/DM sidebar, one active conversation.
+opentui-irc is a newcomer-first Linux/macOS IRC client: Bun + TypeScript + SolidJS + OpenTUI (`@opentui/solid`, not React). MIT. Personal daily driver first; no deadline. Discord-like visual hierarchy, Slack-like channel/DM sidebar, one active conversation.
 
 ## Configure the user's client as an agent
 

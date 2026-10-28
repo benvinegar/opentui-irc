@@ -1,6 +1,6 @@
 # IRC behavior test matrix
 
-WeeChat's IRC unit suite (`tests/unit/plugins/irc/` at [weechat@f70fbda](https://github.com/weechat/weechat/tree/f70fbda/tests/unit/plugins/irc), 2026-10-21) is used as a **checklist of situations**, not as a source. WeeChat is GPL-3.0 and OpenIRC is MIT: no WeeChat test code, fixtures or expected strings are copied. Our tests assert our own semantic events, not WeeChat's display text.
+WeeChat's IRC unit suite (`tests/unit/plugins/irc/` at [weechat@f70fbda](https://github.com/weechat/weechat/tree/f70fbda/tests/unit/plugins/irc), 2026-10-21) is used as a **checklist of situations**, not as a source. WeeChat is GPL-3.0 and opentui-irc is MIT: no WeeChat test code, fixtures or expected strings are copied. Our tests assert our own semantic events, not WeeChat's display text.
 
 Of WeeChat's 554 IRC `TEST()` cases, about 300 are empty `TODO` stubs (mostly `test-irc-command.cpp`, `test-irc-server.cpp`, `test-irc-nick.cpp`, `test-irc-list.cpp`). The substantive behavior lives in `test-irc-protocol.cpp` (170 cases, one per command/numeric) and the parser, mode, tag, batch and SASL files.
 

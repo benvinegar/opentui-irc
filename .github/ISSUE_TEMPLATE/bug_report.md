@@ -14,7 +14,7 @@ labels: bug
 
 **Environment**
 
-- OpenIRC commit or `openirc --version`:
+- opentui-irc commit or `openirc --version`:
 - OS and terminal (e.g. Ghostty on macOS 15, inside tmux?):
 - Bun version (`bun --version`):
 - IRC network/server software, if relevant:

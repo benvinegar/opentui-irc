@@ -90,7 +90,7 @@ export function createControlService(options: ControlServiceOptions): ControlHan
     cache.delete(id);
   };
   const live = () => {
-    if (!options.app) fail("unavailable", "This command needs a running OpenIRC instance.");
+    if (!options.app) fail("unavailable", "This command needs a running opentui-irc instance.");
     return options.app;
   };
   const requireRights = (request: ControlRequest, rights: readonly ControlPermission[]) => {

@@ -162,7 +162,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     if (stopping)
       return Promise.resolve({
         ok: false,
-        error: error("unavailable", "OpenIRC is shutting down."),
+        error: error("unavailable", "opentui-irc is shutting down."),
       });
     if (signal.aborted)
       return Promise.resolve({ ok: false, error: error("cancelled", "Operation cancelled.") });
@@ -804,7 +804,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       id: deps.ids.next<"message">(),
       conversationId: c.view.id,
       networkId,
-      sender: { nick: "OpenIRC" },
+      sender: { nick: "opentui-irc" },
       kind: "event",
       text: plainText(text),
       receivedAt: deps.clock.now(),
@@ -1457,7 +1457,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     attempts.delete(networkId);
     attempt?.controller.abort();
     if (attempt?.session) {
-      const result = await attempt.session.close("Leaving OpenIRC");
+      const result = await attempt.session.close("Leaving opentui-irc");
       if (!result.ok) report(result.error, networkId);
     }
     for (const [id, entry] of pending)
@@ -1484,7 +1484,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         action.type === "typing.set";
       let publishAfter = !ephemeral;
       try {
-        if (stopping) reject("unavailable", "OpenIRC is shutting down.");
+        if (stopping) reject("unavailable", "opentui-irc is shutting down.");
         if (signal.aborted) reject("cancelled", "Operation cancelled.");
         id = ephemeral ? deps.ids.next<"operation">() : newOperation();
         let result: Omit<ActionReceipt, "operationId"> = {};
@@ -1902,14 +1902,15 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     },
     dispatch,
     async search(query, signal) {
-      if (stopping) return { ok: false, error: error("unavailable", "OpenIRC is shutting down.") };
+      if (stopping)
+        return { ok: false, error: error("unavailable", "opentui-irc is shutting down.") };
       return deps.history.search(query, signal);
     },
     saveSettings(change, expectedRevision, signal) {
       return serialIntent(signal, async () => {
         let id: OperationId | undefined;
         try {
-          if (stopping) reject("unavailable", "OpenIRC is shutting down.");
+          if (stopping) reject("unavailable", "opentui-irc is shutting down.");
           if (signal.aborted) reject("cancelled", "Operation cancelled.");
           if (settings.revision !== expectedRevision)
             reject("conflict", "Live settings changed after planning; inspect and plan again.");
@@ -1937,7 +1938,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       return serialIntent(signal, async () => {
         let id: OperationId | undefined;
         try {
-          if (stopping) reject("unavailable", "OpenIRC is shutting down.");
+          if (stopping) reject("unavailable", "opentui-irc is shutting down.");
           if (signal.aborted) reject("cancelled", "Operation cancelled.");
           if (settings.revision !== expectedLiveRevision)
             reject("conflict", "Live settings changed after planning; inspect and plan again.");
@@ -1960,7 +1961,8 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       });
     },
     async storeSecret(value, signal) {
-      if (stopping) return { ok: false, error: error("unavailable", "OpenIRC is shutting down.") };
+      if (stopping)
+        return { ok: false, error: error("unavailable", "opentui-irc is shutting down.") };
       return deps.secrets.store(value, signal);
     },
     shutdown() {
@@ -1979,7 +1981,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         await Promise.all(
           closing.map(async (attempt) => {
             try {
-              const result = await attempt.session?.close("Leaving OpenIRC");
+              const result = await attempt.session?.close("Leaving opentui-irc");
               if (result && !result.ok) failure = result.error;
             } catch {
               failure = error("network", "A connection did not close cleanly.");

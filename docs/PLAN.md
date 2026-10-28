@@ -1,6 +1,6 @@
-# OpenIRC — product and implementation plan
+# opentui-irc — product and implementation plan
 
-Status: product direction confirmed; implementation details and milestone cut remain provisional. Personal daily driver first, no deadline. Project name: **OpenIRC**. License: **MIT**.
+Status: product direction confirmed; implementation details and milestone cut remain provisional. Personal daily driver first, no deadline. Project name: **opentui-irc**. License: **MIT**.
 
 ## 1. Product definition
 
@@ -26,7 +26,7 @@ The primary audience is **newcomers**. Design mouse-driven, discoverable workflo
 
 This is a capability/positioning map from official project documentation, not an exhaustive tested compatibility matrix. Features can be built in, optional, scripted, or server-dependent; absence from a row is not a claim that a client lacks something.
 
-| Client                                  | Documented strengths                                                                                                                                                                | Implication for OpenIRC                                                                                                                                |
+| Client                                  | Documented strengths                                                                                                                                                                | Implication for opentui-irc                                                                                                                            |
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | [WeeChat][weechat]                      | Multi-server IRC, TLS, SASL, proxy, nick lists, anti-flood, mouse, split windows, dynamic filtering, incremental search, logging and extensibility, relay, DCC                      | Match daily IRC reliability and navigation. Adopt mouse/filter/search ergonomics. Defer relay, plugins, and DCC.                                       |
 | [Irssi][irssi] / [manual][irssi-manual] | Modular text client; rich theming and scripting; window-oriented workflow and IRC command help                                                                                      | Keep fast keyboard operation, commands, and predictable conversation switching. Avoid making scripts necessary for basic usability.                    |
@@ -363,13 +363,13 @@ Run these with users of at least a terminal IRC client and a GUI IRC client. Tra
 8. **Power-user scope:** avoid for now; moderation, DCC, plugins, scripting, aliases and advanced connection tooling are deferred.
 9. **Visual direction:** Discord-like hierarchy and styling adapted to terminal cells, not a dense traditional IRC layout.
 10. **Delivery:** personal daily driver first, proof through real use, no deadline. Public-release polish is a later gate, not a prerequisite for trying the app.
-11. **Identity:** OpenIRC, MIT license.
+11. **Identity:** opentui-irc, MIT license.
 
 ### Configuration design inspiration
 
 OpenCode's [configuration documentation](https://opencode.ai/docs/config/) describes JSON/JSONC, schema validation, explicit precedence, and separate application/TUI settings. Adopt those principles rather than copying project-scoped coding-agent configuration into a chat client.
 
-Proposed OpenIRC behavior:
+Proposed opentui-irc behavior:
 
 - User-scoped `openirc.jsonc` for networks/preferences and `tui.jsonc` for appearance/keybindings, under a documented platform-appropriate config directory.
 - Built-in defaults → user config → explicit CLI overrides. Do not automatically trust config from the working directory.

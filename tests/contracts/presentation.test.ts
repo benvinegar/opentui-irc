@@ -7,7 +7,7 @@ describe("HistServ presentation match", () => {
       expect(isHistServMessage({ sender: { nick } })).toBe(true);
   });
   it("does not match text, similar names, ordinary users or local errors", () => {
-    for (const nick of ["joey", "robert", "OpenIRC", "HistServBot", "not-HistServ"])
+    for (const nick of ["joey", "robert", "opentui-irc", "HistServBot", "not-HistServ"])
       expect(isHistServMessage({ sender: { nick } })).toBe(false);
   });
 });

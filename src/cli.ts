@@ -23,7 +23,8 @@ export function parseCli(
   let configDirectory = join(xdg("XDG_CONFIG_HOME", join(home, ".config")), "openirc");
   let dataDirectory =
     platform === "darwin"
-      ? join(home, "Library", "Application Support", "OpenIRC")
+      ? // Pre-rename directory name, kept so existing history is found.
+        join(home, "Library", "Application Support", "OpenIRC")
       : join(xdg("XDG_DATA_HOME", join(home, ".local", "share")), "openirc");
   let mode: CliOptions["mode"] = "run";
   let controlEnabled = true;
@@ -85,7 +86,7 @@ export function parseCli(
   };
 }
 
-export const HELP = `OpenIRC — a newcomer-friendly terminal IRC client
+export const HELP = `opentui-irc — a newcomer-friendly terminal IRC client
 
 Usage: openirc [options]        (from a checkout: bun run start [options])
 
@@ -99,6 +100,6 @@ Usage: openirc [options]        (from a checkout: bun run start [options])
 
 Agent setup: openirc help (versioned JSON; no TUI needed), e.g. openirc config schema.
 Start without options for the TUI. Local control defaults to inspect/configure/network only.
-Closing OpenIRC disconnects; use an existing bouncer for offline collection.
+Closing opentui-irc disconnects; use an existing bouncer for offline collection.
 Local history defaults to 30 days and can be disabled in Settings.
 `;

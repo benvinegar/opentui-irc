@@ -127,7 +127,7 @@ describe("real composed local IRC client", () => {
                   nick: "newcomer",
                   alternateNicks: ["newcomer_"],
                   username: "openirc",
-                  realname: "OpenIRC test",
+                  realname: "opentui-irc test",
                 },
                 autoConnect: true,
                 autoJoin: [{ channel: "#welcome" }],
