@@ -72,6 +72,143 @@ export function createFakeApp(initial: AppSnapshot = appSnapshot) {
     operations.publish([...operations.getSnapshot().slice(-19), { id, state: "completed" }]);
     return { ok: true as const, value: { operationId: id } };
   };
+  type Action<K extends AppAction["type"]> = Extract<AppAction, { type: K }>;
+  const requestIrc = (action: Action<"irc.request">) => {
+    const discovery = discoveries.get(action.networkId);
+    if (discovery && action.command.type === "list")
+      discovery.publish({
+        ...discovery.getSnapshot(),
+        directory: { state: "loading", items: [], truncated: false },
+      });
+    if (discovery && action.command.type === "whois")
+      discovery.publish({ ...discovery.getSnapshot(), user: { state: "loading" } });
+  };
+  const redact = (action: Action<"message.redact">) => {
+    for (const timeline of timelines.values())
+      timeline.publish({
+        ...timeline.getSnapshot(),
+        messages: timeline
+          .getSnapshot()
+          .messages.map((message) =>
+            message.id === action.messageId
+              ? { ...message, redacted: true, text: "", reactions: [] }
+              : message,
+          ),
+      });
+  };
+  const activate = (action: Action<"conversation.activate">) =>
+    state.publish({
+      ...state.getSnapshot(),
+      activeConversationId: action.conversationId,
+      revision: state.getSnapshot().revision + 1,
+    });
+  const setDraft = (action: Action<"draft.set">) => {
+    const timeline = timelines.get(action.conversationId);
+    if (timeline) timeline.publish({ ...timeline.getSnapshot(), draft: action.text });
+  };
+  /** False when the conversation has no timeline; the send is then unavailable. */
+  const send = (action: Action<"message.send">): boolean => {
+    const timeline = timelines.get(action.conversationId);
+    if (!timeline) return false;
+    timeline.publish({
+      ...timeline.getSnapshot(),
+      messages: [
+        ...timeline.getSnapshot().messages.slice(-299),
+        {
+          ...timelineSnapshot.messages[0]!,
+          id: entityId<"message">(`fake-message-${sequence + 1}`),
+          text: action.text,
+          kind: action.kind,
+          source: "local",
+          sendState: "written",
+          conversationId: action.conversationId,
+        },
+      ],
+    });
+    return true;
+  };
+  const setPhase = (action: Action<"network.connect" | "network.disconnect">) =>
+    state.publish({
+      ...state.getSnapshot(),
+      networks: state.getSnapshot().networks.map((network) =>
+        network.id === action.networkId
+          ? {
+              ...network,
+              phase: action.type === "network.connect" ? "ready" : "disconnected",
+            }
+          : network,
+      ),
+    });
+  const mute = (action: Action<"conversation.mute">) =>
+    state.publish({
+      ...state.getSnapshot(),
+      conversations: state
+        .getSnapshot()
+        .conversations.map((item) =>
+          item.id === action.conversationId ? { ...item, muted: action.muted } : item,
+        ),
+    });
+  const open = (action: Action<"conversation.join" | "conversation.query">) => {
+    const id = entityId<"conversation">(`fake-conversation-${sequence + 1}`);
+    const conversation = {
+      id,
+      networkId: action.networkId,
+      name: action.type === "conversation.join" ? action.channel : action.nick,
+      kind: action.type === "conversation.join" ? ("channel" as const) : ("direct" as const),
+      topic: "",
+      joined: true,
+      unreadCount: 0,
+      mentionCount: 0,
+      muted: false,
+    };
+    timelines.set(id, model({ ...timelineSnapshot, conversationId: id, messages: [], draft: "" }));
+    state.publish({
+      ...state.getSnapshot(),
+      conversations: [...state.getSnapshot().conversations, conversation],
+      activeConversationId: id,
+    });
+  };
+  const reveal = (action: Action<"history.reveal">) => {
+    const message = [...timelines.values()]
+      .flatMap((item) => item.getSnapshot().messages)
+      .find((item) => item.id === action.messageId);
+    if (message)
+      state.publish({ ...state.getSnapshot(), activeConversationId: message.conversationId });
+  };
+  /** Applies the action's deterministic effect; false means the action is unavailable. */
+  const apply = (action: AppAction): boolean => {
+    switch (action.type) {
+      case "irc.request":
+        requestIrc(action);
+        break;
+      case "message.redact":
+        redact(action);
+        break;
+      case "conversation.activate":
+        activate(action);
+        break;
+      case "draft.set":
+        setDraft(action);
+        break;
+      case "message.send":
+        return send(action);
+      case "network.connect":
+      case "network.disconnect":
+        setPhase(action);
+        break;
+      case "conversation.mute":
+        mute(action);
+        break;
+      case "conversation.join":
+      case "conversation.query":
+        open(action);
+        break;
+      case "history.reveal":
+        reveal(action);
+        break;
+    }
+    return true;
+  };
   const app: AppApi = {
     state,
     settings,
@@ -88,110 +225,7 @@ export function createFakeApp(initial: AppSnapshot = appSnapshot) {
       if (signal.aborted)
         return { ok: false, error: { code: "cancelled", message: "Cancelled.", retryable: false } };
       actions.push(action);
-      if (action.type === "irc.request") {
-        const discovery = discoveries.get(action.networkId);
-        if (discovery && action.command.type === "list")
-          discovery.publish({
-            ...discovery.getSnapshot(),
-            directory: { state: "loading", items: [], truncated: false },
-          });
-        if (discovery && action.command.type === "whois")
-          discovery.publish({ ...discovery.getSnapshot(), user: { state: "loading" } });
-      }
-      if (action.type === "message.redact") {
-        for (const timeline of timelines.values())
-          timeline.publish({
-            ...timeline.getSnapshot(),
-            messages: timeline
-              .getSnapshot()
-              .messages.map((message) =>
-                message.id === action.messageId
-                  ? { ...message, redacted: true, text: "", reactions: [] }
-                  : message,
-              ),
-          });
-      }
-      if (action.type === "conversation.activate")
-        state.publish({
-          ...state.getSnapshot(),
-          activeConversationId: action.conversationId,
-          revision: state.getSnapshot().revision + 1,
-        });
-      if (action.type === "draft.set") {
-        const timeline = timelines.get(action.conversationId);
-        if (timeline) timeline.publish({ ...timeline.getSnapshot(), draft: action.text });
-      }
-      if (action.type === "message.send") {
-        const timeline = timelines.get(action.conversationId);
-        if (!timeline) return unavailable();
-        timeline.publish({
-          ...timeline.getSnapshot(),
-          messages: [
-            ...timeline.getSnapshot().messages.slice(-299),
-            {
-              ...timelineSnapshot.messages[0]!,
-              id: entityId<"message">(`fake-message-${sequence + 1}`),
-              text: action.text,
-              kind: action.kind,
-              source: "local",
-              sendState: "written",
-              conversationId: action.conversationId,
-            },
-          ],
-        });
-      }
-      if (action.type === "network.connect" || action.type === "network.disconnect")
-        state.publish({
-          ...state.getSnapshot(),
-          networks: state.getSnapshot().networks.map((network) =>
-            network.id === action.networkId
-              ? {
-                  ...network,
-                  phase: action.type === "network.connect" ? "ready" : "disconnected",
-                }
-              : network,
-          ),
-        });
-      if (action.type === "conversation.mute")
-        state.publish({
-          ...state.getSnapshot(),
-          conversations: state
-            .getSnapshot()
-            .conversations.map((item) =>
-              item.id === action.conversationId ? { ...item, muted: action.muted } : item,
-            ),
-        });
-      if (action.type === "conversation.join" || action.type === "conversation.query") {
-        const id = entityId<"conversation">(`fake-conversation-${sequence + 1}`);
-        const conversation = {
-          id,
-          networkId: action.networkId,
-          name: action.type === "conversation.join" ? action.channel : action.nick,
-          kind: action.type === "conversation.join" ? ("channel" as const) : ("direct" as const),
-          topic: "",
-          joined: true,
-          unreadCount: 0,
-          mentionCount: 0,
-          muted: false,
-        };
-        timelines.set(
-          id,
-          model({ ...timelineSnapshot, conversationId: id, messages: [], draft: "" }),
-        );
-        state.publish({
-          ...state.getSnapshot(),
-          conversations: [...state.getSnapshot().conversations, conversation],
-          activeConversationId: id,
-        });
-      }
-      if (action.type === "history.reveal") {
-        const message = [...timelines.values()]
-          .flatMap((item) => item.getSnapshot().messages)
-          .find((item) => item.id === action.messageId);
-        if (message)
-          state.publish({ ...state.getSnapshot(), activeConversationId: message.conversationId });
-      }
-      return receipt();
+      return apply(action) ? receipt() : unavailable();
     },
     async saveSettings(change, expectedRevision) {
       const current = settings.getSnapshot();

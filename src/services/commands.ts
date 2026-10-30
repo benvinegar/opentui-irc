@@ -1,6 +1,7 @@
 /* oxlint-disable no-control-regex -- Explicitly reject control characters at the input boundary. */
-import type { AppAction, AppApi } from "../contracts/app";
-import type { Result } from "../contracts/common";
+import type { AppAction, AppApi, UserIrcCommand } from "../contracts/app";
+import type { NetworkId, Result } from "../contracts/common";
+import type { AppSnapshot, ConversationView } from "../contracts/model";
 import type { CommandService, InputContext, InputIntent } from "../contracts/services";
 
 const entries = [
@@ -27,14 +28,139 @@ const entries = [
   ["quit", "/quit", "Disconnect and exit opentui-irc"],
 ].map(([name, usage, description]) => ({ name: name!, usage: usage!, description: description! }));
 
-const invalid = (message: string): Result<InputIntent> => ({
+type Parsed = Result<InputIntent>;
+
+const invalid = (message: string): Parsed => ({
   ok: false,
   error: { code: "invalid-input", message, retryable: false },
 });
-const action = (value: AppAction): Result<InputIntent> => ({
+const action = (value: AppAction): Parsed => ({
   ok: true,
   value: { type: "action", action: value },
 });
+
+interface CommandRequest {
+  readonly command: string;
+  readonly args: string;
+  readonly networkId: NetworkId;
+  readonly snapshot: AppSnapshot;
+  readonly usage: () => Parsed;
+}
+type NetworkCommand = (request: CommandRequest) => Parsed;
+type ConversationCommand = (request: CommandRequest, conversation: ConversationView) => Parsed;
+
+/** Exactly one argument, such as a nickname or channel. */
+const word = (args: string) => args.length > 0 && !/\s/u.test(args);
+const ircRequest = (networkId: NetworkId, command: UserIrcCommand) =>
+  action({ type: "irc.request", networkId, command });
+const lifecycle =
+  (type: "network.connect" | "network.disconnect" | "network.reconnect"): NetworkCommand =>
+  ({ args, networkId, usage }) =>
+    args ? usage() : action({ type, networkId });
+const nickRequest =
+  (type: "nick" | "whois"): NetworkCommand =>
+  ({ args, networkId, usage }) =>
+    word(args) ? ircRequest(networkId, { type, nick: args }) : usage();
+const directMessage: NetworkCommand = ({ command, args, networkId, snapshot, usage }) => {
+  const split = /^(\S+)\s+(.+)$/u.exec(args);
+  if (!split) return usage();
+  // No guessed IRC case mapping: exact displayed target, or explicit /query first.
+  const target = snapshot.conversations.find(
+    (item) => item.networkId === networkId && item.name === split[1] && item.kind !== "status",
+  );
+  return target
+    ? action({
+        type: "message.send",
+        conversationId: target.id,
+        text: split[2]!,
+        kind: command === "notice" ? "notice" : "text",
+      })
+    : invalid("Open the target with /query or /join first, then use its displayed name.");
+};
+
+/** Commands that need only a network. */
+const networkCommands = new Map<string, NetworkCommand>([
+  ["connect", lifecycle("network.connect")],
+  ["disconnect", lifecycle("network.disconnect")],
+  ["reconnect", lifecycle("network.reconnect")],
+  [
+    "join",
+    ({ args, networkId, usage }) =>
+      word(args) && /^[#&+!]/u.test(args)
+        ? action({ type: "conversation.join", networkId, channel: args })
+        : usage(),
+  ],
+  [
+    "query",
+    ({ args, networkId, usage }) =>
+      word(args) ? action({ type: "conversation.query", networkId, nick: args }) : usage(),
+  ],
+  ["nick", nickRequest("nick")],
+  ["whois", nickRequest("whois")],
+  [
+    "away",
+    ({ args, networkId, usage }) =>
+      args ? ircRequest(networkId, { type: "away", reason: args }) : usage(),
+  ],
+  [
+    "back",
+    ({ args, networkId, usage }) =>
+      args ? usage() : ircRequest(networkId, { type: "away", reason: null }),
+  ],
+  [
+    "list",
+    ({ args, networkId, usage }) => (args ? usage() : ircRequest(networkId, { type: "list" })),
+  ],
+  ["msg", directMessage],
+  ["notice", directMessage],
+]);
+
+const closeConversation: ConversationCommand = ({ args, usage }, conversation) =>
+  args ? usage() : action({ type: "conversation.close", conversationId: conversation.id });
+const muteConversation =
+  (muted: boolean): ConversationCommand =>
+  ({ args, usage }, conversation) =>
+    args ? usage() : action({ type: "conversation.mute", conversationId: conversation.id, muted });
+
+/** Commands that act on the selected conversation. */
+const conversationCommands = new Map<string, ConversationCommand>([
+  ["part", closeConversation],
+  ["close", closeConversation],
+  ["mute", muteConversation(true)],
+  ["unmute", muteConversation(false)],
+  [
+    "me",
+    ({ args, usage }, conversation) =>
+      !args || conversation.kind === "status"
+        ? usage()
+        : action({
+            type: "message.send",
+            conversationId: conversation.id,
+            text: args,
+            kind: "action",
+          }),
+  ],
+  [
+    "topic",
+    ({ args, networkId }, conversation) =>
+      conversation.kind !== "channel"
+        ? invalid("Topics belong to channels.")
+        : ircRequest(networkId, {
+            type: "topic",
+            channel: conversation.name,
+            ...(args ? { text: args } : {}),
+          }),
+  ],
+]);
+
+/** Client-local commands that need neither a network nor a conversation. */
+function parseClientCommand(command: string, args: string): Parsed | undefined {
+  if (command === "help")
+    return { ok: true, value: { type: "help", ...(args ? { command: args } : {}) } };
+  if (command === "settings" && !args) return { ok: true, value: { type: "settings" } };
+  if (command === "quit" && !args) return { ok: true, value: { type: "quit" } };
+  return undefined;
+}
 
 /** Pure parser: snapshots supply context; parsing never dispatches or opens a socket. */
 export function createCommandService(app: Pick<AppApi, "state" | "timeline">): CommandService {
@@ -42,6 +168,38 @@ export function createCommandService(app: Pick<AppApi, "state" | "timeline">): C
     const snapshot = app.state.getSnapshot();
     const conversation = snapshot.conversations.find((item) => item.id === context.conversationId);
     return { snapshot, conversation, networkId: context.networkId ?? conversation?.networkId };
+  };
+  const sendText = (text: string, conversation: ConversationView | undefined): Parsed => {
+    if (!conversation || conversation.kind === "status")
+      return invalid("Choose a channel or direct conversation before sending.");
+    return action({
+      type: "message.send",
+      conversationId: conversation.id,
+      text: text.startsWith("//") ? text.slice(1) : text,
+      kind: "text",
+    });
+  };
+  const parseCommand = (command: string, args: string, context: InputContext): Parsed => {
+    const client = parseClientCommand(command, args);
+    if (client) return client;
+    const entry = entries.find((item) => item.name === command);
+    if (!entry)
+      return invalid(
+        "Unknown command. Type /help for supported commands; use // for a literal slash.",
+      );
+    const { snapshot, conversation, networkId } = resolve(context);
+    if (!networkId) return invalid("Select a network first, or add one in Settings.");
+    const request = {
+      command,
+      args,
+      networkId,
+      snapshot,
+      usage: () => invalid(`Usage: ${entry.usage}`),
+    };
+    const networkCommand = networkCommands.get(command);
+    if (networkCommand) return networkCommand(request);
+    if (!conversation) return invalid("Select a conversation first.");
+    return conversationCommands.get(command)?.(request, conversation) ?? request.usage();
   };
   return {
     help(command) {
@@ -56,17 +214,8 @@ export function createCommandService(app: Pick<AppApi, "state" | "timeline">): C
         /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(text)
       )
         return invalid("Input is too long or contains unsafe control characters.");
-      const { snapshot, conversation, networkId } = resolve(context);
-      if (!text.startsWith("/") || text.startsWith("//")) {
-        if (!conversation || conversation.kind === "status")
-          return invalid("Choose a channel or direct conversation before sending.");
-        return action({
-          type: "message.send",
-          conversationId: conversation.id,
-          text: text.startsWith("//") ? text.slice(1) : text,
-          kind: "text",
-        });
-      }
+      if (!text.startsWith("/") || text.startsWith("//"))
+        return sendText(text, resolve(context).conversation);
       // A multiline submission is always one message, never a batch of slash commands.
       if (/[\r\n]/u.test(text))
         return invalid(
@@ -74,108 +223,7 @@ export function createCommandService(app: Pick<AppApi, "state" | "timeline">): C
         );
       const match = /^\/(\S+)\s*(.*)$/u.exec(text);
       if (!match) return invalid("Type /help to see available commands.");
-      const command = match[1]!.toLowerCase();
-      const args = match[2]!.trim();
-      if (command === "help")
-        return { ok: true, value: { type: "help", ...(args ? { command: args } : {}) } };
-      if (command === "settings" && !args) return { ok: true, value: { type: "settings" } };
-      if (command === "quit" && !args) return { ok: true, value: { type: "quit" } };
-      const entry = entries.find((item) => item.name === command);
-      if (!entry)
-        return invalid(
-          "Unknown command. Type /help for supported commands; use // for a literal slash.",
-        );
-      const usage = () => invalid(`Usage: ${entry.usage}`);
-      if (!networkId) return invalid("Select a network first, or add one in Settings.");
-      switch (command) {
-        case "connect":
-        case "disconnect":
-        case "reconnect":
-          return args ? usage() : action({ type: `network.${command}`, networkId });
-        case "join":
-          return !args || /\s/u.test(args) || !/^[#&+!]/u.test(args)
-            ? usage()
-            : action({ type: "conversation.join", networkId, channel: args });
-        case "query":
-          return !args || /\s/u.test(args)
-            ? usage()
-            : action({ type: "conversation.query", networkId, nick: args });
-        case "nick":
-        case "whois":
-          return !args || /\s/u.test(args)
-            ? usage()
-            : action({ type: "irc.request", networkId, command: { type: command, nick: args } });
-        case "away":
-          return !args
-            ? usage()
-            : action({ type: "irc.request", networkId, command: { type: "away", reason: args } });
-        case "back":
-          return args
-            ? usage()
-            : action({ type: "irc.request", networkId, command: { type: "away", reason: null } });
-        case "list":
-          return args
-            ? usage()
-            : action({ type: "irc.request", networkId, command: { type: "list" } });
-        case "msg":
-        case "notice": {
-          const split = /^(\S+)\s+(.+)$/u.exec(args);
-          if (!split) return usage();
-          // No guessed IRC case mapping: exact displayed target, or explicit /query first.
-          const target = snapshot.conversations.find(
-            (item) =>
-              item.networkId === networkId && item.name === split[1] && item.kind !== "status",
-          );
-          return target
-            ? action({
-                type: "message.send",
-                conversationId: target.id,
-                text: split[2]!,
-                kind: command === "notice" ? "notice" : "text",
-              })
-            : invalid("Open the target with /query or /join first, then use its displayed name.");
-        }
-      }
-      if (!conversation) return invalid("Select a conversation first.");
-      switch (command) {
-        case "part":
-        case "close":
-          return args
-            ? usage()
-            : action({ type: "conversation.close", conversationId: conversation.id });
-        case "mute":
-        case "unmute":
-          return args
-            ? usage()
-            : action({
-                type: "conversation.mute",
-                conversationId: conversation.id,
-                muted: command === "mute",
-              });
-        case "me":
-          return !args || conversation.kind === "status"
-            ? usage()
-            : action({
-                type: "message.send",
-                conversationId: conversation.id,
-                text: args,
-                kind: "action",
-              });
-        case "topic":
-          return conversation.kind !== "channel"
-            ? invalid("Topics belong to channels.")
-            : action({
-                type: "irc.request",
-                networkId,
-                command: {
-                  type: "topic",
-                  channel: conversation.name,
-                  ...(args ? { text: args } : {}),
-                },
-              });
-        default:
-          return usage();
-      }
+      return parseCommand(match[1]!.toLowerCase(), match[2]!.trim(), context);
     },
     complete(text, cursorUtf16, context) {
       if (!Number.isInteger(cursorUtf16) || cursorUtf16 < 0 || cursorUtf16 > text.length) return [];
