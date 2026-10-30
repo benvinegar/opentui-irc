@@ -1,10 +1,10 @@
-/* oxlint-disable no-control-regex -- Reject terminal controls in externally supplied form values. */
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import type { AppApi } from "../contracts/app";
 import { entityId, type SecretRef } from "../contracts/common";
 import type { SettingsDocument } from "../contracts/settings";
 import { Button, Field, usePalette } from "./primitives";
 import { SecureField } from "./secure-field";
+import { networkFormError, networkProfile, type NetworkFormValues } from "./network-form";
 
 export function SettingsForm(props: {
   app: AppApi;
@@ -38,61 +38,46 @@ export function SettingsForm(props: {
   const [theme, setTheme] = createSignal(props.document.tui.theme);
   // Capture revision at form creation, never silently overwrite externally changed settings.
   const original = props.document;
+  const formValues = (): NetworkFormValues => ({
+    name: name(),
+    host: host(),
+    port: port(),
+    nick: nick(),
+    account: account(),
+    authMode: authMode(),
+    variable: variable(),
+    hasPassword: !!password(),
+    hasStoredSecret: !!storedSecret(),
+    channel: channel(),
+  });
+  /** Hands a typed password to the vault once; undefined means it failed and the form says why. */
+  const passwordRef = async (): Promise<{ ref: SecretRef | undefined } | undefined> => {
+    if (!account()) return { ref: storedSecret() };
+    if (authMode() === "environment") return { ref: entityId<"secret-ref">(`env:${variable()}`) };
+    if (storedSecret()) return { ref: storedSecret() };
+    const secretValue = password();
+    setPassword("");
+    const secured = await props.app.storeSecret(secretValue, formAbort.signal);
+    if (!secured.ok) {
+      setError(
+        `${secured.error.message} Use the environment-reference fallback below if your OS vault is unavailable. Password input was cleared.`,
+      );
+      return undefined;
+    }
+    setStoredSecret(secured.value);
+    return { ref: secured.value };
+  };
   const add = async () => {
     if (busy()) return;
-    if (
-      !host().trim() ||
-      /[\s\u0000-\u001f]/u.test(host()) ||
-      !/^[1-9]\d{0,4}$/u.test(port()) ||
-      +port() > 65535 ||
-      !nick().trim() ||
-      /[\s,:\u0000-\u001f]/u.test(nick())
-    ) {
-      setError("Enter a hostname, a port from 1–65535, and a nickname without spaces.");
-      return;
-    }
-    if (
-      (account() && authMode() === "vault" && !password() && !storedSecret()) ||
-      (!account() && (password() || variable() || storedSecret()))
-    ) {
-      setError(
-        "Enter both your SASL account and password, or leave both empty for a network without account authentication.",
-      );
-      return;
-    }
-    if (
-      account() &&
-      authMode() === "environment" &&
-      !/^[A-Za-z_][A-Za-z0-9_]{0,255}$/u.test(variable())
-    ) {
-      setError(
-        "Enter the NAME of an environment variable containing your password, not the password itself.",
-      );
-      return;
-    }
-    if (channel() && !/^[#&+!][^\s,\u0000-\u001f]+$/u.test(channel())) {
-      setError("The optional channel should look like #welcome.");
+    const problem = networkFormError(formValues());
+    if (problem) {
+      setError(problem);
       return;
     }
     setBusy(true);
     setError("");
-    let passwordRef = storedSecret();
-    if (account() && authMode() === "vault" && !passwordRef) {
-      const secretValue = password();
-      setPassword("");
-      const secured = await props.app.storeSecret(secretValue, formAbort.signal);
-      if (!secured.ok) {
-        setBusy(false);
-        setError(
-          `${secured.error.message} Use the environment-reference fallback below if your OS vault is unavailable. Password input was cleared.`,
-        );
-        return;
-      }
-      passwordRef = secured.value;
-      setStoredSecret(passwordRef);
-    } else if (account() && authMode() === "environment")
-      passwordRef = entityId<"secret-ref">(`env:${variable()}`);
-    if (formAbort.signal.aborted) {
+    const secret = await passwordRef();
+    if (!secret || formAbort.signal.aborted) {
       setBusy(false);
       return;
     }
@@ -102,32 +87,7 @@ export function SettingsForm(props: {
         section: "user",
         value: {
           ...original.user,
-          networks: [
-            ...original.user.networks,
-            {
-              id,
-              name: name().trim() || host().trim(),
-              endpoints: [{ host: host().trim(), port: +port(), tls: true }],
-              identity: {
-                nick: nick().trim(),
-                alternateNicks: [`${nick().trim()}_`],
-                username: nick().trim(),
-                realname: "opentui-irc user",
-              },
-              autoConnect: false,
-              autoJoin: channel() ? [{ channel: channel() }] : [],
-              ...(account() && passwordRef
-                ? {
-                    sasl: {
-                      mechanism: "PLAIN",
-                      account: account(),
-                      password: passwordRef,
-                      required: true,
-                    },
-                  }
-                : {}),
-            },
-          ],
+          networks: [...original.user.networks, networkProfile(id, formValues(), secret.ref)],
         },
       },
       original.revision,
