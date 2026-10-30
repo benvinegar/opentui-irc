@@ -21,10 +21,15 @@ import type {
 } from "../contracts/model";
 import type { ProtocolSupport } from "../contracts/protocol";
 import type { CreateApp } from "../contracts/runtime";
-import type { IrcSession, SessionCommand, SessionEvent } from "../contracts/session";
+import type {
+  IrcSession,
+  SessionCommand,
+  SessionEvent,
+  SessionPayload,
+} from "../contracts/session";
 import type { NotificationSink } from "../contracts/services";
 import type { NetworkProfile, SettingsDocument } from "../contracts/settings";
-import type { ConversationRecord, ReadPosition } from "../contracts/storage";
+import type { ConversationRecord, Page, ReadPosition } from "../contracts/storage";
 import { foldIdentifier } from "../domain/irc-identifiers";
 import { compareMessageIds, mergeWindow, mentionsNick, plainText } from "../domain/message-policy";
 import { admitSessionEvent, startSessionCursor } from "../domain/session-cursor";
@@ -98,6 +103,47 @@ interface Attempt {
   session?: IrcSession;
   error?: AppError;
 }
+type PendingNotification = Parameters<NotificationSink["notify"]>[0];
+interface ReactionGroup {
+  baseline: Message["reactions"];
+  readonly actors: Map<string, Set<UserId>>;
+}
+
+type PayloadOf<T extends SessionPayload["type"]> = Extract<SessionPayload, { readonly type: T }>;
+interface EventContext {
+  readonly networkId: NetworkId;
+  /** The network view as it was when the event was admitted. */
+  readonly network: NetworkView;
+  readonly attempt: Attempt;
+}
+/** One handler per session payload type; the caller publishes once the handler settles. */
+type EventHandlers = {
+  readonly [T in SessionPayload["type"]]: (
+    payload: PayloadOf<T>,
+    context: EventContext,
+  ) => Promise<void> | void;
+};
+
+type ActionOf<T extends AppAction["type"]> = Extract<AppAction, { readonly type: T }>;
+interface ActionOutcome {
+  readonly receipt?: Omit<ActionReceipt, "operationId">;
+  /** The operation completes later, from a session event, rather than when the handler returns. */
+  readonly deferred?: boolean;
+  /** Overrides the default of publishing after every non-ephemeral action. */
+  readonly publish?: boolean;
+}
+type ActionHandlers = {
+  readonly [T in AppAction["type"]]: (
+    action: ActionOf<T>,
+    id: OperationId,
+  ) => Promise<ActionOutcome | void> | ActionOutcome | void;
+};
+/** High-frequency UI intents: no tracked operation and no default snapshot publish. */
+const EPHEMERAL_ACTIONS: ReadonlySet<AppAction["type"]> = new Set([
+  "draft.set",
+  "view.report",
+  "typing.set",
+]);
 
 /** Creates an owned, framework-independent application. All mutations share one serialized lane. */
 export const createApp: CreateApp = async (deps, rootSignal) => {
@@ -109,7 +155,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
   const retentionController = new AbortController();
   const notificationController = new AbortController();
   let notificationRunning = false;
-  let queuedNotification: Parameters<NotificationSink["notify"]>[0] | undefined;
+  let queuedNotification: PendingNotification | undefined;
   let nextNotificationAt = 0;
   let shutdownPromise: Promise<Result<void>> | undefined;
   let tail: Promise<unknown> = Promise.resolve();
@@ -134,10 +180,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
   >();
   const visibility = new Map<ConversationId, { focused: boolean; atBottom: boolean }>();
   const channelKeys = new Map<ConversationId, import("../contracts/common").SecretRef>();
-  const reactions = new Map<
-    MessageId,
-    { baseline: Message["reactions"]; actors: Map<string, Set<UserId>> }
-  >();
+  const reactions = new Map<MessageId, ReactionGroup>();
   const typingControllers = new Map<
     string,
     { controller: AbortController; conversationId: ConversationId }
@@ -199,7 +242,37 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       ...(active ? { activeConversationId: active } : {}),
       ...(lastError ? { error: lastError } : {}),
     });
-  const queueNotification = (notification: Parameters<NotificationSink["notify"]>[0]) => {
+  /** Settings or visibility may have changed while the notification waited for its slot. */
+  const notificationSuppressed = (notification: PendingNotification) => {
+    const c = conversations.get(notification.conversationId);
+    return (
+      !settings.user.notifications.desktop ||
+      !c ||
+      c.closed ||
+      !networks.has(c.view.networkId) ||
+      c.view.muted ||
+      isWatching(c)
+    );
+  };
+  const deliverNotification = async (notification: PendingNotification): Promise<Result<void>> => {
+    try {
+      const { body, ...safe } = notification;
+      return await deps.notifications.notify({
+        ...safe,
+        ...(settings.user.notifications.previews && body ? { body } : {}),
+      });
+    } catch {
+      return { ok: false, error: error("unavailable", "Desktop notifications are unavailable.") };
+    }
+  };
+  const reportNotificationFailure = (detail: AppError) =>
+    serial(() => {
+      if (!stopping) {
+        report(detail);
+        publish();
+      }
+    });
+  const queueNotification = (notification: PendingNotification) => {
     if (stopping) return;
     // One in-flight effect plus one latest pending notification; never queue chat behind OS work.
     queuedNotification = notification;
@@ -213,53 +286,17 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           if (stopping) break;
           const next = queuedNotification;
           queuedNotification = undefined;
-          if (!next) continue;
-          const c = conversations.get(next.conversationId);
-          const visible = visibility.get(next.conversationId);
-          if (
-            !settings.user.notifications.desktop ||
-            !c ||
-            c.closed ||
-            !networks.has(c.view.networkId) ||
-            c.view.muted ||
-            (active === c.view.id &&
-              visible?.focused &&
-              visible.atBottom &&
-              timeline(c).atLatest !== false)
-          )
-            continue;
+          if (!next || notificationSuppressed(next)) continue;
           nextNotificationAt = deps.clock.now() + NOTIFICATION_INTERVAL_MS;
-          let result: Result<void>;
-          try {
-            const { body, ...safe } = next;
-            result = await deps.notifications.notify({
-              ...safe,
-              ...(settings.user.notifications.previews && body ? { body } : {}),
-            });
-          } catch {
-            result = {
-              ok: false,
-              error: error("unavailable", "Desktop notifications are unavailable."),
-            };
-          }
-          if (!result.ok && result.error.code !== "unsupported" && !stopping) {
-            const detail = result.error;
-            await serial(() => {
-              if (!stopping) {
-                report(detail);
-                publish();
-              }
-            });
-          }
+          const result = await deliverNotification(next);
+          if (!result.ok && result.error.code !== "unsupported" && !stopping)
+            await reportNotificationFailure(result.error);
         }
       } catch {
         if (!stopping)
-          await serial(() => {
-            if (!stopping) {
-              report(error("unavailable", "Desktop notifications are unavailable."));
-              publish();
-            }
-          });
+          await reportNotificationFailure(
+            error("unavailable", "Desktop notifications are unavailable."),
+          );
       } finally {
         notificationRunning = false;
       }
@@ -317,6 +354,16 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     return value;
   };
   const timeline = (c: Conversation) => c.model.readable.getSnapshot();
+  /** The user is looking at the live end of this conversation right now. */
+  const isWatching = (c: Conversation) => {
+    const visible = visibility.get(c.view.id);
+    return (
+      active === c.view.id &&
+      visible?.focused === true &&
+      visible.atBottom &&
+      timeline(c).atLatest !== false
+    );
+  };
   const updateTimeline = (c: Conversation, patch: Partial<TimelineSnapshot>) =>
     c.model.publish({ ...timeline(c), ...patch });
   const createConversation = (record: ConversationRecord): Conversation => {
@@ -513,6 +560,18 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       for (const id of reactions.keys()) if (!retained.has(id)) reactions.delete(id);
     }
   };
+  const isMention = (c: Conversation, text: string, ownNick: string) =>
+    c.view.kind === "direct" || mentionsNick(text, ownNick, mapping(c.view.networkId));
+  /** Newer than the stored read position; without one, only live traffic counts as unread. */
+  const isPastReadPosition = (c: Conversation, message: Message) => {
+    const previousRead = readPositions.get(c.view.id);
+    return previousRead
+      ? comparePosition(
+          { id: message.id, time: message.serverTime ?? message.receivedAt },
+          { id: previousRead.messageId, time: previousRead.readAt },
+        ) > 0
+      : message.source === "live";
+  };
   const trackUnread = (c: Conversation, message: Message, mention: boolean) => {
     // History-service chatter is retained, but is not chat unread/notification activity.
     if (isHistServMessage(message) || c.unread.has(message.id)) return;
@@ -561,29 +620,16 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     );
     // Disk can lag a failed write; loading must not downgrade newer in-memory enrichment.
     putMessages(c, [...restored, ...c.recent]);
-    const previousRead = readPositions.get(c.view.id);
     const ownNick = networks.get(c.view.networkId)?.nick ?? "";
     for (const message of restored) {
       if (
         c.view.kind === "status" ||
         message.sendState !== undefined ||
-        same(c.view.networkId, message.sender.nick, ownNick)
+        same(c.view.networkId, message.sender.nick, ownNick) ||
+        !isPastReadPosition(c, message)
       )
         continue;
-      if (
-        previousRead
-          ? comparePosition(
-              { id: message.id, time: message.serverTime ?? message.receivedAt },
-              { id: previousRead.messageId, time: previousRead.readAt },
-            ) <= 0
-          : message.source !== "live"
-      )
-        continue;
-      trackUnread(
-        c,
-        message,
-        c.view.kind === "direct" || mentionsNick(message.text, ownNick, mapping(c.view.networkId)),
-      );
+      trackUnread(c, message, isMention(c, message.text, ownNick));
     }
     const { olderCursor: _older, ...base } = timeline(c);
     c.model.publish({
@@ -729,16 +775,8 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
       }
     }
   };
-  const markRead = async (c: Conversation, lastId: MessageId, syncToServer = true) => {
-    const message = findMessage(lastId)?.message;
-    if (!message || message.conversationId !== c.view.id) return;
-    const previous = readPositions.get(c.view.id);
-    const readAt = message.serverTime ?? message.receivedAt;
-    const target = { id: message.id, time: readAt };
-    if (previous && comparePosition({ id: previous.messageId, time: previous.readAt }, target) >= 0)
-      return;
-    const position = { conversationId: c.view.id, messageId: message.id, readAt };
-    readPositions.set(c.view.id, position);
+  /** Drops unread entries up to and including the read target, then repoints the unread marker. */
+  const clearUnreadThrough = (c: Conversation, target: { id: string; time: number }) => {
     let removed = 0;
     let mentions = 0;
     for (const [id, entry] of c.unread)
@@ -767,36 +805,52 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
           ? { firstUnreadId: first.id }
           : {}),
     });
-    if (canPersist(c)) {
-      // A message received while logging was off may still be visible after it
-      // is re-enabled. Keep its read position in memory, not as a dangling FK,
-      // and never retroactively log its body just to create that bookmark.
-      const stored = await deps.history.context(message.id, 0, lifetime.signal);
-      if (!stored.ok && stored.error.code !== "unavailable") requireResult(stored);
-      if (
-        stored.ok &&
-        stored.value.some(
-          (item) =>
-            item.id === message.id &&
-            item.conversationId === c.view.id &&
-            item.networkId === c.view.networkId,
-        )
+  };
+  const persistReadPosition = async (c: Conversation, message: Message, position: ReadPosition) => {
+    if (!canPersist(c)) return;
+    // A message received while logging was off may still be visible after it
+    // is re-enabled. Keep its read position in memory, not as a dangling FK,
+    // and never retroactively log its body just to create that bookmark.
+    const stored = await deps.history.context(message.id, 0, lifetime.signal);
+    if (!stored.ok && stored.error.code !== "unavailable") requireResult(stored);
+    if (
+      stored.ok &&
+      stored.value.some(
+        (item) =>
+          item.id === message.id &&
+          item.conversationId === c.view.id &&
+          item.networkId === c.view.networkId,
       )
-        await persist([], [position]);
-    }
+    )
+      await persist([], [position]);
+  };
+  const syncReadMarker = async (c: Conversation, message: Message) => {
     const network = networks.get(c.view.networkId);
-    if (syncToServer && network?.features.readMarkers && message.serverTime !== undefined) {
-      const id = deps.ids.next<"operation">();
-      try {
-        await execute(
-          c.view.networkId,
-          { type: "mark-read", target: c.view.name, serverTime: message.serverTime },
-          id,
-        );
-      } catch {
-        /* Local reading must work without server sync. */
-      }
+    if (!network?.features.readMarkers || message.serverTime === undefined) return;
+    const id = deps.ids.next<"operation">();
+    try {
+      await execute(
+        c.view.networkId,
+        { type: "mark-read", target: c.view.name, serverTime: message.serverTime },
+        id,
+      );
+    } catch {
+      /* Local reading must work without server sync. */
     }
+  };
+  const markRead = async (c: Conversation, lastId: MessageId, syncToServer = true) => {
+    const message = findMessage(lastId)?.message;
+    if (!message || message.conversationId !== c.view.id) return;
+    const previous = readPositions.get(c.view.id);
+    const readAt = message.serverTime ?? message.receivedAt;
+    const target = { id: message.id, time: readAt };
+    if (previous && comparePosition({ id: previous.messageId, time: previous.readAt }, target) >= 0)
+      return;
+    const position = { conversationId: c.view.id, messageId: message.id, readAt };
+    readPositions.set(c.view.id, position);
+    clearUnreadThrough(c, target);
+    await persistReadPosition(c, message, position);
+    if (syncToServer) await syncReadMarker(c, message);
   };
   const statusMessage = async (networkId: NetworkId, text: string) => {
     const c = ensureConversation(networkId, "status", profile(networkId).name);
@@ -816,519 +870,553 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     await persist([message]);
   };
 
+  const storeMessage = async (c: Conversation, message: Message) => {
+    putMessages(c, [message]);
+    await persist([message]);
+  };
+  const networkConversations = (networkId: NetworkId) =>
+    [...conversations.values()].filter((c) => c.view.networkId === networkId);
+  const channelConversation = (networkId: NetworkId, channel: string) =>
+    findConversation(networkId, channel, "channel") ??
+    ensureConversation(networkId, "channel", channel);
+  /** Abandons an attempt whose event stream skipped a sequence; only a reconnect can recover. */
+  const abandonInterruptedAttempt = (networkId: NetworkId, attempt: Attempt) => {
+    attempt.error = error("internal", "Connection events were interrupted. Reconnect to recover.");
+    report(attempt.error, networkId);
+    attempt.controller.abort();
+    void attempt.session?.close();
+  };
+
+  const channelJoins = (networkId: NetworkId): SessionCommand[] => {
+    for (const join of profile(networkId).autoJoin) {
+      if (findConversation(networkId, join.channel, "channel")?.closed) continue;
+      const c = ensureConversation(networkId, "channel", join.channel);
+      if (join.key) channelKeys.set(c.view.id, join.key);
+    }
+    const joins = new Map<string, SessionCommand>();
+    for (const c of conversations.values())
+      if (!c.closed && c.view.networkId === networkId && c.view.kind === "channel") {
+        const key = channelKeys.get(c.view.id);
+        joins.set(foldIdentifier(c.view.name, mapping(networkId)), {
+          type: "join",
+          channel: c.view.name,
+          ...(key ? { key } : {}),
+        });
+      }
+    return [...joins.values()];
+  };
+  const joinChannels = async (networkId: NetworkId, attempt: Attempt) => {
+    retryCounts.set(networkId, 0);
+    for (const command of channelJoins(networkId)) {
+      const result = await attempt.session!.execute(
+        command,
+        deps.ids.next<"operation">(),
+        attempt.controller.signal,
+      );
+      if (!result.ok) report(result.error, networkId);
+    }
+  };
+  const rekeyIdentifiers = (networkId: NetworkId, casemapping: ProtocolSupport["casemapping"]) => {
+    const directory = users.get(networkId);
+    if (directory) {
+      const next = new Map<string, UserView>();
+      for (const value of directory.values()) {
+        const key = foldIdentifier(value.nick, casemapping);
+        if (next.has(key) && next.get(key)!.id !== value.id)
+          reject("conflict", "Server identifier rules produced a user collision.");
+        next.set(key, value);
+      }
+      users.set(networkId, next);
+    }
+    const seen = new Set<string>();
+    for (const c of networkConversations(networkId)) {
+      const key = `${c.view.kind}:${foldIdentifier(c.view.name, casemapping)}`;
+      if (seen.has(key))
+        reject("conflict", "Server identifier rules produced a conversation collision.");
+      seen.add(key);
+    }
+  };
+
+  const existingChatMessage = async (
+    networkId: NetworkId,
+    c: Conversation,
+    incoming: PayloadOf<"chat">["message"],
+    local: { messageId: MessageId; message: Message } | undefined,
+  ): Promise<Message | undefined> => {
+    if (local) return findMessage(local.messageId)?.message ?? local.message;
+    if (!incoming.serverId) return undefined;
+    const cached = findServerMessage(networkId, c.view.id, incoming.serverId);
+    if (cached) return cached;
+    const stored = await deps.history.findByServerId(
+      networkId,
+      c.view.id,
+      incoming.serverId,
+      lifetime.signal,
+    );
+    return requireResult(stored) ?? undefined;
+  };
+  const chatMessage = (
+    c: Conversation,
+    incoming: PayloadOf<"chat">["message"],
+    existing: Message | undefined,
+    echoed: boolean,
+  ): Message => {
+    const sender = user(c.view.networkId, incoming.sender.nick);
+    return {
+      ...existing,
+      id: existing?.id ?? deps.ids.next<"message">(),
+      conversationId: c.view.id,
+      networkId: c.view.networkId,
+      sender: {
+        nick: sender.nick,
+        userId: sender.id,
+        ...(incoming.sender.account ? { account: incoming.sender.account } : {}),
+      },
+      kind: incoming.kind,
+      text: existing?.redacted ? "" : plainText(incoming.text),
+      receivedAt: existing?.receivedAt ?? incoming.receivedAt,
+      ...(incoming.serverTime !== undefined ? { serverTime: incoming.serverTime } : {}),
+      ...(incoming.serverId ? { serverId: incoming.serverId } : {}),
+      ...(incoming.replyToServerId ? { replyTo: { serverId: incoming.replyToServerId } } : {}),
+      source: incoming.source,
+      reactions: existing?.reactions ?? [],
+      redacted: existing?.redacted ?? false,
+      ...(echoed ? { sendState: "echo-observed" as const } : {}),
+    };
+  };
+  const noteIncomingMessage = (c: Conversation, message: Message, ownNick: string) => {
+    // Focus/bottom observations can suppress notifications, not prove a new message rendered.
+    const seen = isWatching(c);
+    const mention = isMention(c, message.text, ownNick);
+    trackUnread(c, message, mention);
+    if (
+      !mention ||
+      seen ||
+      c.view.muted ||
+      message.source !== "live" ||
+      !settings.user.notifications.desktop
+    )
+      return;
+    queueNotification({
+      title: `${message.sender.nick} · ${c.view.name}`,
+      conversationId: c.view.id,
+      ...(settings.user.notifications.previews ? { body: message.text.slice(0, 240) } : {}),
+    });
+  };
+  /** Routes chat to its channel, or to the DM named for the other party (our own echoes included). */
+  const chatConversation = (
+    networkId: NetworkId,
+    incoming: PayloadOf<"chat">["message"],
+    own: boolean,
+  ) => {
+    const isChannel = (support.get(networkId)?.channelTypes ?? "#&").includes(
+      incoming.target[0] ?? "",
+    );
+    const kind = isChannel ? "channel" : "direct";
+    const name = isChannel || own ? incoming.target : incoming.sender.nick;
+    const previousConversation = findConversation(networkId, name, kind);
+    const reopened = !previousConversation || previousConversation.closed;
+    // In-flight traffic after PART must not undo an explicit channel close. DMs may reopen.
+    const c =
+      isChannel && previousConversation
+        ? previousConversation
+        : ensureConversation(networkId, kind, name);
+    return { c, reopened };
+  };
+  const receiveChat = async (payload: PayloadOf<"chat">, { networkId, network }: EventContext) => {
+    const incoming = payload.message;
+    const own = same(networkId, incoming.sender.nick, network.nick);
+    const { c, reopened } = chatConversation(networkId, incoming, own);
+    const local = incoming.operationId ? pending.get(incoming.operationId) : undefined;
+    const existing = await existingChatMessage(networkId, c, incoming, local);
+    if (existing && (existing.conversationId !== c.view.id || existing.networkId !== networkId))
+      reject("conflict", "Server message identity belongs to a different conversation.");
+    const message = chatMessage(c, incoming, existing, local !== undefined);
+    await storeMessage(c, message);
+    if (reopened && !c.closed) await saveWorkspace();
+    if (local && incoming.operationId) {
+      pending.delete(incoming.operationId);
+      operation(incoming.operationId, "completed");
+    }
+    if (!existing && !own && isPastReadPosition(c, message) && !isHistServMessage(message))
+      noteIncomingMessage(c, message, network.nick);
+  };
+
+  const updateMembership = async (
+    payload: PayloadOf<"membership">,
+    { networkId, network, attempt }: EventContext,
+  ) => {
+    const c = channelConversation(networkId, payload.channel);
+    const self = same(networkId, payload.change.nick, network.nick);
+    if (payload.change.kind === "join" && self) reopenConversation(c);
+    const member = user(networkId, payload.change.nick);
+    const remaining = timeline(c).members.filter((value) => value.id !== member.id);
+    if (payload.change.kind !== "remove") {
+      if (remaining.length >= MAX_MEMBERS) reject("rate-limited", "Channel member limit exceeded.");
+      remaining.push({ ...member, prefixes: payload.change.prefixes });
+    }
+    // After our own PART/KICK the member list is stale; do not keep showing it.
+    const selfRemoved = payload.change.kind === "remove" && self;
+    updateTimeline(c, selfRemoved ? { members: [], typing: [] } : { members: remaining });
+    if (!self) return;
+    c.view = { ...c.view, joined: payload.change.kind !== "remove" };
+    if (
+      payload.change.kind === "join" &&
+      network.features.history &&
+      !attempt.historyRequested.has(c.view.id)
+    ) {
+      attempt.historyRequested.add(c.view.id);
+      await loadRecent(c);
+      attempt.historyQueue.push(c.view.id);
+      await drainHistory(networkId, attempt);
+    }
+  };
+  const renameUser = async (payload: PayloadOf<"nick">, { networkId, network }: EventContext) => {
+    const old = user(networkId, payload.previous);
+    const renamed = { ...old, nick: plainText(payload.next) };
+    const directory = users.get(networkId)!;
+    directory.delete(foldIdentifier(payload.previous, mapping(networkId)));
+    directory.set(foldIdentifier(payload.next, mapping(networkId)), renamed);
+    const isDirectWith = (c: Conversation, nick: string) =>
+      c.view.kind === "direct" && same(networkId, c.view.name, nick);
+    const scoped = networkConversations(networkId);
+    // If a DM with the new nickname already exists, it carries on; renaming the old DM
+    // too would leave two conversations with one name, so the old one keeps its name.
+    const taken = scoped.some(
+      (c) => isDirectWith(c, payload.next) && !same(networkId, c.view.name, payload.previous),
+    );
+    for (const c of scoped) {
+      updateTimeline(c, {
+        members: timeline(c).members.map((member) =>
+          member.id === old.id ? { ...member, nick: renamed.nick } : member,
+        ),
+      });
+      if (!taken && isDirectWith(c, payload.previous)) {
+        c.view = { ...c.view, name: renamed.nick };
+        dirtyConversations.add(c.view.id);
+      }
+    }
+    if (same(networkId, network.nick, payload.previous))
+      networks.set(networkId, { ...network, nick: renamed.nick });
+    await persist();
+  };
+  /** Stores a changed user and refreshes it in every member list, keeping channel prefixes. */
+  const replaceUser = (networkId: NetworkId, nick: string, value: UserView) => {
+    users.get(networkId)!.set(foldIdentifier(nick, mapping(networkId)), value);
+    for (const c of networkConversations(networkId))
+      updateTimeline(c, {
+        members: timeline(c).members.map((member) =>
+          member.id === value.id ? { ...value, prefixes: member.prefixes } : member,
+        ),
+      });
+  };
+  const failDiscovery = (networkId: NetworkId, operationId: OperationId, detail: AppError) => {
+    const read = discovery(networkId);
+    const current = read.readable.getSnapshot();
+    read.publish({
+      ...current,
+      ...(current.directory.operationId === operationId
+        ? { directory: { ...current.directory, state: "failed" as const, error: detail } }
+        : {}),
+      ...(current.user.operationId === operationId
+        ? { user: { ...current.user, state: "failed" as const, error: detail } }
+        : {}),
+    });
+  };
+  const receiveError = async (
+    payload: PayloadOf<"error">,
+    { networkId, attempt }: EventContext,
+  ) => {
+    if (!payload.operationId) attempt.error = payload.error;
+    report(payload.error, networkId);
+    if (payload.operationId) {
+      operation(payload.operationId, "failed", payload.error);
+      await updateSend(payload.operationId, "failed", payload.error);
+      failDiscovery(networkId, payload.operationId, payload.error);
+    }
+    await statusMessage(networkId, payload.error.message);
+    if (payload.operationId && payload.operationId === attempt.historyOperation) {
+      delete attempt.historyOperation;
+      if (!["network", "cancelled"].includes(payload.error.code))
+        await drainHistory(networkId, attempt);
+    }
+  };
+  const showTyping = (payload: PayloadOf<"typing">, { networkId }: EventContext) => {
+    const c =
+      findConversation(networkId, payload.target) ??
+      ensureConversation(networkId, "direct", payload.nick);
+    const value = user(networkId, payload.nick);
+    const key = `${c.view.id}:${value.id}`;
+    const withoutUser = () => timeline(c).typing.filter((id) => id !== value.id);
+    typingControllers.get(key)?.controller.abort();
+    typingControllers.delete(key);
+    updateTimeline(c, {
+      typing: payload.active ? [...new Set([...timeline(c).typing, value.id])] : withoutUser(),
+    });
+    if (!payload.active) return;
+    const controller = new AbortController();
+    typingControllers.set(key, { controller, conversationId: c.view.id });
+    void deps.clock
+      .sleep(10000, controller.signal)
+      .then(() =>
+        serial(() => {
+          if (typingControllers.get(key)?.controller !== controller) return;
+          typingControllers.delete(key);
+          updateTimeline(c, { typing: withoutUser() });
+        }),
+      )
+      .catch(() => {});
+  };
+
+  /** Resolves a server message reference within its conversation, from memory or durable history. */
+  const findTargetMessage = async (networkId: NetworkId, target: string, serverId: string) => {
+    const c = findConversation(networkId, target);
+    if (!c) return undefined;
+    let message = findServerMessage(networkId, c.view.id, serverId);
+    if (!message) {
+      const found = await deps.history.findByServerId(
+        networkId,
+        c.view.id,
+        serverId,
+        lifetime.signal,
+      );
+      if (found.ok) message = found.value ?? undefined;
+    }
+    if (!message) return undefined;
+    if (message.conversationId !== c.view.id)
+      reject("conflict", "Server message identity belongs to a different conversation.");
+    return { c, message };
+  };
+  const reactionGroup = (message: Message): ReactionGroup => {
+    const existing = reactions.get(message.id);
+    if (existing) return existing;
+    if (reactions.size >= MAX_HOT_MESSAGES) {
+      const oldest = reactions.keys().next().value;
+      if (oldest !== undefined) reactions.delete(oldest);
+    }
+    const grouped: ReactionGroup = { baseline: message.reactions, actors: new Map() };
+    reactions.set(message.id, grouped);
+    return grouped;
+  };
+  /** Durable aggregates carry no actor IDs, so only our own delta can adjust them. */
+  const applyBaselineReaction = (
+    grouped: ReactionGroup,
+    baseline: Message["reactions"][number],
+    message: Message,
+    remove: boolean,
+    self: boolean,
+  ): Message | undefined => {
+    if (!self || baseline.reactedBySelf === !remove) return undefined;
+    grouped.baseline = grouped.baseline
+      .map((entry) =>
+        entry !== baseline
+          ? entry
+          : {
+              ...entry,
+              reactedBySelf: !remove,
+              count: Math.max(0, entry.count + (remove ? -1 : 1)),
+            },
+      )
+      .filter((entry) => entry.count > 0);
+    return {
+      ...message,
+      reactions: [
+        ...grouped.baseline,
+        ...message.reactions.filter((entry) => grouped.actors.has(entry.value)),
+      ],
+    };
+  };
+  const applyActorReaction = (
+    grouped: ReactionGroup,
+    message: Message,
+    payload: PayloadOf<"reaction">,
+    { networkId, network }: EventContext,
+  ): Message | undefined => {
+    const value = user(networkId, payload.nick);
+    let members = grouped.actors.get(payload.value);
+    if (!members && payload.remove) return undefined;
+    if (!members) {
+      if (grouped.actors.size >= 128) {
+        report(error("rate-limited", "Reaction limit reached."));
+        return undefined;
+      }
+      members = new Set();
+      grouped.actors.set(payload.value, members);
+    }
+    if (payload.remove) members.delete(value.id);
+    else members.add(value.id);
+    if (!members.size) grouped.actors.delete(payload.value);
+    const selfId = users.get(networkId)?.get(foldIdentifier(network.nick, mapping(networkId)))?.id;
+    return {
+      ...message,
+      reactions: [
+        ...grouped.baseline,
+        ...[...grouped.actors]
+          .filter(([, set]) => set.size)
+          .map(([reaction, set]) => ({
+            value: plainText(reaction),
+            count: set.size,
+            reactedBySelf: selfId !== undefined && set.has(selfId),
+          })),
+      ],
+    };
+  };
+  const receiveReaction = async (payload: PayloadOf<"reaction">, context: EventContext) => {
+    const found = await findTargetMessage(context.networkId, payload.target, payload.serverId);
+    if (!found) return;
+    const { c, message } = found;
+    // Reactions to removed messages are ignored; the stored message is rewritten unchanged.
+    if (message.redacted) return storeMessage(c, message);
+    const grouped = reactionGroup(message);
+    const baseline = grouped.baseline.find((entry) => entry.value === payload.value);
+    const updated = baseline
+      ? applyBaselineReaction(
+          grouped,
+          baseline,
+          message,
+          payload.remove,
+          same(context.networkId, payload.nick, context.network.nick),
+        )
+      : applyActorReaction(grouped, message, payload, context);
+    if (updated) await storeMessage(c, updated);
+  };
+
+  const eventHandlers: EventHandlers = {
+    state: async (payload, { networkId, network, attempt }) => {
+      networks.set(networkId, {
+        ...network,
+        phase: payload.phase,
+        nick: plainText(payload.nick),
+        secure: payload.secure,
+        authenticated: payload.authenticated,
+      });
+      if (payload.phase === "ready" && network.phase !== "ready")
+        await joinChannels(networkId, attempt);
+    },
+    support: (payload, { networkId, network }) => {
+      support.set(networkId, payload.support);
+      networks.set(networkId, { ...network, features: payload.features });
+      rekeyIdentifiers(networkId, payload.support.casemapping);
+    },
+    chat: receiveChat,
+    membership: updateMembership,
+    topic: (payload, { networkId }) => {
+      const c = channelConversation(networkId, payload.channel);
+      c.view = { ...c.view, topic: plainText(payload.text) };
+    },
+    nick: renameUser,
+    quit: (payload, { networkId }) => {
+      const key = foldIdentifier(payload.nick, mapping(networkId));
+      const value = users.get(networkId)?.get(key);
+      if (value)
+        for (const c of networkConversations(networkId))
+          updateTimeline(c, {
+            members: timeline(c).members.filter((member) => member.id !== value.id),
+            typing: timeline(c).typing.filter((id) => id !== value.id),
+          });
+      users.get(networkId)?.delete(key);
+    },
+    away: (payload, { networkId }) =>
+      replaceUser(networkId, payload.nick, {
+        ...user(networkId, payload.nick),
+        away: payload.away,
+      }),
+    account: (payload, { networkId }) => {
+      const { account: _account, ...rest } = user(networkId, payload.nick);
+      replaceUser(networkId, payload.nick, {
+        ...rest,
+        ...(payload.account ? { account: plainText(payload.account) } : {}),
+      });
+    },
+    "send-state": (payload) => updateSend(payload.operationId, payload.state, payload.error),
+    error: receiveError,
+    notice: (payload, { networkId }) => statusMessage(networkId, payload.text),
+    "directory-item": (payload, { networkId }) => {
+      const read = discovery(networkId);
+      const current = read.readable.getSnapshot();
+      if (current.directory.operationId !== payload.operationId) return;
+      const items = current.directory.items;
+      read.publish({
+        ...current,
+        directory: {
+          ...current.directory,
+          items:
+            items.length < 5000
+              ? [
+                  ...items,
+                  {
+                    ...payload.item,
+                    channel: plainText(payload.item.channel),
+                    topic: plainText(payload.item.topic),
+                  },
+                ]
+              : items,
+          truncated: items.length >= 5000,
+        },
+      });
+    },
+    "directory-complete": (payload, { networkId }) => {
+      const read = discovery(networkId);
+      const current = read.readable.getSnapshot();
+      if (current.directory.operationId === payload.operationId)
+        read.publish({ ...current, directory: { ...current.directory, state: "ready" } });
+      operation(payload.operationId, "completed");
+    },
+    "user-details": (payload, { networkId }) => {
+      const read = discovery(networkId);
+      const current = read.readable.getSnapshot();
+      if (current.user.operationId === payload.operationId)
+        read.publish({
+          ...current,
+          user: { state: "ready", operationId: payload.operationId, details: payload.details },
+        });
+      operation(payload.operationId, "completed");
+    },
+    "history-complete": async (payload, { networkId, attempt }) => {
+      operation(payload.operationId, "completed");
+      if (payload.operationId !== attempt.historyOperation) return;
+      delete attempt.historyOperation;
+      await drainHistory(networkId, attempt);
+    },
+    typing: showTyping,
+    reaction: receiveReaction,
+    redaction: async (payload, { networkId }) => {
+      const found = await findTargetMessage(networkId, payload.target, payload.serverId);
+      if (!found) return;
+      reactions.delete(found.message.id);
+      await storeMessage(found.c, { ...found.message, redacted: true, text: "", reactions: [] });
+    },
+    "read-marker": async (payload, { networkId }) => {
+      const c = findConversation(networkId, payload.target);
+      if (!c) return;
+      const message = mergeWindow(c.recent, timeline(c).messages, WINDOW * 2)
+        .filter((m) => (m.serverTime ?? m.receivedAt) <= payload.serverTime)
+        .at(-1);
+      if (message) await markRead(c, message.id, false);
+    },
+  };
+  const runEventHandler = <T extends SessionPayload["type"]>(
+    type: T,
+    payload: PayloadOf<T>,
+    context: EventContext,
+  ) => eventHandlers[type](payload, context);
+
   const handleEvent = async (event: SessionEvent) => {
     const attempt = attempts.get(event.networkId);
     if (!attempt) return;
     const admission = admitSessionEvent(attempt.cursor, event);
     if (!admission.accepted) {
-      if (admission.reason === "sequence-gap") {
-        attempt.error = error(
-          "internal",
-          "Connection events were interrupted. Reconnect to recover.",
-        );
-        report(attempt.error, event.networkId);
-        attempt.controller.abort();
-        void attempt.session?.close();
-      }
+      if (admission.reason === "sequence-gap") abandonInterruptedAttempt(event.networkId, attempt);
       return;
     }
     attempt.cursor = admission.cursor;
-    const payload = event.payload;
-    const networkId = event.networkId;
-    const network = networks.get(networkId);
+    const network = networks.get(event.networkId);
     if (!network) return;
-    switch (payload.type) {
-      case "state": {
-        networks.set(networkId, {
-          ...network,
-          phase: payload.phase,
-          nick: plainText(payload.nick),
-          secure: payload.secure,
-          authenticated: payload.authenticated,
-        });
-        if (payload.phase === "ready" && network.phase !== "ready") {
-          retryCounts.set(networkId, 0);
-          const joins = new Map<string, SessionCommand>();
-          for (const join of profile(networkId).autoJoin) {
-            if (findConversation(networkId, join.channel, "channel")?.closed) continue;
-            const c = ensureConversation(networkId, "channel", join.channel);
-            if (join.key) channelKeys.set(c.view.id, join.key);
-          }
-          for (const c of conversations.values())
-            if (!c.closed && c.view.networkId === networkId && c.view.kind === "channel") {
-              const key = channelKeys.get(c.view.id);
-              joins.set(foldIdentifier(c.view.name, mapping(networkId)), {
-                type: "join",
-                channel: c.view.name,
-                ...(key ? { key } : {}),
-              });
-            }
-          for (const command of joins.values()) {
-            const result = await attempt.session!.execute(
-              command,
-              deps.ids.next<"operation">(),
-              attempt.controller.signal,
-            );
-            if (!result.ok) report(result.error, networkId);
-          }
-        }
-        break;
-      }
-      case "support": {
-        support.set(networkId, payload.support);
-        networks.set(networkId, { ...network, features: payload.features });
-        const directory = users.get(networkId);
-        if (directory) {
-          const next = new Map<string, UserView>();
-          for (const value of directory.values()) {
-            const key = foldIdentifier(value.nick, payload.support.casemapping);
-            if (next.has(key) && next.get(key)!.id !== value.id)
-              reject("conflict", "Server identifier rules produced a user collision.");
-            next.set(key, value);
-          }
-          users.set(networkId, next);
-        }
-        const seen = new Set<string>();
-        for (const c of conversations.values())
-          if (c.view.networkId === networkId) {
-            const key = `${c.view.kind}:${foldIdentifier(c.view.name, payload.support.casemapping)}`;
-            if (seen.has(key))
-              reject("conflict", "Server identifier rules produced a conversation collision.");
-            seen.add(key);
-          }
-        break;
-      }
-      case "chat": {
-        const incoming = payload.message;
-        const isChannel = (support.get(networkId)?.channelTypes ?? "#&").includes(
-          incoming.target[0] ?? "",
-        );
-        const own = same(networkId, incoming.sender.nick, network.nick);
-        const name = isChannel || own ? incoming.target : incoming.sender.nick;
-        const previousConversation = findConversation(
-          networkId,
-          name,
-          isChannel ? "channel" : "direct",
-        );
-        const reopened = !previousConversation || previousConversation.closed;
-        // In-flight traffic after PART must not undo an explicit channel close. DMs may reopen.
-        const c =
-          isChannel && previousConversation
-            ? previousConversation
-            : ensureConversation(networkId, isChannel ? "channel" : "direct", name);
-        const local = incoming.operationId ? pending.get(incoming.operationId) : undefined;
-        let existing = local && (findMessage(local.messageId)?.message ?? local.message);
-        if (!existing && incoming.serverId) {
-          existing = findServerMessage(networkId, c.view.id, incoming.serverId);
-          if (!existing) {
-            const stored = await deps.history.findByServerId(
-              networkId,
-              c.view.id,
-              incoming.serverId,
-              lifetime.signal,
-            );
-            existing = requireResult(stored) ?? undefined;
-          }
-        }
-        if (existing && (existing.conversationId !== c.view.id || existing.networkId !== networkId))
-          reject("conflict", "Server message identity belongs to a different conversation.");
-        const sender = user(networkId, incoming.sender.nick);
-        const message: Message = {
-          ...existing,
-          id: existing?.id ?? deps.ids.next<"message">(),
-          conversationId: c.view.id,
-          networkId,
-          sender: {
-            nick: sender.nick,
-            userId: sender.id,
-            ...(incoming.sender.account ? { account: incoming.sender.account } : {}),
-          },
-          kind: incoming.kind,
-          text: existing?.redacted ? "" : plainText(incoming.text),
-          receivedAt: existing?.receivedAt ?? incoming.receivedAt,
-          ...(incoming.serverTime !== undefined ? { serverTime: incoming.serverTime } : {}),
-          ...(incoming.serverId ? { serverId: incoming.serverId } : {}),
-          ...(incoming.replyToServerId ? { replyTo: { serverId: incoming.replyToServerId } } : {}),
-          source: incoming.source,
-          reactions: existing?.reactions ?? [],
-          redacted: existing?.redacted ?? false,
-          ...(local ? { sendState: "echo-observed" as const } : {}),
-        };
-        putMessages(c, [message]);
-        await persist([message]);
-        if (reopened && !c.closed) await saveWorkspace();
-        if (local && incoming.operationId) {
-          pending.delete(incoming.operationId);
-          operation(incoming.operationId, "completed");
-        }
-        const visible = visibility.get(c.view.id);
-        const seen =
-          active === c.view.id &&
-          visible?.focused &&
-          visible.atBottom &&
-          timeline(c).atLatest !== false;
-        const previousRead = readPositions.get(c.view.id);
-        const isNew =
-          !existing &&
-          !own &&
-          (previousRead
-            ? comparePosition(
-                { id: message.id, time: message.serverTime ?? message.receivedAt },
-                { id: previousRead.messageId, time: previousRead.readAt },
-              ) > 0
-            : incoming.source === "live");
-        // Focus/bottom observations can suppress notifications, not prove a new message rendered.
-        if (isNew && !isHistServMessage(message)) {
-          const mention =
-            c.view.kind === "direct" ||
-            mentionsNick(message.text, network.nick, mapping(networkId));
-          trackUnread(c, message, mention);
-          if (
-            mention &&
-            !seen &&
-            !c.view.muted &&
-            incoming.source === "live" &&
-            settings.user.notifications.desktop
-          ) {
-            queueNotification({
-              title: `${message.sender.nick} · ${c.view.name}`,
-              conversationId: c.view.id,
-              ...(settings.user.notifications.previews ? { body: message.text.slice(0, 240) } : {}),
-            });
-          }
-        }
-        break;
-      }
-      case "membership": {
-        const c =
-          findConversation(networkId, payload.channel, "channel") ??
-          ensureConversation(networkId, "channel", payload.channel);
-        if (payload.change.kind === "join" && same(networkId, payload.change.nick, network.nick))
-          reopenConversation(c);
-        const member = user(networkId, payload.change.nick);
-        const remaining = timeline(c).members.filter((value) => value.id !== member.id);
-        if (payload.change.kind !== "remove") {
-          if (remaining.length >= MAX_MEMBERS)
-            reject("rate-limited", "Channel member limit exceeded.");
-          remaining.push({ ...member, prefixes: payload.change.prefixes });
-        }
-        const selfRemoved =
-          payload.change.kind === "remove" && same(networkId, payload.change.nick, network.nick);
-        // After our own PART/KICK the member list is stale; do not keep showing it.
-        updateTimeline(c, selfRemoved ? { members: [], typing: [] } : { members: remaining });
-        if (same(networkId, payload.change.nick, network.nick)) {
-          c.view = { ...c.view, joined: payload.change.kind !== "remove" };
-          if (
-            payload.change.kind === "join" &&
-            network.features.history &&
-            !attempt.historyRequested.has(c.view.id)
-          ) {
-            attempt.historyRequested.add(c.view.id);
-            await loadRecent(c);
-            attempt.historyQueue.push(c.view.id);
-            await drainHistory(networkId, attempt);
-          }
-        }
-        break;
-      }
-      case "topic": {
-        const c =
-          findConversation(networkId, payload.channel, "channel") ??
-          ensureConversation(networkId, "channel", payload.channel);
-        c.view = { ...c.view, topic: plainText(payload.text) };
-        break;
-      }
-      case "nick": {
-        const old = user(networkId, payload.previous);
-        const renamed = { ...old, nick: plainText(payload.next) };
-        const directory = users.get(networkId)!;
-        directory.delete(foldIdentifier(payload.previous, mapping(networkId)));
-        directory.set(foldIdentifier(payload.next, mapping(networkId)), renamed);
-        // If a DM with the new nickname already exists, it carries on; renaming the old DM
-        // too would leave two conversations with one name, so the old one keeps its name.
-        const taken = [...conversations.values()].some(
-          (c) =>
-            c.view.networkId === networkId &&
-            c.view.kind === "direct" &&
-            same(networkId, c.view.name, payload.next) &&
-            !same(networkId, c.view.name, payload.previous),
-        );
-        for (const c of conversations.values())
-          if (c.view.networkId === networkId) {
-            updateTimeline(c, {
-              members: timeline(c).members.map((member) =>
-                member.id === old.id ? { ...member, nick: renamed.nick } : member,
-              ),
-            });
-            if (
-              !taken &&
-              c.view.kind === "direct" &&
-              same(networkId, c.view.name, payload.previous)
-            ) {
-              c.view = { ...c.view, name: renamed.nick };
-              dirtyConversations.add(c.view.id);
-            }
-          }
-        if (same(networkId, network.nick, payload.previous))
-          networks.set(networkId, { ...network, nick: renamed.nick });
-        await persist();
-        break;
-      }
-      case "quit": {
-        const value = users.get(networkId)?.get(foldIdentifier(payload.nick, mapping(networkId)));
-        if (value)
-          for (const c of conversations.values())
-            if (c.view.networkId === networkId)
-              updateTimeline(c, {
-                members: timeline(c).members.filter((member) => member.id !== value.id),
-                typing: timeline(c).typing.filter((id) => id !== value.id),
-              });
-        users.get(networkId)?.delete(foldIdentifier(payload.nick, mapping(networkId)));
-        break;
-      }
-      case "away":
-      case "account": {
-        const previous = user(networkId, payload.nick);
-        let value: UserView;
-        if (payload.type === "away") value = { ...previous, away: payload.away };
-        else {
-          const { account: _account, ...rest } = previous;
-          value = { ...rest, ...(payload.account ? { account: plainText(payload.account) } : {}) };
-        }
-        users.get(networkId)!.set(foldIdentifier(payload.nick, mapping(networkId)), value);
-        for (const c of conversations.values())
-          if (c.view.networkId === networkId)
-            updateTimeline(c, {
-              members: timeline(c).members.map((member) =>
-                member.id === value.id ? { ...value, prefixes: member.prefixes } : member,
-              ),
-            });
-        break;
-      }
-      case "send-state":
-        await updateSend(payload.operationId, payload.state, payload.error);
-        break;
-      case "error": {
-        if (!payload.operationId) attempt.error = payload.error;
-        report(payload.error, networkId);
-        if (payload.operationId) {
-          operation(payload.operationId, "failed", payload.error);
-          await updateSend(payload.operationId, "failed", payload.error);
-          const read = discovery(networkId);
-          const current = read.readable.getSnapshot();
-          read.publish({
-            ...current,
-            ...(current.directory.operationId === payload.operationId
-              ? {
-                  directory: {
-                    ...current.directory,
-                    state: "failed" as const,
-                    error: payload.error,
-                  },
-                }
-              : {}),
-            ...(current.user.operationId === payload.operationId
-              ? { user: { ...current.user, state: "failed" as const, error: payload.error } }
-              : {}),
-          });
-        }
-        await statusMessage(networkId, payload.error.message);
-        if (payload.operationId && payload.operationId === attempt.historyOperation) {
-          delete attempt.historyOperation;
-          if (!["network", "cancelled"].includes(payload.error.code))
-            await drainHistory(networkId, attempt);
-        }
-        break;
-      }
-      case "notice":
-        await statusMessage(networkId, payload.text);
-        break;
-      case "directory-item": {
-        const read = discovery(networkId);
-        const current = read.readable.getSnapshot();
-        if (current.directory.operationId !== payload.operationId) break;
-        const items = current.directory.items;
-        read.publish({
-          ...current,
-          directory: {
-            ...current.directory,
-            items:
-              items.length < 5000
-                ? [
-                    ...items,
-                    {
-                      ...payload.item,
-                      channel: plainText(payload.item.channel),
-                      topic: plainText(payload.item.topic),
-                    },
-                  ]
-                : items,
-            truncated: items.length >= 5000,
-          },
-        });
-        break;
-      }
-      case "directory-complete": {
-        const read = discovery(networkId);
-        const current = read.readable.getSnapshot();
-        if (current.directory.operationId === payload.operationId)
-          read.publish({ ...current, directory: { ...current.directory, state: "ready" } });
-        operation(payload.operationId, "completed");
-        break;
-      }
-      case "user-details": {
-        const read = discovery(networkId);
-        const current = read.readable.getSnapshot();
-        if (current.user.operationId === payload.operationId)
-          read.publish({
-            ...current,
-            user: { state: "ready", operationId: payload.operationId, details: payload.details },
-          });
-        operation(payload.operationId, "completed");
-        break;
-      }
-      case "history-complete":
-        operation(payload.operationId, "completed");
-        if (payload.operationId === attempt.historyOperation) {
-          delete attempt.historyOperation;
-          await drainHistory(networkId, attempt);
-        }
-        break;
-      case "typing": {
-        const c =
-          findConversation(networkId, payload.target) ??
-          ensureConversation(networkId, "direct", payload.nick);
-        const value = user(networkId, payload.nick);
-        const key = `${c.view.id}:${value.id}`;
-        typingControllers.get(key)?.controller.abort();
-        typingControllers.delete(key);
-        updateTimeline(c, {
-          typing: payload.active
-            ? [...new Set([...timeline(c).typing, value.id])]
-            : timeline(c).typing.filter((id) => id !== value.id),
-        });
-        if (payload.active) {
-          const controller = new AbortController();
-          typingControllers.set(key, { controller, conversationId: c.view.id });
-          void deps.clock
-            .sleep(10000, controller.signal)
-            .then(() =>
-              serial(() => {
-                if (typingControllers.get(key)?.controller !== controller) return;
-                typingControllers.delete(key);
-                updateTimeline(c, { typing: timeline(c).typing.filter((id) => id !== value.id) });
-              }),
-            )
-            .catch(() => {});
-        }
-        break;
-      }
-      case "reaction":
-      case "redaction": {
-        const c = findConversation(networkId, payload.target);
-        if (!c) break;
-        let message = findServerMessage(networkId, c.view.id, payload.serverId);
-        if (!message) {
-          const found = await deps.history.findByServerId(
-            networkId,
-            c.view.id,
-            payload.serverId,
-            lifetime.signal,
-          );
-          if (found.ok) message = found.value ?? undefined;
-        }
-        if (!message) break;
-        if (message.conversationId !== c.view.id)
-          reject("conflict", "Server message identity belongs to a different conversation.");
-        if (payload.type === "redaction") {
-          message = { ...message, redacted: true, text: "", reactions: [] };
-          reactions.delete(message.id);
-        } else if (!message.redacted) {
-          let grouped = reactions.get(message.id);
-          if (!grouped) {
-            if (reactions.size >= MAX_HOT_MESSAGES) {
-              const oldest = reactions.keys().next().value;
-              if (oldest !== undefined) reactions.delete(oldest);
-            }
-            grouped = { baseline: message.reactions, actors: new Map() };
-            reactions.set(message.id, grouped);
-          }
-          const knownActors = grouped.actors;
-          // Durable aggregates contain no actor IDs. Unknown actor deltas cannot safely replace them.
-          const baseline = grouped.baseline.find((entry) => entry.value === payload.value);
-          const self = same(networkId, payload.nick, network.nick);
-          if (baseline) {
-            if (self && baseline.reactedBySelf !== !payload.remove) {
-              grouped.baseline = grouped.baseline
-                .map((entry) =>
-                  entry !== baseline
-                    ? entry
-                    : {
-                        ...entry,
-                        reactedBySelf: !payload.remove,
-                        count: Math.max(0, entry.count + (payload.remove ? -1 : 1)),
-                      },
-                )
-                .filter((entry) => entry.count > 0);
-              message = {
-                ...message,
-                reactions: [
-                  ...grouped.baseline,
-                  ...message.reactions.filter((entry) => knownActors.has(entry.value)),
-                ],
-              };
-              putMessages(c, [message]);
-              await persist([message]);
-            }
-            break;
-          }
-          const value = user(networkId, payload.nick);
-          let members = grouped.actors.get(payload.value);
-          if (!members && payload.remove) break;
-          if (!members) {
-            if (grouped.actors.size >= 128) {
-              report(error("rate-limited", "Reaction limit reached."));
-              break;
-            }
-            members = new Set();
-            grouped.actors.set(payload.value, members);
-          }
-          if (payload.remove) members.delete(value.id);
-          else members.add(value.id);
-          if (!members.size) grouped.actors.delete(payload.value);
-          message = {
-            ...message,
-            reactions: [
-              ...grouped.baseline,
-              ...[...grouped.actors]
-                .filter(([, set]) => set.size)
-                .map(([reaction, set]) => ({
-                  value: plainText(reaction),
-                  count: set.size,
-                  reactedBySelf: [...set].some(
-                    (id) =>
-                      users.get(networkId)?.get(foldIdentifier(network.nick, mapping(networkId)))
-                        ?.id === id,
-                  ),
-                })),
-            ],
-          };
-        }
-        putMessages(c, [message]);
-        await persist([message]);
-        break;
-      }
-      case "read-marker": {
-        const c = findConversation(networkId, payload.target);
-        const message =
-          c &&
-          mergeWindow(c.recent, timeline(c).messages, WINDOW * 2)
-            .filter((m) => (m.serverTime ?? m.receivedAt) <= payload.serverTime)
-            .at(-1);
-        if (c && message) await markRead(c, message.id, false);
-        break;
-      }
-    }
+    await runEventHandler(event.payload.type, event.payload, {
+      networkId: event.networkId,
+      network,
+      attempt,
+    });
     publish();
   };
 
@@ -1475,363 +1563,350 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     publish();
   };
 
+  const openConversation = async (c: Conversation): Promise<ActionOutcome> => {
+    active = c.view.id;
+    await loadRecent(c);
+    await persist();
+    await saveWorkspace();
+    return { receipt: { conversationId: c.view.id } };
+  };
+  const rejectWhilePending = (c: Conversation, message: string) => {
+    if ([...pending.values()].some((entry) => entry.conversationId === c.view.id))
+      reject("unavailable", message);
+  };
+  const assertSendable = (c: Conversation, text: string) => {
+    if (c.view.kind === "status")
+      reject("invalid-input", "Choose a channel or direct conversation to send a message.");
+    if (!text.trim() || text.length > MAX_INPUT || /[\r\u0000]/u.test(text))
+      reject(
+        "invalid-input",
+        "Message is empty, too large, or contains unsupported control characters.",
+      );
+    if (c.view.kind === "channel" && !c.view.joined)
+      reject("unavailable", "Join this channel before sending.");
+  };
+  const replyReference = (
+    c: Conversation,
+    network: NetworkView,
+    replyToId: MessageId | undefined,
+  ): Message["replyTo"] => {
+    if (!replyToId) return undefined;
+    const original = findMessage(replyToId);
+    if (!network.features.replies || !original?.message.serverId || original.c !== c)
+      reject("unsupported", "Replies are unavailable for this message.");
+    return { serverId: original.message.serverId, localId: original.message.id };
+  };
+  const sendMessage = async (
+    action: ActionOf<"message.send">,
+    id: OperationId,
+  ): Promise<ActionOutcome> => {
+    const c = getConversation(action.conversationId);
+    assertSendable(c, action.text);
+    const network = networks.get(c.view.networkId)!;
+    const replyTo = replyReference(c, network, action.replyTo);
+    if (!attempts.get(c.view.networkId)?.session || network.phase !== "ready")
+      reject("unavailable", "Connect to this network before sending.");
+    const message: Message = {
+      id: deps.ids.next<"message">(),
+      conversationId: c.view.id,
+      networkId: c.view.networkId,
+      sender: { nick: network.nick },
+      kind: action.kind,
+      text: plainText(action.text),
+      receivedAt: deps.clock.now(),
+      source: "local",
+      sendState: "pending",
+      reactions: [],
+      redacted: false,
+      ...(replyTo ? { replyTo } : {}),
+    };
+    updateTimeline(c, { atLatest: true, messages: c.recent });
+    putMessages(c, [message]);
+    pending.set(id, { conversationId: c.view.id, messageId: message.id, message });
+    await persist([message]);
+    try {
+      await execute(
+        c.view.networkId,
+        {
+          type: "send",
+          target: c.view.name,
+          text: action.text,
+          kind: action.kind,
+          ...(replyTo ? { replyToServerId: replyTo.serverId } : {}),
+        },
+        id,
+      );
+    } catch (cause) {
+      await updateSend(id, "failed", safeError(cause));
+      throw cause;
+    }
+    updateTimeline(c, { draft: "" });
+    return { receipt: { conversationId: c.view.id, messageId: message.id }, deferred: true };
+  };
+  const changeableMessage = (messageId: MessageId) => {
+    const found = findMessage(messageId);
+    if (!found?.message.serverId || found.message.redacted)
+      reject("unsupported", "This message cannot be changed.");
+    return {
+      target: found.c.view.name,
+      serverId: found.message.serverId,
+      sender: found.message.sender.nick,
+      network: networks.get(found.message.networkId)!,
+    };
+  };
+  const showOlderPage = (c: Conversation, page: Page<Message>) => {
+    // A history window shifts toward the requested older page rather than discarding it at the hot cap.
+    const combined = mergeWindow(page.items, timeline(c).messages, Number.MAX_SAFE_INTEGER);
+    const first = page.items[0];
+    const offset = first ? combined.findIndex((message) => message.id === first.id) : 0;
+    const { olderCursor: _older, ...base } = timeline(c);
+    c.model.publish({
+      ...base,
+      messages: combined.slice(Math.max(0, offset), Math.max(0, offset) + WINDOW),
+      ...(page.nextCursor ? { olderCursor: page.nextCursor } : {}),
+      loadingOlder: false,
+      atLatest: false,
+    });
+    capHotWindows();
+  };
+  /** Asks the server for history older than the local window; false when it cannot help. */
+  const requestServerHistory = async (c: Conversation, id: OperationId) => {
+    if (!networks.get(c.view.networkId)?.features.history || c.view.kind === "status") return false;
+    const oldest = timeline(c).messages[0];
+    await execute(
+      c.view.networkId,
+      {
+        type: "history",
+        target: c.view.name,
+        limit: PAGE_SIZE,
+        ...(oldest?.serverId
+          ? { before: { serverId: oldest.serverId } }
+          : oldest?.serverTime !== undefined
+            ? { before: { serverTime: oldest.serverTime } }
+            : {}),
+      },
+      id,
+    );
+    return true;
+  };
+  const showsLatestMessage = (c: Conversation, lastVisibleMessageId: MessageId) => {
+    const messages = timeline(c).messages;
+    return (
+      messages.at(-1)?.id === lastVisibleMessageId ||
+      (!settings.tui.showHistServ &&
+        messages.findLast((message) => !isHistServMessage(message))?.id === lastVisibleMessageId)
+    );
+  };
+
+  const actionHandlers: ActionHandlers = {
+    "network.connect": (action) => {
+      profile(action.networkId);
+      if (
+        !attempts.has(action.networkId) ||
+        networks.get(action.networkId)?.phase === "disconnected"
+      )
+        startNetwork(action.networkId);
+    },
+    "network.disconnect": async (action) => {
+      profile(action.networkId);
+      await disconnect(action.networkId);
+    },
+    "network.reconnect": async (action) => {
+      profile(action.networkId);
+      await disconnect(action.networkId);
+      startNetwork(action.networkId);
+    },
+    "conversation.join": async (action, id) => {
+      if (!/^[#&+!][^\s,\r\n\u0000]+$/u.test(action.channel) || action.channel.length > 200)
+        reject("invalid-input", "Enter a valid channel name, such as #welcome.");
+      await execute(
+        action.networkId,
+        { type: "join", channel: action.channel, ...(action.key ? { key: action.key } : {}) },
+        id,
+      );
+      const c = ensureConversation(action.networkId, "channel", action.channel);
+      if (action.key) channelKeys.set(c.view.id, action.key);
+      return openConversation(c);
+    },
+    "conversation.query": (action) => {
+      profile(action.networkId);
+      if (!action.nick || /[\s,\r\n\u0000]/u.test(action.nick) || action.nick.length > 100)
+        reject("invalid-input", "Enter a valid nickname.");
+      return openConversation(ensureConversation(action.networkId, "direct", action.nick));
+    },
+    "conversation.activate": async (action) => {
+      const c = getConversation(action.conversationId);
+      active = c.view.id;
+      await loadRecent(c);
+      await saveWorkspace();
+      return { receipt: { conversationId: c.view.id } };
+    },
+    "conversation.close": async (action, id) => {
+      const c = getConversation(action.conversationId);
+      rejectWhilePending(c, "Wait for pending sends before closing this conversation.");
+      if (c.view.kind === "status")
+        reject("invalid-input", "Network status stays available while the network is configured.");
+      if (c.view.kind === "channel" && c.view.joined)
+        await execute(c.view.networkId, { type: "part", channel: c.view.name }, id);
+      cancelTyping(c.view.id);
+      c.closed = true;
+      c.recent = [];
+      c.view = { ...c.view, joined: false };
+      updateTimeline(c, { messages: [], members: [], typing: [] });
+      c.model.dispose();
+      c.loaded = false;
+      if (active === c.view.id)
+        active = [...conversations.values()].find((value) => !value.closed)?.view.id;
+      await saveWorkspace();
+    },
+    "conversation.mute": async (action) => {
+      const c = getConversation(action.conversationId);
+      c.view = { ...c.view, muted: action.muted };
+      await saveWorkspace();
+    },
+    "draft.set": (action) => {
+      const c = getConversation(action.conversationId);
+      if (action.text.length > MAX_INPUT) reject("invalid-input", "Draft is too large.");
+      if (timeline(c).draft !== action.text) updateTimeline(c, { draft: action.text });
+    },
+    "message.send": sendMessage,
+    "irc.request": async (action, id) => {
+      const read = discovery(action.networkId);
+      const current = read.readable.getSnapshot();
+      if (action.command.type === "list")
+        read.publish({
+          ...current,
+          directory: { state: "loading", operationId: id, items: [], truncated: false },
+        });
+      if (action.command.type === "whois")
+        read.publish({ ...current, user: { state: "loading", operationId: id } });
+      await execute(action.networkId, action.command, id);
+      return { deferred: action.command.type === "list" || action.command.type === "whois" };
+    },
+    "message.react": async (action, id) => {
+      const { target, serverId, network } = changeableMessage(action.messageId);
+      if (
+        !network.features.reactions ||
+        !action.value ||
+        action.value.length > 64 ||
+        /[\s\u0000-\u001f]/u.test(action.value)
+      )
+        reject("unsupported", "Reactions are unavailable or invalid.");
+      await execute(
+        network.id,
+        { type: "reaction", target, serverId, value: action.value, remove: action.remove },
+        id,
+      );
+    },
+    "message.redact": async (action, id) => {
+      const { target, serverId, sender, network } = changeableMessage(action.messageId);
+      if (!network.features.redaction)
+        reject("unsupported", "Message removal is unavailable on this network.");
+      if (!same(network.id, sender, network.nick))
+        reject("invalid-input", "Only your own messages can be removed here.");
+      await execute(network.id, { type: "redact", target, serverId }, id);
+    },
+    "typing.set": async (action, id) => {
+      const c = getConversation(action.conversationId);
+      // Opt-out may still clear previously advertised activity.
+      if (
+        (settings.user.sendTyping || !action.active) &&
+        networks.get(c.view.networkId)?.features.typing
+      )
+        await execute(
+          c.view.networkId,
+          {
+            type: "typing",
+            target: c.view.name,
+            active: action.active,
+            ...(action.paused ? { paused: true } : {}),
+          },
+          id,
+        );
+    },
+    "history.load-older": async (action, id) => {
+      const c = getConversation(action.conversationId);
+      updateTimeline(c, { loadingOlder: true });
+      try {
+        const page = requireResult(
+          await deps.history.page(
+            c.view.id,
+            { limit: PAGE_SIZE, ...(action.cursor ? { cursor: action.cursor } : {}) },
+            lifetime.signal,
+          ),
+        );
+        showOlderPage(c, page);
+        return { deferred: !page.nextCursor && (await requestServerHistory(c, id)) };
+      } finally {
+        updateTimeline(c, { loadingOlder: false });
+      }
+    },
+    "history.latest": async (action) => {
+      const c = getConversation(action.conversationId);
+      c.loaded = false;
+      await loadRecent(c);
+      return { receipt: { conversationId: c.view.id } };
+    },
+    "history.reveal": async (action) => {
+      const context = requireResult(
+        await deps.history.context(action.messageId, 40, lifetime.signal),
+      );
+      const message = context.find((value) => value.id === action.messageId);
+      if (!message) reject("unavailable", "Message is no longer stored.");
+      const c = conversations.get(message.conversationId);
+      if (!c) reject("unavailable", "Conversation is no longer configured.");
+      reopenConversation(c);
+      active = c.view.id;
+      updateTimeline(c, { messages: context, atLatest: false });
+      capHotWindows();
+      c.loaded = true;
+      return { receipt: { conversationId: c.view.id, messageId: message.id } };
+    },
+    "history.delete": async (action) => {
+      const c = getConversation(action.conversationId);
+      rejectWhilePending(c, "Wait for pending sends before deleting this conversation's history.");
+      requireResult(await deps.history.deleteConversation(c.view.id, lifetime.signal));
+      readPositions.delete(c.view.id);
+      c.unread.clear();
+      delete c.unreadOverflow;
+      c.view = { ...c.view, unreadCount: 0, mentionCount: 0 };
+      const { firstUnreadId: _unread, olderCursor: _older, ...base } = timeline(c);
+      c.recent = [];
+      c.model.publish({ ...base, messages: [], draft: "", atLatest: true });
+    },
+    "view.report": async (action) => {
+      const c = getConversation(action.conversationId);
+      visibility.set(c.view.id, { focused: action.focused, atBottom: action.atBottom });
+      if (
+        active !== c.view.id ||
+        timeline(c).atLatest === false ||
+        !action.focused ||
+        !action.atBottom ||
+        !action.lastVisibleMessageId ||
+        !showsLatestMessage(c, action.lastVisibleMessageId)
+      )
+        return undefined;
+      // Ephemeral by default; publish only when reading actually clears unread state.
+      const changed = c.view.unreadCount > 0 || c.view.mentionCount > 0;
+      await markRead(c, action.lastVisibleMessageId);
+      return { publish: changed };
+    },
+  };
+  const runAction = <T extends AppAction["type"]>(type: T, action: ActionOf<T>, id: OperationId) =>
+    actionHandlers[type](action, id);
+
   const dispatch = async (action: AppAction, signal: AbortSignal): Promise<Result<ActionReceipt>> =>
     serialIntent(signal, async () => {
       let id: OperationId | undefined;
-      const ephemeral =
-        action.type === "draft.set" ||
-        action.type === "view.report" ||
-        action.type === "typing.set";
-      let publishAfter = !ephemeral;
+      const ephemeral = EPHEMERAL_ACTIONS.has(action.type);
       try {
         if (stopping) reject("unavailable", "opentui-irc is shutting down.");
         if (signal.aborted) reject("cancelled", "Operation cancelled.");
         id = ephemeral ? deps.ids.next<"operation">() : newOperation();
-        let result: Omit<ActionReceipt, "operationId"> = {};
-        let deferred = false;
-        switch (action.type) {
-          case "network.connect":
-            profile(action.networkId);
-            if (
-              !attempts.has(action.networkId) ||
-              networks.get(action.networkId)?.phase === "disconnected"
-            )
-              startNetwork(action.networkId);
-            break;
-          case "network.disconnect":
-            profile(action.networkId);
-            await disconnect(action.networkId);
-            break;
-          case "network.reconnect":
-            profile(action.networkId);
-            await disconnect(action.networkId);
-            startNetwork(action.networkId);
-            break;
-          case "conversation.join": {
-            if (!/^[#&+!][^\s,\r\n\u0000]+$/u.test(action.channel) || action.channel.length > 200)
-              reject("invalid-input", "Enter a valid channel name, such as #welcome.");
-            await execute(
-              action.networkId,
-              { type: "join", channel: action.channel, ...(action.key ? { key: action.key } : {}) },
-              id,
-            );
-            const c = ensureConversation(action.networkId, "channel", action.channel);
-            if (action.key) channelKeys.set(c.view.id, action.key);
-            active = c.view.id;
-            result = { conversationId: c.view.id };
-            await loadRecent(c);
-            await persist();
-            await saveWorkspace();
-            break;
-          }
-          case "conversation.query": {
-            profile(action.networkId);
-            if (!action.nick || /[\s,\r\n\u0000]/u.test(action.nick) || action.nick.length > 100)
-              reject("invalid-input", "Enter a valid nickname.");
-            const c = ensureConversation(action.networkId, "direct", action.nick);
-            active = c.view.id;
-            result = { conversationId: c.view.id };
-            await loadRecent(c);
-            await persist();
-            await saveWorkspace();
-            break;
-          }
-          case "conversation.activate": {
-            const c = getConversation(action.conversationId);
-            active = c.view.id;
-            await loadRecent(c);
-            result = { conversationId: c.view.id };
-            await saveWorkspace();
-            break;
-          }
-          case "conversation.close": {
-            const c = getConversation(action.conversationId);
-            if ([...pending.values()].some((entry) => entry.conversationId === c.view.id))
-              reject("unavailable", "Wait for pending sends before closing this conversation.");
-            if (c.view.kind === "status")
-              reject(
-                "invalid-input",
-                "Network status stays available while the network is configured.",
-              );
-            if (c.view.kind === "channel" && c.view.joined)
-              await execute(c.view.networkId, { type: "part", channel: c.view.name }, id);
-            cancelTyping(c.view.id);
-            c.closed = true;
-            c.recent = [];
-            c.view = { ...c.view, joined: false };
-            updateTimeline(c, { messages: [], members: [], typing: [] });
-            c.model.dispose();
-            c.loaded = false;
-            if (active === c.view.id)
-              active = [...conversations.values()].find((value) => !value.closed)?.view.id;
-            await saveWorkspace();
-            break;
-          }
-          case "conversation.mute": {
-            const c = getConversation(action.conversationId);
-            c.view = { ...c.view, muted: action.muted };
-            await saveWorkspace();
-            break;
-          }
-          case "draft.set": {
-            const c = getConversation(action.conversationId);
-            if (action.text.length > MAX_INPUT) reject("invalid-input", "Draft is too large.");
-            if (timeline(c).draft !== action.text) updateTimeline(c, { draft: action.text });
-            break;
-          }
-          case "message.send": {
-            const c = getConversation(action.conversationId);
-            if (c.view.kind === "status")
-              reject("invalid-input", "Choose a channel or direct conversation to send a message.");
-            if (
-              !action.text.trim() ||
-              action.text.length > MAX_INPUT ||
-              /[\r\u0000]/u.test(action.text)
-            )
-              reject(
-                "invalid-input",
-                "Message is empty, too large, or contains unsupported control characters.",
-              );
-            if (c.view.kind === "channel" && !c.view.joined)
-              reject("unavailable", "Join this channel before sending.");
-            const network = networks.get(c.view.networkId)!;
-            let replyTo: Message["replyTo"];
-            if (action.replyTo) {
-              const original = findMessage(action.replyTo);
-              if (!network.features.replies || !original?.message.serverId || original.c !== c)
-                reject("unsupported", "Replies are unavailable for this message.");
-              replyTo = { serverId: original.message.serverId, localId: original.message.id };
-            }
-            if (!attempts.get(c.view.networkId)?.session || network.phase !== "ready")
-              reject("unavailable", "Connect to this network before sending.");
-            const message: Message = {
-              id: deps.ids.next<"message">(),
-              conversationId: c.view.id,
-              networkId: c.view.networkId,
-              sender: { nick: network.nick },
-              kind: action.kind,
-              text: plainText(action.text),
-              receivedAt: deps.clock.now(),
-              source: "local",
-              sendState: "pending",
-              reactions: [],
-              redacted: false,
-              ...(replyTo ? { replyTo } : {}),
-            };
-            updateTimeline(c, { atLatest: true, messages: c.recent });
-            putMessages(c, [message]);
-            pending.set(id, { conversationId: c.view.id, messageId: message.id, message });
-            await persist([message]);
-            try {
-              await execute(
-                c.view.networkId,
-                {
-                  type: "send",
-                  target: c.view.name,
-                  text: action.text,
-                  kind: action.kind,
-                  ...(replyTo ? { replyToServerId: replyTo.serverId } : {}),
-                },
-                id,
-              );
-            } catch (cause) {
-              await updateSend(id, "failed", safeError(cause));
-              throw cause;
-            }
-            updateTimeline(c, { draft: "" });
-            result = { conversationId: c.view.id, messageId: message.id };
-            deferred = true;
-            break;
-          }
-          case "irc.request": {
-            const read = discovery(action.networkId);
-            const current = read.readable.getSnapshot();
-            if (action.command.type === "list")
-              read.publish({
-                ...current,
-                directory: { state: "loading", operationId: id, items: [], truncated: false },
-              });
-            if (action.command.type === "whois")
-              read.publish({ ...current, user: { state: "loading", operationId: id } });
-            await execute(action.networkId, action.command, id);
-            deferred = action.command.type === "list" || action.command.type === "whois";
-            break;
-          }
-          case "message.react":
-          case "message.redact": {
-            const found = findMessage(action.messageId);
-            if (!found?.message.serverId || found.message.redacted)
-              reject("unsupported", "This message cannot be changed.");
-            const network = networks.get(found.message.networkId)!;
-            if (action.type === "message.react") {
-              if (
-                !network.features.reactions ||
-                !action.value ||
-                action.value.length > 64 ||
-                /[\s\u0000-\u001f]/u.test(action.value)
-              )
-                reject("unsupported", "Reactions are unavailable or invalid.");
-              await execute(
-                network.id,
-                {
-                  type: "reaction",
-                  target: found.c.view.name,
-                  serverId: found.message.serverId,
-                  value: action.value,
-                  remove: action.remove,
-                },
-                id,
-              );
-            } else {
-              if (!network.features.redaction)
-                reject("unsupported", "Message removal is unavailable on this network.");
-              if (!same(network.id, found.message.sender.nick, network.nick))
-                reject("invalid-input", "Only your own messages can be removed here.");
-              await execute(
-                network.id,
-                { type: "redact", target: found.c.view.name, serverId: found.message.serverId },
-                id,
-              );
-            }
-            break;
-          }
-          case "typing.set": {
-            const c = getConversation(action.conversationId);
-            // Opt-out may still clear previously advertised activity.
-            if (
-              (settings.user.sendTyping || !action.active) &&
-              networks.get(c.view.networkId)?.features.typing
-            )
-              await execute(
-                c.view.networkId,
-                {
-                  type: "typing",
-                  target: c.view.name,
-                  active: action.active,
-                  ...(action.paused ? { paused: true } : {}),
-                },
-                id,
-              );
-            break;
-          }
-          case "history.load-older": {
-            const c = getConversation(action.conversationId);
-            updateTimeline(c, { loadingOlder: true });
-            try {
-              const page = requireResult(
-                await deps.history.page(
-                  c.view.id,
-                  { limit: PAGE_SIZE, ...(action.cursor ? { cursor: action.cursor } : {}) },
-                  lifetime.signal,
-                ),
-              );
-              // A history window shifts toward the requested older page rather than discarding it at the hot cap.
-              const combined = mergeWindow(
-                page.items,
-                timeline(c).messages,
-                Number.MAX_SAFE_INTEGER,
-              );
-              const first = page.items[0];
-              const offset = first ? combined.findIndex((message) => message.id === first.id) : 0;
-              const { olderCursor: _older, ...base } = timeline(c);
-              c.model.publish({
-                ...base,
-                messages: combined.slice(Math.max(0, offset), Math.max(0, offset) + WINDOW),
-                ...(page.nextCursor ? { olderCursor: page.nextCursor } : {}),
-                loadingOlder: false,
-                atLatest: false,
-              });
-              capHotWindows();
-              if (
-                !page.nextCursor &&
-                networks.get(c.view.networkId)?.features.history &&
-                c.view.kind !== "status"
-              ) {
-                const oldest = timeline(c).messages[0];
-                await execute(
-                  c.view.networkId,
-                  {
-                    type: "history",
-                    target: c.view.name,
-                    limit: PAGE_SIZE,
-                    ...(oldest?.serverId
-                      ? { before: { serverId: oldest.serverId } }
-                      : oldest?.serverTime !== undefined
-                        ? { before: { serverTime: oldest.serverTime } }
-                        : {}),
-                  },
-                  id,
-                );
-                deferred = true;
-              }
-            } finally {
-              updateTimeline(c, { loadingOlder: false });
-            }
-            break;
-          }
-          case "history.latest": {
-            const c = getConversation(action.conversationId);
-            c.loaded = false;
-            await loadRecent(c);
-            result = { conversationId: c.view.id };
-            break;
-          }
-          case "history.reveal": {
-            const context = requireResult(
-              await deps.history.context(action.messageId, 40, lifetime.signal),
-            );
-            const message = context.find((value) => value.id === action.messageId);
-            if (!message) reject("unavailable", "Message is no longer stored.");
-            const c = conversations.get(message.conversationId);
-            if (!c) reject("unavailable", "Conversation is no longer configured.");
-            reopenConversation(c);
-            active = c.view.id;
-            updateTimeline(c, { messages: context, atLatest: false });
-            capHotWindows();
-            c.loaded = true;
-            result = { conversationId: c.view.id, messageId: message.id };
-            break;
-          }
-          case "history.delete": {
-            const c = getConversation(action.conversationId);
-            if ([...pending.values()].some((entry) => entry.conversationId === c.view.id))
-              reject(
-                "unavailable",
-                "Wait for pending sends before deleting this conversation's history.",
-              );
-            requireResult(await deps.history.deleteConversation(c.view.id, lifetime.signal));
-            readPositions.delete(c.view.id);
-            c.unread.clear();
-            delete c.unreadOverflow;
-            c.view = { ...c.view, unreadCount: 0, mentionCount: 0 };
-            const { firstUnreadId: _unread, olderCursor: _older, ...base } = timeline(c);
-            c.recent = [];
-            c.model.publish({ ...base, messages: [], draft: "", atLatest: true });
-            break;
-          }
-          case "view.report": {
-            const c = getConversation(action.conversationId);
-            visibility.set(c.view.id, { focused: action.focused, atBottom: action.atBottom });
-            if (
-              active === c.view.id &&
-              timeline(c).atLatest !== false &&
-              action.focused &&
-              action.atBottom &&
-              action.lastVisibleMessageId &&
-              (timeline(c).messages.at(-1)?.id === action.lastVisibleMessageId ||
-                (!settings.tui.showHistServ &&
-                  timeline(c).messages.findLast((message) => !isHistServMessage(message))?.id ===
-                    action.lastVisibleMessageId))
-            ) {
-              publishAfter = c.view.unreadCount > 0 || c.view.mentionCount > 0;
-              await markRead(c, action.lastVisibleMessageId);
-            }
-            break;
-          }
-        }
-        if (!deferred && !ephemeral) operation(id, "completed");
-        if (publishAfter) publish();
-        return ok({ operationId: id, ...result });
+        const outcome = (await runAction(action.type, action, id)) ?? {};
+        if (!outcome.deferred && !ephemeral) operation(id, "completed");
+        if (outcome.publish ?? !ephemeral) publish();
+        return ok({ operationId: id, ...outcome.receipt });
       } catch (cause) {
         const detail = safeError(cause);
         if (id && !ephemeral)
