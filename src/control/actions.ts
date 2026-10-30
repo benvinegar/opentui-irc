@@ -72,6 +72,112 @@ function ircCommand(value: unknown): UserIrcCommand {
   }
 }
 
+type ActionType = AppAction["type"];
+type ActionOf<Type extends ActionType> = Extract<AppAction, { readonly type: Type }>;
+type ActionFields = Record<string, unknown>;
+
+const networkId = (action: ActionFields) => opaqueId<"network">(action.networkId);
+const conversationId = (action: ActionFields) => opaqueId<"conversation">(action.conversationId);
+const messageId = (action: ActionFields) => opaqueId<"message">(action.messageId);
+function networkAction<Type extends "network.connect" | "network.disconnect" | "network.reconnect">(
+  action: ActionFields,
+  type: Type,
+) {
+  return { type, networkId: networkId(action) };
+}
+function conversationAction<
+  Type extends "conversation.activate" | "conversation.close" | "history.latest" | "history.delete",
+>(action: ActionFields, type: Type) {
+  return { type, conversationId: conversationId(action) };
+}
+function messageAction<Type extends "message.redact" | "history.reveal">(
+  action: ActionFields,
+  type: Type,
+) {
+  return { type, messageId: messageId(action) };
+}
+
+/** Fields are validated in property order, which fixes the first reported error. */
+const ACTION_PARSERS: {
+  readonly [Type in ActionType]: (action: ActionFields, type: Type) => ActionOf<Type>;
+} = {
+  "network.connect": networkAction,
+  "network.disconnect": networkAction,
+  "network.reconnect": networkAction,
+  "conversation.activate": conversationAction,
+  "conversation.close": conversationAction,
+  "history.latest": conversationAction,
+  "history.delete": conversationAction,
+  "conversation.join": (action, type) => ({
+    type,
+    networkId: networkId(action),
+    channel: bounded(action.channel, channelProperty),
+    ...(action.key !== undefined ? { key: secretKey(action.key) } : {}),
+  }),
+  "conversation.query": (action, type) => ({
+    type,
+    networkId: networkId(action),
+    nick: bounded(action.nick, queryNickProperty),
+  }),
+  "conversation.mute": (action, type) => ({
+    type,
+    conversationId: conversationId(action),
+    muted: boolean(action.muted),
+  }),
+  "draft.set": (action, type) => ({
+    type,
+    conversationId: conversationId(action),
+    text: string(action.text),
+  }),
+  "message.send": (action, type) => ({
+    type,
+    conversationId: conversationId(action),
+    text: bounded(action.text, messageProperty),
+    kind: choice(action.kind, ["text", "action", "notice"]),
+    ...(action.replyTo !== undefined ? { replyTo: opaqueId<"message">(action.replyTo) } : {}),
+  }),
+  "message.react": (action, type) => ({
+    type,
+    messageId: messageId(action),
+    value: bounded(action.value, reactionProperty),
+    remove: boolean(action.remove),
+  }),
+  "message.redact": messageAction,
+  "history.reveal": messageAction,
+  "typing.set": (action, type) => ({
+    type,
+    conversationId: conversationId(action),
+    active: boolean(action.active),
+    ...(action.paused !== undefined ? { paused: boolean(action.paused) } : {}),
+  }),
+  "history.load-older": (action, type) => ({
+    type,
+    conversationId: conversationId(action),
+    ...(action.cursor !== undefined ? { cursor: opaqueId<"cursor">(action.cursor, 16384) } : {}),
+  }),
+  "view.report": (action, type) => ({
+    type,
+    conversationId: conversationId(action),
+    focused: boolean(action.focused),
+    atBottom: boolean(action.atBottom),
+    ...(action.lastVisibleMessageId !== undefined
+      ? { lastVisibleMessageId: opaqueId<"message">(action.lastVisibleMessageId) }
+      : {}),
+  }),
+  "irc.request": (action, type) => ({
+    type,
+    networkId: networkId(action),
+    command: ircCommand(action.command),
+  }),
+};
+function parseTypedAction<Type extends ActionType>(
+  type: Type,
+  action: ActionFields,
+): ActionOf<Type> {
+  const parse = ACTION_PARSERS[type];
+  return parse(action, type);
+}
+
 export function parseAppAction(value: unknown): Result<AppAction, ControlError> {
   try {
     const base = fields(
@@ -89,110 +195,7 @@ export function parseAppAction(value: unknown): Result<AppAction, ControlError> 
     const type = choice(base.type, Object.keys(SHAPES) as AppAction["type"][]);
     const spec: Shape = SHAPES[type];
     const action = fields(value, ["type", ...spec.required], spec.optional);
-    const network = () => opaqueId<"network">(action.networkId);
-    const conversation = () => opaqueId<"conversation">(action.conversationId);
-    const message = () => opaqueId<"message">(action.messageId);
-    switch (type) {
-      case "network.connect":
-      case "network.disconnect":
-      case "network.reconnect":
-        return { ok: true, value: { type, networkId: network() } };
-      case "conversation.activate":
-      case "conversation.close":
-      case "history.latest":
-      case "history.delete":
-        return { ok: true, value: { type, conversationId: conversation() } };
-      case "conversation.join":
-        return {
-          ok: true,
-          value: {
-            type,
-            networkId: network(),
-            channel: bounded(action.channel, channelProperty),
-            ...(action.key !== undefined ? { key: secretKey(action.key) } : {}),
-          },
-        };
-      case "conversation.query":
-        return {
-          ok: true,
-          value: { type, networkId: network(), nick: bounded(action.nick, queryNickProperty) },
-        };
-      case "conversation.mute":
-        return {
-          ok: true,
-          value: { type, conversationId: conversation(), muted: boolean(action.muted) },
-        };
-      case "draft.set":
-        return {
-          ok: true,
-          value: { type, conversationId: conversation(), text: string(action.text) },
-        };
-      case "message.send":
-        return {
-          ok: true,
-          value: {
-            type,
-            conversationId: conversation(),
-            text: bounded(action.text, messageProperty),
-            kind: choice(action.kind, ["text", "action", "notice"]),
-            ...(action.replyTo !== undefined
-              ? { replyTo: opaqueId<"message">(action.replyTo) }
-              : {}),
-          },
-        };
-      case "message.react":
-        return {
-          ok: true,
-          value: {
-            type,
-            messageId: message(),
-            value: bounded(action.value, reactionProperty),
-            remove: boolean(action.remove),
-          },
-        };
-      case "message.redact":
-      case "history.reveal":
-        return { ok: true, value: { type, messageId: message() } };
-      case "typing.set":
-        return {
-          ok: true,
-          value: {
-            type,
-            conversationId: conversation(),
-            active: boolean(action.active),
-            ...(action.paused !== undefined ? { paused: boolean(action.paused) } : {}),
-          },
-        };
-      case "history.load-older":
-        return {
-          ok: true,
-          value: {
-            type,
-            conversationId: conversation(),
-            ...(action.cursor !== undefined
-              ? { cursor: opaqueId<"cursor">(action.cursor, 16384) }
-              : {}),
-          },
-        };
-      case "view.report":
-        return {
-          ok: true,
-          value: {
-            type,
-            conversationId: conversation(),
-            focused: boolean(action.focused),
-            atBottom: boolean(action.atBottom),
-            ...(action.lastVisibleMessageId !== undefined
-              ? { lastVisibleMessageId: opaqueId<"message">(action.lastVisibleMessageId) }
-              : {}),
-          },
-        };
-      case "irc.request":
-        return {
-          ok: true,
-          value: { type, networkId: network(), command: ircCommand(action.command) },
-        };
-    }
+    return { ok: true, value: parseTypedAction(type, action) };
   } catch (cause) {
     return {
       ok: false,
@@ -204,38 +207,38 @@ export function parseAppAction(value: unknown): Result<AppAction, ControlError> 
   }
 }
 
+/** Rights each action requires. This is a security boundary: keep every entry explicit. */
+const ACTION_PERMISSIONS = {
+  "message.send": ["send-messages"],
+  "message.react": ["send-messages"],
+  "typing.set": ["send-messages"],
+  "draft.set": ["send-messages"],
+  "message.redact": ["send-messages", "destructive"],
+  "history.delete": ["destructive"],
+  "history.load-older": ["read-messages"],
+  "history.latest": ["read-messages"],
+  "history.reveal": ["read-messages"],
+  "view.report": ["read-messages"],
+  "conversation.activate": ["inspect"],
+  "conversation.mute": ["configure"],
+  "irc.request": ["network"],
+  "network.connect": ["network"],
+  "network.disconnect": ["network"],
+  "network.reconnect": ["network"],
+  "conversation.join": ["network"],
+  "conversation.query": ["network"],
+  "conversation.close": ["network"],
+} as const satisfies Record<ActionType, readonly ControlPermission[]>;
+
 export function permissionsForAction(action: AppAction): readonly ControlPermission[] {
-  switch (action.type) {
-    case "message.send":
-    case "message.react":
-    case "typing.set":
-    case "draft.set":
-      return ["send-messages"];
-    case "message.redact":
-      return ["send-messages", "destructive"];
-    case "history.delete":
-      return ["destructive"];
-    case "history.load-older":
-    case "history.latest":
-    case "history.reveal":
-    case "view.report":
-      return ["read-messages"];
-    case "conversation.activate":
-      return ["inspect"];
-    case "conversation.mute":
-      return ["configure"];
-    case "irc.request":
-      return action.command.type === "topic" && action.command.text !== undefined
-        ? ["network", "send-messages"]
-        : ["network"];
-    case "network.connect":
-    case "network.disconnect":
-    case "network.reconnect":
-    case "conversation.join":
-    case "conversation.query":
-    case "conversation.close":
-      return ["network"];
-  }
+  // Topic writes publish text, so they need send rights beyond other IRC requests.
+  if (
+    action.type === "irc.request" &&
+    action.command.type === "topic" &&
+    action.command.text !== undefined
+  )
+    return ["network", "send-messages"];
+  return [...ACTION_PERMISSIONS[action.type]];
 }
 
 const stringProperty: JsonObject = { type: "string", maxLength: 65536 };

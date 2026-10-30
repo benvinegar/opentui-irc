@@ -7,7 +7,13 @@ import type {
   JsonObject,
   JsonValue,
 } from "../contracts/control";
-import type { NetworkProfile, SettingsChange, SettingsDocument } from "../contracts/settings";
+import type {
+  NetworkProfile,
+  SettingsChange,
+  SettingsDocument,
+  TuiSettings,
+  UserSettings,
+} from "../contracts/settings";
 import { text, validTuiSettings, validUserSettings } from "../storage/validation";
 import { configurationSchema } from "./schema";
 
@@ -52,18 +58,53 @@ function fits(value: JsonValue, pretty = false): boolean {
   return encoder.encode(JSON.stringify(value, null, pretty ? 2 : undefined)).length <= MAX_BYTES;
 }
 
+type Descriptors = { readonly [key: string]: PropertyDescriptor };
+/** Only own, enumerable data properties are copied; accessors are never invoked. */
+function dataValue(descriptor: PropertyDescriptor | undefined): unknown {
+  if (!descriptor || !descriptor.enumerable || !own(descriptor, "value")) invalid();
+  const value: unknown = descriptor.value;
+  return value;
+}
+
 /** Copy only bounded, plain JSON data; never invoke accessors/toJSON or inherit properties. */
 function cloneJson(input: unknown): JsonValue {
   let nodes = 0;
   let units = 0;
   const ancestors = new Set<object>();
+  function copyString(value: string): string {
+    units += value.length;
+    if (units > MAX_BYTES || !text(value, MAX_BYTES) || /[\n\t]/u.test(value)) invalid();
+    return value;
+  }
+  function copyArray(
+    value: readonly unknown[],
+    names: readonly (string | symbol)[],
+    descriptors: Descriptors,
+    depth: number,
+  ): JsonValue[] {
+    if (value.length > 100000 || names.length !== value.length + 1) invalid();
+    const items: JsonValue[] = [];
+    for (let index = 0; index < value.length; index++)
+      items.push(copy(dataValue(descriptors[String(index)]), depth + 1));
+    return items;
+  }
+  function copyObject(
+    names: readonly (string | symbol)[],
+    descriptors: Descriptors,
+    depth: number,
+  ): JsonObject {
+    const properties: Record<string, JsonValue> = {};
+    for (const name of names) {
+      if (typeof name !== "string" || forbidden.has(name)) invalid();
+      units += name.length;
+      if (units > MAX_BYTES) invalid();
+      properties[name] = copy(dataValue(descriptors[name]), depth + 1);
+    }
+    return properties;
+  }
   function copy(value: unknown, depth: number): JsonValue {
     if (++nodes > 100000 || depth > 32) invalid();
-    if (typeof value === "string") {
-      units += value.length;
-      if (units > MAX_BYTES || !text(value, MAX_BYTES) || /[\n\t]/u.test(value)) invalid();
-      return value;
-    }
+    if (typeof value === "string") return copyString(value);
     if (value === null || typeof value === "boolean") return value;
     if (typeof value === "number" && Number.isFinite(value)) return value;
     if (typeof value !== "object" || value === null || ancestors.has(value)) invalid();
@@ -77,30 +118,9 @@ function cloneJson(input: unknown): JsonValue {
     const names = Reflect.ownKeys(value);
     if (names.length > 100000) invalid();
     const descriptors = Object.getOwnPropertyDescriptors(value);
-    let result: JsonValue;
-    if (Array.isArray(value)) {
-      if (value.length > 100000 || names.length !== value.length + 1) invalid();
-      const items: JsonValue[] = [];
-      for (let index = 0; index < value.length; index++) {
-        const descriptor = descriptors[String(index)];
-        if (!descriptor || !descriptor.enumerable || !own(descriptor, "value")) invalid();
-        const child: unknown = descriptor.value;
-        items.push(copy(child, depth + 1));
-      }
-      result = items;
-    } else {
-      const properties: Record<string, JsonValue> = {};
-      for (const name of names) {
-        if (typeof name !== "string" || forbidden.has(name)) invalid();
-        units += name.length;
-        if (units > MAX_BYTES) invalid();
-        const descriptor = descriptors[name];
-        if (!descriptor || !descriptor.enumerable || !own(descriptor, "value")) invalid();
-        const child: unknown = descriptor.value;
-        properties[name] = copy(child, depth + 1);
-      }
-      result = properties;
-    }
+    const result = Array.isArray(value)
+      ? copyArray(value, names, descriptors, depth)
+      : copyObject(names, descriptors, depth);
     ancestors.delete(value);
     return result;
   }
@@ -295,6 +315,121 @@ function networkEffects(
     });
 }
 
+const TUI_KEYS = [
+  "theme",
+  "density",
+  "memberList",
+  "showHistServ",
+  "sidebarWidth",
+  "memberListWidth",
+  "authorColumnWidth",
+  "mouse",
+  "keybindings",
+] as const;
+const HISTORY_KEYS = [
+  "enabled",
+  "retentionDays",
+  "excludedConversations",
+  "persistDrafts",
+] as const;
+const NOTIFICATION_KEYS = ["desktop", "previews", "bell"] as const;
+
+function tuiEffect(key: (typeof TUI_KEYS)[number]): ConfigEffect {
+  const path = `tui.${key}`;
+  if (key === "mouse")
+    return { path, effect: "restart", description: "Restart to update renderer mouse support." };
+  return {
+    path,
+    effect: "immediate",
+    description:
+      key === "keybindings"
+        ? "Clear reserved shortcut settings; no runtime keybindings are changed."
+        : "Update the live terminal UI.",
+  };
+}
+function tuiEffects(old: TuiSettings, value: TuiSettings): ConfigEffect[] {
+  return TUI_KEYS.filter((key) => !equal(old[key], value[key])).map(tuiEffect);
+}
+function historyEffect(
+  key: (typeof HISTORY_KEYS)[number],
+  old: UserSettings["history"],
+  value: UserSettings["history"],
+): ConfigEffect {
+  const path = `user.history.${key}`;
+  const shortened =
+    key === "retentionDays" &&
+    value.retentionDays !== null &&
+    (old.retentionDays === null || value.retentionDays < old.retentionDays);
+  if (shortened)
+    return {
+      path,
+      effect: "destructive",
+      description:
+        "Shortened retention may prune stored history; requires destructive permission and explicit confirmation.",
+    };
+  return {
+    path,
+    effect: "immediate",
+    description:
+      key === "persistDrafts"
+        ? "Update draft persistence; disabling clears persisted drafts."
+        : "Update history policy; existing history is retained except for retention pruning.",
+  };
+}
+function userEffects(
+  old: UserSettings,
+  value: UserSettings,
+  effects: ConfigEffect[],
+  reconnectIds: NetworkId[],
+): void {
+  networkEffects(old.networks, value.networks, effects, reconnectIds);
+  for (const key of HISTORY_KEYS) {
+    if (!equal(old.history[key], value.history[key]))
+      effects.push(historyEffect(key, old.history, value.history));
+  }
+  for (const key of NOTIFICATION_KEYS) {
+    if (old.notifications[key] !== value.notifications[key])
+      effects.push({
+        path: `user.notifications.${key}`,
+        effect: "immediate",
+        description: "Update notification policy where supported by the platform.",
+      });
+  }
+  if (old.sendTyping !== value.sendTyping)
+    effects.push({
+      path: "user.sendTyping",
+      effect: "immediate",
+      description: "Update typing publication where negotiated with the server.",
+    });
+}
+function requiredPermissionsFor(effects: readonly ConfigEffect[]): ControlPermission[] {
+  const requiredPermissions: ControlPermission[] = ["configure"];
+  if (effects.some((effect) => effect.effect === "network")) requiredPermissions.push("network");
+  if (effects.some((effect) => effect.effect === "destructive"))
+    requiredPermissions.push("destructive");
+  return requiredPermissions;
+}
+/** Apply a parsed edit to a copied section, rejecting unknown patch paths first. */
+function editedSection(base: JsonObject, input: ConfigEdit): JsonValue {
+  const shape = { $ref: `#/$defs/${input.section}` };
+  if ("value" in input) {
+    knownPatch(input.value, shape);
+    return input.value;
+  }
+  knownPatch(input.patch, shape);
+  let next: JsonValue = merge(base, input.patch);
+  for (const path of input.unset ?? []) next = unsetPath(next, pathParts(path));
+  return next;
+}
+function settingsChange(
+  section: ConfigEdit["section"],
+  next: JsonValue,
+): SettingsChange | undefined {
+  if (section === "user" && validUserSettings(next)) return { section: "user", value: next };
+  if (section === "tui" && validTuiSettings(next)) return { section: "tui", value: next };
+  return undefined;
+}
+
 /** Pure plan only. Caller must enforce permissions/confirmation and CAS against baseRevision at save. */
 export function prepareConfigChange(
   document: SettingsDocument,
@@ -306,105 +441,26 @@ export function prepareConfigChange(
     const input = parsed.value;
     const base = cloneJson(document[input.section]);
     if (!object(base)) return failure();
-    let next: JsonValue;
-    if ("value" in input) {
-      knownPatch(input.value, { $ref: `#/$defs/${input.section}` });
-      next = input.value;
-    } else {
-      knownPatch(input.patch, { $ref: `#/$defs/${input.section}` });
-      next = merge(base, input.patch);
-      for (const path of input.unset ?? []) next = unsetPath(next, pathParts(path));
-    }
+    const next = editedSection(base, input);
     if (!fits(next, true)) return failure();
-    let change: SettingsChange;
-    if (input.section === "user" && validUserSettings(next))
-      change = { section: "user", value: next };
-    else if (input.section === "tui" && validTuiSettings(next))
-      change = { section: "tui", value: next };
-    else return failure();
-    const effects: ConfigEffect[] = [];
+    const change = settingsChange(input.section, next);
+    if (!change) return failure();
     const reconnectNetworkIds: NetworkId[] = [];
     const changed = !equal(base, next);
+    let effects: ConfigEffect[] = [];
     if (change.section === "tui") {
-      const old = document.tui;
-      const value = change.value;
-      if (!equal(old.keybindings, value.keybindings) && Object.keys(value.keybindings).length > 0)
+      const keybindings = change.value.keybindings;
+      if (!equal(document.tui.keybindings, keybindings) && Object.keys(keybindings).length > 0)
         return failure("unsupported");
-      for (const key of [
-        "theme",
-        "density",
-        "memberList",
-        "showHistServ",
-        "sidebarWidth",
-        "memberListWidth",
-        "authorColumnWidth",
-        "mouse",
-        "keybindings",
-      ] as const) {
-        if (equal(old[key], value[key])) continue;
-        effects.push({
-          path: `tui.${key}`,
-          effect: key === "mouse" ? "restart" : "immediate",
-          description:
-            key === "mouse"
-              ? "Restart to update renderer mouse support."
-              : key === "keybindings"
-                ? "Clear reserved shortcut settings; no runtime keybindings are changed."
-                : "Update the live terminal UI.",
-        });
-      }
-    } else {
-      const old = document.user;
-      const value = change.value;
-      networkEffects(old.networks, value.networks, effects, reconnectNetworkIds);
-      for (const key of [
-        "enabled",
-        "retentionDays",
-        "excludedConversations",
-        "persistDrafts",
-      ] as const) {
-        if (equal(old.history[key], value.history[key])) continue;
-        const shortened =
-          key === "retentionDays" &&
-          value.history.retentionDays !== null &&
-          (old.history.retentionDays === null ||
-            value.history.retentionDays < old.history.retentionDays);
-        effects.push({
-          path: `user.history.${key}`,
-          effect: shortened ? "destructive" : "immediate",
-          description: shortened
-            ? "Shortened retention may prune stored history; requires destructive permission and explicit confirmation."
-            : key === "persistDrafts"
-              ? "Update draft persistence; disabling clears persisted drafts."
-              : "Update history policy; existing history is retained except for retention pruning.",
-        });
-      }
-      for (const key of ["desktop", "previews", "bell"] as const) {
-        if (old.notifications[key] !== value.notifications[key])
-          effects.push({
-            path: `user.notifications.${key}`,
-            effect: "immediate",
-            description: "Update notification policy where supported by the platform.",
-          });
-      }
-      if (old.sendTyping !== value.sendTyping)
-        effects.push({
-          path: "user.sendTyping",
-          effect: "immediate",
-          description: "Update typing publication where negotiated with the server.",
-        });
-    }
-    const requiredPermissions: ControlPermission[] = ["configure"];
-    if (effects.some((effect) => effect.effect === "network")) requiredPermissions.push("network");
-    if (effects.some((effect) => effect.effect === "destructive"))
-      requiredPermissions.push("destructive");
+      effects = tuiEffects(document.tui, change.value);
+    } else userEffects(document.user, change.value, effects, reconnectNetworkIds);
     return {
       ok: true,
       value: {
         change,
         baseRevision: document.revision,
         effects,
-        requiredPermissions,
+        requiredPermissions: requiredPermissionsFor(effects),
         reconnectNetworkIds,
         changed,
       },

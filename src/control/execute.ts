@@ -37,9 +37,53 @@ const OFFLINE_METHODS: readonly ControlMethod[] = [
   "secrets.store",
 ];
 
+/** Offline responses advertise offline-only reach; plans never claim live runtime effects. */
+function offlineResponse(method: ControlMethod, response: ControlResponse): ControlResponse {
+  if (!response.ok || !isJsonObject(response.result)) return response;
+  if (method === "capabilities")
+    return {
+      ...response,
+      result: {
+        ...response.result,
+        methods: [...OFFLINE_METHODS],
+        liveOnlyMethods: CONTROL_METHODS.filter(
+          (candidate) => !OFFLINE_METHODS.includes(candidate),
+        ),
+      },
+    };
+  if (method === "config.plan" || method === "config.apply")
+    // Plans describe live policy effects. Offline saves persist configuration
+    // only; they do not update a renderer, connect, prune history or clear drafts.
+    return {
+      ...response,
+      result: {
+        ...response.result,
+        mode: "offline",
+        runtimeEffectsApplied: false,
+      },
+    };
+  return response;
+}
+
 /** Prefer the authoritative running app. Only provably offline profiles permit direct writes. */
 export function createControlExecutor(options: ControlExecutorOptions) {
   const offline = new Map<string, ControlHandler>();
+  const offlineService = (cacheKey: string, directory: string): ControlHandler => {
+    const cached = offline.get(cacheKey);
+    if (cached) return cached;
+    const service = createControlService({
+      settings: (options.settingsFactory ?? createSettingsRepository)(directory),
+      secrets: options.secrets,
+      permissions: ["inspect", "configure", "network", "destructive"],
+    });
+    offline.set(cacheKey, service);
+    // A CLI process normally uses one profile. Bound long-lived embedded use too.
+    if (offline.size > 16) {
+      const oldest = offline.keys().next().value;
+      if (oldest) offline.delete(oldest);
+    }
+    return service;
+  };
   return async (
     request: ControlRequest,
     signal: AbortSignal,
@@ -98,55 +142,8 @@ export function createControlExecutor(options: ControlExecutorOptions) {
               "This command needs a running opentui-irc instance. No offline changes were made.",
             retryable: false,
           });
-        const cacheKey = acquired.value.paths.directory;
-        let service = offline.get(cacheKey);
-        if (!service) {
-          service = createControlService({
-            settings: (options.settingsFactory ?? createSettingsRepository)(directory),
-            secrets: options.secrets,
-            permissions: ["inspect", "configure", "network", "destructive"],
-          });
-          offline.set(cacheKey, service);
-          // A CLI process normally uses one profile. Bound long-lived embedded use too.
-          if (offline.size > 16) {
-            const oldest = offline.keys().next().value;
-            if (oldest) offline.delete(oldest);
-          }
-        }
-        const response = await service(parsed.value, signal);
-        if (
-          parsed.value.method === "capabilities" &&
-          response.ok &&
-          isJsonObject(response.result)
-        ) {
-          return {
-            ...response,
-            result: {
-              ...response.result,
-              methods: [...OFFLINE_METHODS],
-              liveOnlyMethods: CONTROL_METHODS.filter(
-                (method) => !OFFLINE_METHODS.includes(method),
-              ),
-            },
-          };
-        }
-        if (
-          (parsed.value.method === "config.plan" || parsed.value.method === "config.apply") &&
-          response.ok &&
-          isJsonObject(response.result)
-        ) {
-          // Plans describe live policy effects. Offline saves persist configuration
-          // only; they do not update a renderer, connect, prune history or clear drafts.
-          return {
-            ...response,
-            result: {
-              ...response.result,
-              mode: "offline",
-              runtimeEffectsApplied: false,
-            },
-          };
-        }
-        return response;
+        const service = offlineService(acquired.value.paths.directory, directory);
+        return offlineResponse(parsed.value.method, await service(parsed.value, signal));
       } finally {
         await acquired.value.release();
       }

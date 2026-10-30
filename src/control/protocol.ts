@@ -47,44 +47,38 @@ function record(value: unknown): value is Record<string, unknown> {
  * Depth and node budgets also bound validation of non-wire callers. */
 export function isJsonValue(value: unknown): value is JsonValue {
   let remaining = 100_000;
+  const dataProperty = (property: PropertyDescriptor | undefined, depth: number): boolean =>
+    property !== undefined &&
+    "value" in property &&
+    property.enumerable === true &&
+    visit(property.value, depth + 1);
+  const visitArray = (item: readonly unknown[], depth: number): boolean => {
+    if (
+      Object.getPrototypeOf(item) !== Array.prototype ||
+      item.length > remaining ||
+      Object.getOwnPropertyNames(item).length !== item.length + 1 ||
+      Object.getOwnPropertySymbols(item).length !== 0
+    )
+      return false;
+    for (let index = 0; index < item.length; index++) {
+      if (!dataProperty(Object.getOwnPropertyDescriptor(item, String(index)), depth)) return false;
+    }
+    return true;
+  };
+  const visitRecord = (item: Record<string, unknown>, depth: number): boolean => {
+    if (Object.getOwnPropertySymbols(item).length !== 0) return false;
+    for (const key of Object.getOwnPropertyNames(item)) {
+      const property = Object.getOwnPropertyDescriptor(item, key);
+      if (unsafeKeys.has(key) || !dataProperty(property, depth)) return false;
+    }
+    return true;
+  };
   const visit = (item: unknown, depth: number): boolean => {
     if (--remaining < 0 || depth > 64) return false;
     if (item === null || typeof item === "string" || typeof item === "boolean") return true;
     if (typeof item === "number") return Number.isFinite(item);
-    if (Array.isArray(item)) {
-      if (
-        Object.getPrototypeOf(item) !== Array.prototype ||
-        item.length > remaining ||
-        Object.getOwnPropertyNames(item).length !== item.length + 1 ||
-        Object.getOwnPropertySymbols(item).length !== 0
-      )
-        return false;
-      for (let index = 0; index < item.length; index++) {
-        const property = Object.getOwnPropertyDescriptor(item, String(index));
-        if (
-          !property ||
-          !("value" in property) ||
-          !property.enumerable ||
-          !visit(property.value, depth + 1)
-        )
-          return false;
-      }
-      return true;
-    }
-    if (!record(item)) return false;
-    if (Object.getOwnPropertySymbols(item).length !== 0) return false;
-    for (const key of Object.getOwnPropertyNames(item)) {
-      const property = Object.getOwnPropertyDescriptor(item, key);
-      if (
-        unsafeKeys.has(key) ||
-        !property ||
-        !("value" in property) ||
-        !property.enumerable ||
-        !visit(property.value, depth + 1)
-      )
-        return false;
-    }
-    return true;
+    if (Array.isArray(item)) return visitArray(item, depth);
+    return record(item) && visitRecord(item, depth);
   };
   try {
     return visit(value, 0);

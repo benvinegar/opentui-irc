@@ -71,6 +71,38 @@ export function json(value: unknown): JsonValue {
   const ancestors = new Set<object>();
   const invalid = (): never =>
     fail("internal", "The control result is not serializable or exceeds supported limits.");
+  // Only own, enumerable data properties are copied; accessors are never invoked.
+  const dataValue = (input: object, name: string): unknown => {
+    const property = Object.getOwnPropertyDescriptor(input, name);
+    if (!property || !property.enumerable || !("value" in property)) return invalid();
+    const child: unknown = property.value;
+    return child;
+  };
+  const copyArray = (input: readonly unknown[], depth: number): JsonValue[] => {
+    if (
+      Object.getPrototypeOf(input) !== Array.prototype ||
+      input.length > remaining ||
+      Reflect.ownKeys(input).length !== input.length + 1
+    )
+      return invalid();
+    const items: JsonValue[] = [];
+    for (let index = 0; index < input.length; index++)
+      items.push(copy(dataValue(input, String(index)), depth + 1));
+    return items;
+  };
+  const copyObject = (input: object, depth: number): JsonObject => {
+    if (!object(input)) return invalid();
+    const properties: Record<string, JsonValue> = {};
+    for (const name of Reflect.ownKeys(input)) {
+      if (typeof name !== "string" || ["__proto__", "prototype", "constructor"].includes(name))
+        return invalid();
+      units += name.length;
+      if (units > 4194304) return invalid();
+      const child = dataValue(input, name);
+      if (child !== undefined) properties[name] = copy(child, depth + 1);
+    }
+    return properties;
+  };
   function copy(input: unknown, depth: number): JsonValue {
     if (--remaining < 0 || depth > 64) return invalid();
     if (input === null || typeof input === "boolean") return input;
@@ -81,37 +113,7 @@ export function json(value: unknown): JsonValue {
     }
     if (typeof input !== "object" || input === null || ancestors.has(input)) return invalid();
     ancestors.add(input);
-    let result: JsonValue;
-    if (Array.isArray(input)) {
-      if (
-        Object.getPrototypeOf(input) !== Array.prototype ||
-        input.length > remaining ||
-        Reflect.ownKeys(input).length !== input.length + 1
-      )
-        return invalid();
-      const items: JsonValue[] = [];
-      for (let index = 0; index < input.length; index++) {
-        const property = Object.getOwnPropertyDescriptor(input, String(index));
-        if (!property || !property.enumerable || !("value" in property)) return invalid();
-        const child: unknown = property.value;
-        items.push(copy(child, depth + 1));
-      }
-      result = items;
-    } else {
-      if (!object(input)) return invalid();
-      const properties: Record<string, JsonValue> = {};
-      for (const name of Reflect.ownKeys(input)) {
-        if (typeof name !== "string" || ["__proto__", "prototype", "constructor"].includes(name))
-          return invalid();
-        units += name.length;
-        if (units > 4194304) return invalid();
-        const property = Object.getOwnPropertyDescriptor(input, name);
-        if (!property || !property.enumerable || !("value" in property)) return invalid();
-        const child: unknown = property.value;
-        if (child !== undefined) properties[name] = copy(child, depth + 1);
-      }
-      result = properties;
-    }
+    const result = Array.isArray(input) ? copyArray(input, depth) : copyObject(input, depth);
     ancestors.delete(input);
     return result;
   }
