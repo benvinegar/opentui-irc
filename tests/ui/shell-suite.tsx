@@ -432,6 +432,47 @@ describe("real Solid/OpenTUI shell", () => {
       ),
     ).toBe(false);
   });
+  const reportsFocused = (fake: ReturnType<typeof createFakeApp>, focused: boolean) =>
+    fake.actions.some(
+      (action) =>
+        action.type === "view.report" &&
+        action.focused === focused &&
+        action.lastVisibleMessageId === welcomeMessage.id,
+    );
+  const settle = async (view: TestRendererSetup) => {
+    await view.renderOnce();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  };
+  test("typing counts as attention when the terminal never reported focus", async () => {
+    const { fake, view } = await mount();
+    await settle(view);
+    // No focus report yet: do not claim the user is reading.
+    expect(reportsFocused(fake, true)).toBe(false);
+    view.mockInput.pressKey("a");
+    await settle(view);
+    expect(reportsFocused(fake, true)).toBe(true);
+  });
+  test("clicking counts as attention when the terminal never reported focus", async () => {
+    const { fake, view } = await mount();
+    // Clicking the already-active conversation in the sidebar opens no dialog.
+    const row = view.renderer.root.findDescendantById(`conversation-${conversationId}`)!;
+    await view.mockMouse.click(row.x + 1, row.y);
+    await settle(view);
+    expect(reportsFocused(fake, true)).toBe(true);
+  });
+  test("a terminal blur report stops claiming attention until focus or input returns", async () => {
+    const { fake, view } = await mount();
+    view.mockInput.pressKey("a");
+    await settle(view);
+    view.renderer.emit("blur");
+    fake.actions.length = 0;
+    await settle(view);
+    expect(reportsFocused(fake, false)).toBe(true);
+    expect(reportsFocused(fake, true)).toBe(false);
+    view.renderer.emit("focus");
+    await settle(view);
+    expect(reportsFocused(fake, true)).toBe(true);
+  });
   test("explicit search reveal can show a service entry without changing the saved default", async () => {
     const { fake, view } = await mount();
     const model = fake.timelines.get(conversationId)!;
@@ -1071,6 +1112,46 @@ describe("real Solid/OpenTUI shell", () => {
     );
     expect(JSON.stringify(fake.settings.getSnapshot())).not.toContain("test-secret");
     expect(JSON.stringify(fake.actions)).not.toContain("test-secret");
+  });
+  test("edits made while the vault stores a password are not saved unvalidated", async () => {
+    const { fake, view } = await mount();
+    let finishStore: (() => void) | undefined;
+    fake.app.storeSecret = () =>
+      new Promise((resolve) => {
+        finishStore = () =>
+          resolve({ ok: true, value: entityId<"secret-ref">("keychain:test-only") });
+      });
+    await click(view, "add-network");
+    for (const [id, text] of [
+      ["network-host", "irc.example.org"],
+      ["network-nick", "newcomer"],
+    ]) {
+      await click(view, id!);
+      await view.mockInput.typeText(text!);
+      await view.renderOnce();
+    }
+    for (let index = 0; index < 4; index++) await view.mockMouse.scroll(60, 20, "down");
+    await view.renderOnce();
+    await click(view, "network-account");
+    await view.mockInput.typeText("my-account");
+    await click(view, "network-password");
+    await view.mockInput.typeText("test-secret");
+    await view.renderOnce();
+    await click(view, "network-save");
+    expect(finishStore).toBeDefined();
+    // While the vault is busy, make the form invalid.
+    await click(view, "network-account");
+    await view.mockInput.typeText(" changed");
+    for (let index = 0; index < 4; index++) await view.mockMouse.scroll(60, 20, "up");
+    await view.renderOnce();
+    await click(view, "network-host");
+    await view.mockInput.typeText(" not a host");
+    await view.renderOnce();
+    finishStore!();
+    await tick();
+    const saved = fake.settings.getSnapshot()?.user.networks.at(-1);
+    expect(saved?.endpoints).toEqual([{ host: "irc.example.org", port: 6697, tls: true }]);
+    expect(saved?.sasl?.account).toBe("my-account");
   });
   test("mouse join and direct-message controls dispatch the same actions as commands", async () => {
     const { fake, view } = await mount();
