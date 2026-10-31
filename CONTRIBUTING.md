@@ -15,7 +15,7 @@ bun run start                   # run the client from source
 ## Before you open a pull request
 
 ```sh
-bun run check   # format, lint, types, Vitest and Bun integration/UI tests
+bun run check   # format, lint, types, Vitest and Bun tests with a merged coverage floor
 ```
 
 Optional, slower checks:
@@ -26,6 +26,7 @@ bun run test:ergo       # interoperability against a local Ergo server (Docker)
 ```
 
 - Add focused tests for new behaviour. Name Bun-only tests `*.bun.test.ts`.
+- `bun run check` runs both suites with coverage and prints a merged per-file report (`bun run coverage` alone; `bun run coverage --report` re-prints the last run). It fails if total lines, functions or branches drop below the floor in `scripts/coverage-config.ts`. The floor is a ratchet: when coverage rises, raise it to the new whole-number totals in the same PR; lower it only with a stated reason.
 - oxlint fails any function with a cyclomatic complexity above 20 (`.oxlintrc.json`). Split long branches into lookup tables or named helpers instead of disabling the rule.
 - Tests must use local fake servers or the loopback Ergo fixture. Never connect to public IRC networks or use real credentials.
 - Use [Conventional Commits](https://www.conventionalcommits.org): `feat(scope): …`, `fix(scope): …`, `docs: …`, `chore: …`.

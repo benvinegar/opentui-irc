@@ -1,3 +1,4 @@
+// Extra arguments (e.g. `--coverage`) are passed through to `bun test`.
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -10,7 +11,7 @@ const files = entries
 if (files.length === 0) {
   console.log("No Bun integration tests yet.");
 } else {
-  const child = Bun.spawn([process.execPath, "test", ...files], {
+  const child = Bun.spawn([process.execPath, "test", ...process.argv.slice(2), ...files], {
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
