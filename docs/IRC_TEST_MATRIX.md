@@ -58,7 +58,7 @@ Status: **covered** = asserted by a test here; **gap → covered** = added with 
 
 ## Coverage
 
-`bun run test:coverage` reports V8 coverage for the Node/Vitest suites (`coverage/` holds the HTML report). Bun adapter and OpenTUI suites (`*.bun.test.ts`) are not counted.
+`bun run coverage` (part of `bun run check`) runs both suites once, merges Vitest V8 and Bun LCOV under `coverage/`, prints per-file lines/functions/branches and fails below the floor in `scripts/coverage-config.ts`. `.tsx` UI files are excluded because Bun reports them against Solid-transformed output; branches are Vitest-only.
 
 ## Client-side behavior (not from WeeChat)
 
