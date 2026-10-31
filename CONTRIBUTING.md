@@ -25,6 +25,8 @@ bun run test:terminal   # real pseudo-terminal startup/shutdown (Python 3)
 bun run test:ergo       # interoperability against a local Ergo server (Docker)
 ```
 
+CI runs `bun run check` on Linux and macOS, plus `bun run test:ergo` in a separate Linux job (GitHub's macOS runners have no Docker).
+
 - Add focused tests for new behaviour. Name Bun-only tests `*.bun.test.ts`.
 - oxlint fails any function with a cyclomatic complexity above 20 (`.oxlintrc.json`). Split long branches into lookup tables or named helpers instead of disabling the rule.
 - Tests must use local fake servers or the loopback Ergo fixture. Never connect to public IRC networks or use real credentials.

@@ -25,35 +25,80 @@ const take = <T>(result: Result<T>): T => {
 const apps: AppApi[] = [];
 let started = false;
 const directory = await mkdtemp(join(tmpdir(), "openirc-ergo-"));
-async function docker(...args: string[]) {
-  const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
-  const [code, text] = await Promise.all([
+// Generous enough for a cold image pull on a CI runner; warm local runs finish far sooner.
+const PULL_TIMEOUT_MS = 300_000;
+const COMMAND_TIMEOUT_MS = 60_000;
+const READY_TIMEOUT_MS = 60_000;
+const STEP_TIMEOUT_MS = 20_000;
+async function run(args: string[], timeoutMs = COMMAND_TIMEOUT_MS) {
+  const child = Bun.spawn(["docker", ...args], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: timeoutMs,
+  });
+  const [code, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
   ]);
-  if (code !== 0)
+  return { code, stdout, stderr, timedOut: child.signalCode !== null };
+}
+async function docker(...args: string[]) {
+  const timeoutMs = args[0] === "pull" ? PULL_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
+  const result = await run(args, timeoutMs);
+  if (result.code !== 0) {
+    // Docker's own stderr explains daemon, permission and pull failures; it carries no IRC traffic.
+    const detail = result.timedOut
+      ? `timed out after ${timeoutMs}ms`
+      : result.stderr.trim().split("\n").slice(-3).join(" ").slice(0, 500);
     throw new Error(
-      "Docker operation failed. Check Docker access and availability of the pinned official Ergo image.",
+      `Docker ${args[0]} failed (${detail}). Check Docker access and availability of the pinned official Ergo image.`,
     );
-  return text.trim();
+  }
+  return result.stdout.trim();
+}
+// Remove the container if the job is cancelled or interrupted mid-run.
+for (const interrupt of ["SIGINT", "SIGTERM"] as const)
+  process.once(interrupt, () => {
+    if (started)
+      Bun.spawnSync(["docker", "rm", "-f", name], {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+    process.exit(130);
+  });
+async function waitForServer() {
+  // Docker's port proxy accepts TCP before Ergo listens, so wait for Ergo's own readiness line.
+  // Container logs include a generated oper password: match them, never print them.
+  const deadline = Date.now() + READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const logs = await run(["logs", name]);
+    if (logs.code !== 0) throw new Error("Ergo container exited before becoming ready.");
+    if (`${logs.stdout}\n${logs.stderr}`.includes("Server running")) return;
+    await Bun.sleep(200);
+  }
+  throw new Error(`Timed out after ${READY_TIMEOUT_MS}ms waiting for Ergo to start.`);
 }
 async function until(predicate: () => boolean, description: string) {
-  const deadline = Date.now() + 10000;
+  const deadline = Date.now() + STEP_TIMEOUT_MS;
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error(`Timed out: ${description}`);
     await Bun.sleep(10);
   }
 }
 try {
+  // Pull separately so a slow cold pull gets its own timeout instead of hiding inside `run`.
+  await docker("pull", "--quiet", IMAGE);
+  started = true; // From here on always remove by name; `rm -f` tolerates a missing container.
+  // Publish only an ephemeral loopback port so parallel runs and other local servers never collide.
   await docker("run", "--rm", "--init", "--name", name, "-d", "-p", "127.0.0.1::6667", IMAGE);
-  started = true;
   const portOutput = await docker("port", name, "6667/tcp");
   const port = Number(/:(\d+)$/u.exec(portOutput)?.[1]);
   if (!port) throw new Error("Could not determine loopback test port.");
   const version = await docker("exec", name, "/ircd-bin/ergo", "--version");
-  // Give the daemon its initial database/certificate generation window.
-  await Bun.sleep(700);
+  await waitForServer();
   const suffix = crypto.randomUUID().slice(0, 8);
   const channel = `#openirc-${suffix}`;
   const boot = async (label: string) => {
@@ -265,7 +310,8 @@ try {
     ),
   );
 } finally {
-  for (const app of apps.reverse()) await app.shutdown();
+  // Container removal must still happen if an app fails to shut down cleanly.
+  for (const app of apps.reverse()) await app.shutdown().catch(() => {});
   if (started) await docker("rm", "-f", name).catch(() => {});
   await rm(directory, { recursive: true, force: true });
 }

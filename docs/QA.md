@@ -69,7 +69,7 @@ Capability-gated controls must be checked both enabled and absent. If the fixtur
 
 For negative observations (such as no automatic replay), check observer liveness before and after, and use positive message probes on both sides of the test. A stale counter file from an exited peer is not evidence. Record fixture failures separately and repeat the case with a healthy observer.
 
-Run `bun run check`, then the optional production checks `bun run test:terminal` and `bun run test:ergo` before integrating a checkpoint. Save failing frames before fixes and repeat the exact key sequence afterward. Scripted navigation loops should have bounded iterations, explicit stop/failure behavior and synthetic-profile assertions.
+Run `bun run check`, then the optional production checks `bun run test:terminal` and `bun run test:ergo` before integrating a checkpoint (CI also runs `test:ergo` in a Linux-only job). Save failing frames before fixes and repeat the exact key sequence afterward. Scripted navigation loops should have bounded iterations, explicit stop/failure behavior and synthetic-profile assertions.
 
 ## Native test diagnostic caveat
 
