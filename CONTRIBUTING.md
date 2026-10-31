@@ -25,6 +25,8 @@ bun run test:terminal   # real pseudo-terminal startup/shutdown (Python 3)
 bun run test:ergo       # interoperability against a local Ergo server (Docker)
 ```
 
+CI runs `bun run check` on Linux and macOS, plus `bun run test:ergo` in a separate Linux job (GitHub's macOS runners have no Docker).
+
 - Add focused tests for new behaviour. Name Bun-only tests `*.bun.test.ts`.
 - `bun run check` runs both suites with coverage and prints a merged per-file report (`bun run coverage` alone; `bun run coverage --report` re-prints the last run). It fails if total lines, functions or branches drop below the floor in `scripts/coverage-config.ts`. The floor is a ratchet: when coverage rises, raise it to the new whole-number totals in the same PR; lower it only with a stated reason.
 - oxlint fails any function with a cyclomatic complexity above 20 (`.oxlintrc.json`). Split long branches into lookup tables or named helpers instead of disabling the rule.
