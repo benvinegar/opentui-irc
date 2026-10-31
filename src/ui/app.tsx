@@ -110,7 +110,10 @@ function Shell(props: UiOptions) {
   const [results, setResults] = createSignal<readonly Message[]>([]);
   const [searching, setSearching] = createSignal(false);
   const [atBottom, setAtBottom] = createSignal(true);
+  // Many terminals report focus only on change (or never), so start unknown/conservative and
+  // treat real keyboard/mouse input as evidence that the user is looking at this client.
   const [terminalFocused, setTerminalFocused] = createSignal(false);
+  const noteAttention = () => setTerminalFocused(true);
   const [reveal, setReveal] = createSignal<MessageId>();
   const [revealHistServ, setRevealHistServ] = createSignal(false);
   const [paletteIndex, setPaletteIndex] = createSignal(0);
@@ -725,6 +728,7 @@ function Shell(props: UiOptions) {
     },
   ];
   useKeyboard((event) => {
+    noteAttention();
     if (runKeyBinding(event, globalKeys)) return;
     if (!modal()) {
       runKeyBinding(event, mainKeys);
@@ -1285,6 +1289,7 @@ function Shell(props: UiOptions) {
         height="100%"
         flexDirection="column"
         backgroundColor={colors.bg}
+        onMouseDown={noteAttention}
         onMouseDrag={(event) => {
           if (resizing()) followResize(event.x);
         }}

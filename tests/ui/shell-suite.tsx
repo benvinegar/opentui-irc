@@ -432,6 +432,47 @@ describe("real Solid/OpenTUI shell", () => {
       ),
     ).toBe(false);
   });
+  const reportsFocused = (fake: ReturnType<typeof createFakeApp>, focused: boolean) =>
+    fake.actions.some(
+      (action) =>
+        action.type === "view.report" &&
+        action.focused === focused &&
+        action.lastVisibleMessageId === welcomeMessage.id,
+    );
+  const settle = async (view: TestRendererSetup) => {
+    await view.renderOnce();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  };
+  test("typing counts as attention when the terminal never reported focus", async () => {
+    const { fake, view } = await mount();
+    await settle(view);
+    // No focus report yet: do not claim the user is reading.
+    expect(reportsFocused(fake, true)).toBe(false);
+    view.mockInput.pressKey("a");
+    await settle(view);
+    expect(reportsFocused(fake, true)).toBe(true);
+  });
+  test("clicking counts as attention when the terminal never reported focus", async () => {
+    const { fake, view } = await mount();
+    // Clicking the already-active conversation in the sidebar opens no dialog.
+    const row = view.renderer.root.findDescendantById(`conversation-${conversationId}`)!;
+    await view.mockMouse.click(row.x + 1, row.y);
+    await settle(view);
+    expect(reportsFocused(fake, true)).toBe(true);
+  });
+  test("a terminal blur report stops claiming attention until focus or input returns", async () => {
+    const { fake, view } = await mount();
+    view.mockInput.pressKey("a");
+    await settle(view);
+    view.renderer.emit("blur");
+    fake.actions.length = 0;
+    await settle(view);
+    expect(reportsFocused(fake, false)).toBe(true);
+    expect(reportsFocused(fake, true)).toBe(false);
+    view.renderer.emit("focus");
+    await settle(view);
+    expect(reportsFocused(fake, true)).toBe(true);
+  });
   test("explicit search reveal can show a service entry without changing the saved default", async () => {
     const { fake, view } = await mount();
     const model = fake.timelines.get(conversationId)!;
