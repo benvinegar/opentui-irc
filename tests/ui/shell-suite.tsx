@@ -1113,6 +1113,46 @@ describe("real Solid/OpenTUI shell", () => {
     expect(JSON.stringify(fake.settings.getSnapshot())).not.toContain("test-secret");
     expect(JSON.stringify(fake.actions)).not.toContain("test-secret");
   });
+  test("edits made while the vault stores a password are not saved unvalidated", async () => {
+    const { fake, view } = await mount();
+    let finishStore: (() => void) | undefined;
+    fake.app.storeSecret = () =>
+      new Promise((resolve) => {
+        finishStore = () =>
+          resolve({ ok: true, value: entityId<"secret-ref">("keychain:test-only") });
+      });
+    await click(view, "add-network");
+    for (const [id, text] of [
+      ["network-host", "irc.example.org"],
+      ["network-nick", "newcomer"],
+    ]) {
+      await click(view, id!);
+      await view.mockInput.typeText(text!);
+      await view.renderOnce();
+    }
+    for (let index = 0; index < 4; index++) await view.mockMouse.scroll(60, 20, "down");
+    await view.renderOnce();
+    await click(view, "network-account");
+    await view.mockInput.typeText("my-account");
+    await click(view, "network-password");
+    await view.mockInput.typeText("test-secret");
+    await view.renderOnce();
+    await click(view, "network-save");
+    expect(finishStore).toBeDefined();
+    // While the vault is busy, make the form invalid.
+    await click(view, "network-account");
+    await view.mockInput.typeText(" changed");
+    for (let index = 0; index < 4; index++) await view.mockMouse.scroll(60, 20, "up");
+    await view.renderOnce();
+    await click(view, "network-host");
+    await view.mockInput.typeText(" not a host");
+    await view.renderOnce();
+    finishStore!();
+    await tick();
+    const saved = fake.settings.getSnapshot()?.user.networks.at(-1);
+    expect(saved?.endpoints).toEqual([{ host: "irc.example.org", port: 6697, tls: true }]);
+    expect(saved?.sasl?.account).toBe("my-account");
+  });
   test("mouse join and direct-message controls dispatch the same actions as commands", async () => {
     const { fake, view } = await mount();
     await click(view, "join");

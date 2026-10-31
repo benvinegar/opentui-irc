@@ -54,6 +54,7 @@
 - Channel member lists for channels you haven't joined (`/names #elsewhere`) no longer count as joined channels.
 - Joining a channel no longer adds "IRC server response 333."-style lines for topic setter, creation time and channel modes; login and displayed-host replies read as sentences.
 - The conversation you are reading no longer keeps showing "new" or mention counts in the sidebar and `ctrl+k` palette when your terminal doesn't report window focus; typing or clicking in the client now counts as reading it.
+- Edits made to the add-network form while a password is being stored in the OS vault are no longer saved without being checked; the values you pressed Save with are the ones saved.
 
 - Page Up/Down now scroll the active dialog instead of leaving long help/settings content unreachable from the keyboard.
 - Keyboard focus stays visible when tabbing through long forms or resizing short dialogs.
