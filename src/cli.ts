@@ -12,6 +12,32 @@ export interface CliOptions {
   readonly controlPermissions: readonly ControlPermission[];
 }
 
+const MODE_FLAGS = new Map<string, CliOptions["mode"]>([
+  ["--help", "help"],
+  ["-h", "help"],
+  ["--version", "version"],
+  ["-v", "version"],
+  ["--check-config", "check-config"],
+]);
+
+function invalidOption(message: string): Result<never> {
+  return { ok: false, error: { code: "invalid-input", message, retryable: false } };
+}
+/** Documented permissions named by a comma-separated list, in canonical order. */
+function controlRights(value: string | undefined): ControlPermission[] | undefined {
+  const rights = value?.split(",");
+  if (
+    !rights?.length ||
+    rights.some((right) => !ALL_CONTROL_PERMISSIONS.some((allowed) => allowed === right))
+  )
+    return undefined;
+  return ALL_CONTROL_PERMISSIONS.filter((right) => rights.includes(right));
+}
+function directoryOption(value: string | undefined): string | undefined {
+  if (!value || value.startsWith("-") || value.includes("\0")) return undefined;
+  return resolve(value);
+}
+
 export function parseCli(
   args: readonly string[],
   environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -30,49 +56,21 @@ export function parseCli(
   let controlEnabled = true;
   const controlPermissions = new Set<ControlPermission>(DEFAULT_CONTROL_PERMISSIONS);
   for (let index = 0; index < args.length; index++) {
-    const argument = args[index];
-    if (argument === "--help" || argument === "-h") mode = "help";
-    else if (argument === "--version" || argument === "-v") mode = "version";
-    else if (argument === "--check-config") mode = "check-config";
+    const argument = args[index]!;
+    const flagMode = MODE_FLAGS.get(argument);
+    if (flagMode) mode = flagMode;
     else if (argument === "--no-control") controlEnabled = false;
     else if (argument === "--control-allow") {
-      const rights = args[++index]?.split(",");
-      if (
-        !rights?.length ||
-        rights.some((right) => !ALL_CONTROL_PERMISSIONS.some((allowed) => allowed === right))
-      )
-        return {
-          ok: false,
-          error: {
-            code: "invalid-input",
-            message: "Use a comma-separated list of documented control permissions.",
-            retryable: false,
-          },
-        };
-      for (const right of ALL_CONTROL_PERMISSIONS)
-        if (rights.includes(right)) controlPermissions.add(right);
+      const rights = controlRights(args[++index]);
+      if (!rights)
+        return invalidOption("Use a comma-separated list of documented control permissions.");
+      for (const right of rights) controlPermissions.add(right);
     } else if (argument === "--config-dir" || argument === "--data-dir") {
-      const value = args[++index];
-      if (!value || value.startsWith("-") || value.includes("\0"))
-        return {
-          ok: false,
-          error: {
-            code: "invalid-input",
-            message: "Directory options require a path.",
-            retryable: false,
-          },
-        };
-      if (argument === "--config-dir") configDirectory = resolve(value);
-      else dataDirectory = resolve(value);
-    } else
-      return {
-        ok: false,
-        error: {
-          code: "invalid-input",
-          message: "Unknown option. Use --help for usage.",
-          retryable: false,
-        },
-      };
+      const directory = directoryOption(args[++index]);
+      if (directory === undefined) return invalidOption("Directory options require a path.");
+      if (argument === "--config-dir") configDirectory = directory;
+      else dataDirectory = directory;
+    } else return invalidOption("Unknown option. Use --help for usage.");
   }
   return {
     ok: true,

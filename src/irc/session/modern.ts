@@ -47,6 +47,8 @@ const timestamp = (value: string): number | undefined => {
   return Number.isFinite(parsed) && new Date(parsed).toISOString() === value ? parsed : undefined;
 };
 const byteLength = (text: string) => new TextEncoder().encode(text).length;
+// Only messages and their modern annotations are replayed; other playback is quarantined.
+const PLAYBACK_COMMANDS = new Set(["PRIVMSG", "NOTICE", "TAGMSG", "REDACT"]);
 const validTimestamp = (value: number) =>
   Number.isSafeInteger(value) && value >= -62_167_219_200_000 && value <= 253_402_300_799_999;
 type History = {
@@ -73,6 +75,7 @@ type Batch = {
 };
 type Typing = { target: string; nick: string; expires: number };
 type Pending = { operationId: OperationId; started: number; command: SessionCommand["type"] };
+type HistoryCommand = Extract<SessionCommand, { type: "history" }>;
 interface Dependencies {
   readonly policy: ModernPolicy;
   readonly capabilities: () => ReadonlyMap<string, string | null>;
@@ -198,6 +201,38 @@ export class ModernSession {
     if (input.tags.batch && !this.batches.has(input.tags.batch))
       return this.overflow("Unknown IRC batch reference.");
     const chain = this.chain(input);
+    if (this.charge(chain, input)) return true;
+    if (input.command === "BATCH") {
+      this.batch(input);
+      return true;
+    }
+    if (this.ownsFailure(input)) {
+      this.serverFailure(input);
+      return true;
+    }
+    if (input.command === "ACK") {
+      this.completeLabel(input);
+      return true;
+    }
+    const playback = chain.some((batch) => batch.playback);
+    this.countHistory(chain, input);
+    if (playback && !PLAYBACK_COMMANDS.has(input.command)) return true;
+    switch (input.command) {
+      case "TAGMSG":
+        this.tagMessage(input, sender, playback);
+        return true;
+      case "MARKREAD":
+        this.markRead(input);
+        return true;
+      case "REDACT":
+        this.redact(input);
+        return true;
+      default:
+        return false;
+    }
+  }
+  /** Charges a frame to every enclosing batch; true once any exceeds its bounds. */
+  private charge(chain: readonly Batch[], input: IrcFrame): boolean {
     const cost = byteLength(JSON.stringify(input));
     for (const batch of chain) {
       batch.count++;
@@ -208,24 +243,15 @@ export class ModernSession {
       )
         return this.overflow("IRC batch exceeded its configured bounds.");
     }
-    if (input.command === "BATCH") {
-      this.batch(input);
-      return true;
-    }
-    if (
-      input.command === "FAIL" ||
-      (/^[45][0-9]{2}$/.test(input.command) &&
-        this.label(input) &&
-        this.pending.has(this.label(input)!))
-    ) {
-      this.serverFailure(input);
-      return true;
-    }
-    if (input.command === "ACK") {
-      this.completeLabel(input);
-      return true;
-    }
-    const playback = chain.some((batch) => batch.playback);
+    return false;
+  }
+  /** FAIL always, and error numerics only when labeled for one of our modern operations. */
+  private ownsFailure(input: IrcFrame): boolean {
+    if (input.command === "FAIL") return true;
+    const label = this.label(input);
+    return /^[45][0-9]{2}$/.test(input.command) && !!label && this.pending.has(label);
+  }
+  private countHistory(chain: readonly Batch[], input: IrcFrame) {
     const query = chain.find((batch) => batch.history)?.history;
     if (
       query &&
@@ -233,46 +259,35 @@ export class ModernSession {
       !("draft/chathistory-context" in input.tags)
     )
       query.count++;
-    if (playback && !["PRIVMSG", "NOTICE", "TAGMSG", "REDACT"].includes(input.command)) return true;
-    if (input.command === "TAGMSG") {
-      if (this.has("message-tags")) {
-        if (!playback) this.typingFrame(input, sender);
-        this.reaction(input, sender);
+  }
+  private tagMessage(input: IrcFrame, sender: string, playback: boolean) {
+    if (!this.has("message-tags")) return;
+    if (!playback) this.typingFrame(input, sender);
+    this.reaction(input, sender);
+  }
+  /** Read markers only move forwards; a malformed or unavailable marker still completes its label. */
+  private markRead(input: IrcFrame) {
+    const [target, value] = input.params;
+    const time = value?.startsWith("timestamp=") ? timestamp(value.slice(10)) : undefined;
+    if (this.features().readMarkers && target && atom(target) && time !== undefined) {
+      const key = this.deps.fold(target);
+      const previous = this.markers.get(key);
+      if (previous === undefined && this.markers.size >= this.deps.policy.maxModernOperations) {
+        this.overflow("IRC read-marker limit exceeded.");
+        return;
       }
-      return true;
-    }
-    if (input.command === "MARKREAD") {
-      const target = input.params[0];
-      const value = input.params[1];
-      if (
-        this.features().readMarkers &&
-        target &&
-        atom(target) &&
-        value?.startsWith("timestamp=")
-      ) {
-        const time = timestamp(value.slice(10));
-        if (time !== undefined) {
-          const key = this.deps.fold(target);
-          const previous = this.markers.get(key);
-          if (previous === undefined && this.markers.size >= this.deps.policy.maxModernOperations)
-            return this.overflow("IRC read-marker limit exceeded.");
-          if (previous === undefined || time > previous) {
-            this.markers.set(key, time);
-            this.deps.emit({ type: "read-marker", target: plain(target), serverTime: time });
-          }
-        }
+      if (previous === undefined || time > previous) {
+        this.markers.set(key, time);
+        this.deps.emit({ type: "read-marker", target: plain(target), serverTime: time });
       }
-      this.completeLabel(input);
-      return true;
     }
-    if (input.command === "REDACT") {
-      const [target, id] = input.params;
-      if (this.features().redaction && target && atom(target) && id && validServerId(id))
-        this.deps.emit({ type: "redaction", target: plain(target), serverId: id });
-      this.completeLabel(input);
-      return true;
-    }
-    return false;
+    this.completeLabel(input);
+  }
+  private redact(input: IrcFrame) {
+    const [target, id] = input.params;
+    if (this.features().redaction && target && atom(target) && id && validServerId(id))
+      this.deps.emit({ type: "redaction", target: plain(target), serverId: id });
+    this.completeLabel(input);
   }
   private batch(input: IrcFrame) {
     if (!this.has("batch")) {
@@ -284,75 +299,75 @@ export class ModernSession {
       this.overflow("Malformed IRC batch identifier.");
       return;
     }
-    const reference = id.slice(1);
-    if (id.startsWith("+")) {
-      const type = input.params[1];
-      if (
-        !type ||
-        this.batches.has(reference) ||
-        this.batches.size >= this.deps.policy.maxBatches
-      ) {
-        this.overflow("Invalid or excessive IRC batches.");
-        return;
-      }
-      const parent = this.batchFor(input);
-      const depth = (parent?.depth ?? 0) + 1;
-      if (depth > this.deps.policy.maxBatchDepth) {
-        this.overflow("IRC batch nesting limit exceeded.");
-        return;
-      }
-      const label = input.tags.label ?? parent?.label;
-      const playback = type === "chathistory" || (parent?.playback ?? false);
-      const batch: Batch = {
-        type,
-        ...(input.tags.batch ? { parent: input.tags.batch } : {}),
-        ...(label ? { label } : {}),
-        playback,
-        started: this.deps.now(),
-        count: 0,
-        bytes: 0,
-        depth,
-      };
-      if (type === "chathistory") {
-        const target = input.params[2];
-        if (!target || !atom(target)) {
-          this.overflow("Malformed chat history batch target.");
-          return;
-        }
-        const query = this.history;
-        if (
-          query &&
-          !query.batch &&
-          this.deps.fold(query.target) === this.deps.fold(target) &&
-          (!query.label || label === query.label)
-        ) {
-          query.batch = reference;
-          query.exhausted = "draft/chathistory-end" in input.tags;
-          batch.history = query;
-        }
-      }
-      this.batches.set(reference, batch);
-    } else {
-      const batch = this.batches.get(reference);
-      if (!batch || [...this.batches.values()].some((child) => child.parent === reference)) {
-        this.overflow("Malformed IRC batch ending.");
-        return;
-      }
-      this.batches.delete(reference);
-      if (batch.history) {
-        const query = batch.history;
-        if (!query.expired)
-          this.deps.emit({
-            type: "history-complete",
-            operationId: query.operationId,
-            target: plain(query.target),
-            hasMore: !query.exhausted && query.count > 0,
-          });
-        if (query.label) this.pending.delete(query.label);
-        if (this.history === query) this.history = undefined;
-      }
-      if (batch.label && batch.type === "labeled-response") this.pending.delete(batch.label);
+    if (id.startsWith("+")) this.openBatch(input, id.slice(1));
+    else this.closeBatch(id.slice(1));
+  }
+  private openBatch(input: IrcFrame, reference: string) {
+    const type = input.params[1];
+    if (!type || this.batches.has(reference) || this.batches.size >= this.deps.policy.maxBatches) {
+      this.overflow("Invalid or excessive IRC batches.");
+      return;
     }
+    const parent = this.batchFor(input);
+    const depth = (parent?.depth ?? 0) + 1;
+    if (depth > this.deps.policy.maxBatchDepth) {
+      this.overflow("IRC batch nesting limit exceeded.");
+      return;
+    }
+    const label = input.tags.label ?? parent?.label;
+    const batch: Batch = {
+      type,
+      ...(input.tags.batch ? { parent: input.tags.batch } : {}),
+      ...(label ? { label } : {}),
+      playback: type === "chathistory" || (parent?.playback ?? false),
+      started: this.deps.now(),
+      count: 0,
+      bytes: 0,
+      depth,
+    };
+    if (type === "chathistory" && !this.claimHistory(input, reference, batch)) return;
+    this.batches.set(reference, batch);
+  }
+  /** Binds the pending history query this batch answers; false after a malformed target. */
+  private claimHistory(input: IrcFrame, reference: string, batch: Batch): boolean {
+    const target = input.params[2];
+    if (!target || !atom(target)) {
+      this.overflow("Malformed chat history batch target.");
+      return false;
+    }
+    const query = this.history;
+    if (
+      query &&
+      !query.batch &&
+      this.deps.fold(query.target) === this.deps.fold(target) &&
+      (!query.label || batch.label === query.label)
+    ) {
+      query.batch = reference;
+      query.exhausted = "draft/chathistory-end" in input.tags;
+      batch.history = query;
+    }
+    return true;
+  }
+  private closeBatch(reference: string) {
+    const batch = this.batches.get(reference);
+    if (!batch || [...this.batches.values()].some((child) => child.parent === reference)) {
+      this.overflow("Malformed IRC batch ending.");
+      return;
+    }
+    this.batches.delete(reference);
+    if (batch.history) this.finishHistory(batch.history);
+    if (batch.label && batch.type === "labeled-response") this.pending.delete(batch.label);
+  }
+  private finishHistory(query: History) {
+    if (!query.expired)
+      this.deps.emit({
+        type: "history-complete",
+        operationId: query.operationId,
+        target: plain(query.target),
+        hasMore: !query.exhausted && query.count > 0,
+      });
+    if (query.label) this.pending.delete(query.label);
+    if (this.history === query) this.history = undefined;
   }
   observeChat(input: IrcFrame, sender: string, target: string) {
     const id = input.tags.msgid;
@@ -436,58 +451,12 @@ export class ModernSession {
   admit(command: SessionCommand, operationId: OperationId): Result<void> {
     const features = this.features();
     switch (command.type) {
-      case "history": {
+      case "history":
         if (!features.history) return failure("unsupported", "Server chat history is unavailable.");
-        if (
-          !atom(command.target) ||
-          !Number.isInteger(command.limit) ||
-          command.limit < 1 ||
-          command.limit > this.historyMaximum
-        )
-          return failure(
-            "invalid-input",
-            `History requests must have a valid target and a limit between 1 and ${this.historyMaximum}.`,
-          );
-        if (this.history) return failure("conflict", "Another history request is still active.");
-        if (command.before) {
-          if ("serverId" in command.before) {
-            if (!validServerId(command.before.serverId) || !this.referenceTypes.includes("msgid"))
-              return failure("invalid-input", "A supported history message reference is required.");
-          } else if (
-            !validTimestamp(command.before.serverTime) ||
-            !this.referenceTypes.includes("timestamp")
-          )
-            return failure("invalid-input", "A supported history timestamp reference is required.");
-        }
-        this.history = {
-          operationId,
-          target: command.target,
-          limit: command.limit,
-          started: Infinity,
-          expired: false,
-          count: 0,
-          exhausted: false,
-        };
-        return ok();
-      }
+        return this.admitHistory(command, operationId);
       case "typing":
         if (!features.typing) return failure("unsupported", "Typing indicators are unavailable.");
-        if (!atom(command.target)) return failure("invalid-input", "Invalid typing target.");
-        if (
-          this.deps.now() - (this.outgoingTyping.get(this.deps.fold(command.target)) ?? -Infinity) <
-          3000
-        )
-          return failure(
-            "rate-limited",
-            "Typing updates are limited to one every three seconds per target.",
-          );
-        if (
-          !this.outgoingTyping.has(this.deps.fold(command.target)) &&
-          this.outgoingTyping.size >= this.deps.policy.maxTypingEntries
-        )
-          return failure("rate-limited", "Too many typing targets.");
-        this.outgoingTyping.set(this.deps.fold(command.target), this.deps.now());
-        return ok();
+        return this.admitTyping(command.target);
       case "reaction":
         if (!features.reactions)
           return failure("unsupported", "Reactions require message IDs and permitted client tags.");
@@ -508,14 +477,70 @@ export class ModernSession {
       case "mark-read":
         if (!features.readMarkers)
           return failure("unsupported", "Synchronized read markers are unavailable.");
-        if (!atom(command.target) || !validTimestamp(command.serverTime))
-          return failure("invalid-input", "Invalid read marker.");
-        if (command.serverTime < (this.markers.get(this.deps.fold(command.target)) ?? -Infinity))
-          return failure("conflict", "Read markers cannot move backwards.");
-        return ok();
+        return this.admitReadMarker(command.target, command.serverTime);
       default:
         return ok();
     }
+  }
+  private admitHistory(command: HistoryCommand, operationId: OperationId): Result<void> {
+    if (
+      !atom(command.target) ||
+      !Number.isInteger(command.limit) ||
+      command.limit < 1 ||
+      command.limit > this.historyMaximum
+    )
+      return failure(
+        "invalid-input",
+        `History requests must have a valid target and a limit between 1 and ${this.historyMaximum}.`,
+      );
+    if (this.history) return failure("conflict", "Another history request is still active.");
+    if (command.before) {
+      const reference = this.admitReference(command.before);
+      if (!reference.ok) return reference;
+    }
+    this.history = {
+      operationId,
+      target: command.target,
+      limit: command.limit,
+      started: Infinity,
+      expired: false,
+      count: 0,
+      exhausted: false,
+    };
+    return ok();
+  }
+  /** History anchors must use a reference type the server advertised in MSGREFTYPES. */
+  private admitReference(before: NonNullable<HistoryCommand["before"]>): Result<void> {
+    if ("serverId" in before)
+      return validServerId(before.serverId) && this.referenceTypes.includes("msgid")
+        ? ok()
+        : failure("invalid-input", "A supported history message reference is required.");
+    return validTimestamp(before.serverTime) && this.referenceTypes.includes("timestamp")
+      ? ok()
+      : failure("invalid-input", "A supported history timestamp reference is required.");
+  }
+  private admitTyping(target: string): Result<void> {
+    if (!atom(target)) return failure("invalid-input", "Invalid typing target.");
+    const key = this.deps.fold(target);
+    if (this.deps.now() - (this.outgoingTyping.get(key) ?? -Infinity) < 3000)
+      return failure(
+        "rate-limited",
+        "Typing updates are limited to one every three seconds per target.",
+      );
+    if (
+      !this.outgoingTyping.has(key) &&
+      this.outgoingTyping.size >= this.deps.policy.maxTypingEntries
+    )
+      return failure("rate-limited", "Too many typing targets.");
+    this.outgoingTyping.set(key, this.deps.now());
+    return ok();
+  }
+  private admitReadMarker(target: string, serverTime: number): Result<void> {
+    if (!atom(target) || !validTimestamp(serverTime))
+      return failure("invalid-input", "Invalid read marker.");
+    if (serverTime < (this.markers.get(this.deps.fold(target)) ?? -Infinity))
+      return failure("conflict", "Read markers cannot move backwards.");
+    return ok();
   }
   validateFrame(output: IrcFrame): Result<void> {
     const features = this.features();
@@ -533,14 +558,16 @@ export class ModernSession {
     if (
       output.tags[modernProtocol.typing] !== undefined &&
       output.params[0] &&
-      this.deps.now() - (this.typingWritten.get(this.deps.fold(output.params[0])) ?? -Infinity) <
-        3000
+      this.typingTooSoon(output.params[0])
     )
       return failure(
         "rate-limited",
         "Typing updates cannot be written within three seconds of one another.",
       );
     return ok();
+  }
+  private typingTooSoon(target: string) {
+    return this.deps.now() - (this.typingWritten.get(this.deps.fold(target)) ?? -Infinity) < 3000;
   }
   private output(
     command: string,
@@ -554,76 +581,25 @@ export class ModernSession {
     operationId: OperationId,
     write: (frame: IrcFrame) => Promise<Result<void>>,
   ): Promise<Result<void>> {
-    const features = this.features();
-    const required: Partial<Record<SessionCommand["type"], boolean>> = {
-      history: features.history,
-      typing: features.typing,
-      reaction: features.reactions,
-      redact: features.redaction,
-      "mark-read": features.readMarkers,
-    };
-    if (required[command.type] === false) {
+    if (!this.stillAvailable(command)) {
       this.failedAdmission(command, operationId);
       return failure("unsupported", "This IRC feature is no longer available.");
     }
-    if (
-      command.type === "typing" &&
-      this.deps.now() - (this.typingWritten.get(this.deps.fold(command.target)) ?? -Infinity) < 3000
-    )
+    if (command.type === "typing" && this.typingTooSoon(command.target))
       return failure(
         "rate-limited",
         "Typing updates cannot be written within three seconds of one another.",
       );
-    let output: IrcFrame;
-    switch (command.type) {
-      case "history": {
-        const reference = command.before
-          ? "serverId" in command.before
-            ? `msgid=${command.before.serverId}`
-            : `timestamp=${new Date(command.before.serverTime).toISOString()}`
-          : "*";
-        output = this.output("CHATHISTORY", [
-          command.before ? "BEFORE" : "LATEST",
-          command.target,
-          reference,
-          String(command.limit),
-        ]);
-        break;
-      }
-      case "typing":
-        output = this.output("TAGMSG", [command.target], {
-          [modernProtocol.typing]: command.active ? "active" : command.paused ? "paused" : "done",
-        });
-        break;
-      case "reaction":
-        output = this.output("TAGMSG", [command.target], {
-          [modernProtocol.reply]: command.serverId,
-          [command.remove ? modernProtocol.unreact : modernProtocol.react]: command.value,
-        });
-        break;
-      case "redact":
-        output = this.output("REDACT", [command.target, command.serverId]);
-        break;
-      case "mark-read":
-        output = this.output("MARKREAD", [
-          command.target,
-          `timestamp=${new Date(command.serverTime).toISOString()}`,
-        ]);
-        break;
-      default:
-        return failure("unsupported", "This IRC command is unavailable.");
-    }
+    let output = this.request(command);
+    if (!output) return failure("unsupported", "This IRC command is unavailable.");
     let label: string | undefined;
     if (this.has("labeled-response")) {
       if (this.pending.size >= this.deps.policy.maxModernOperations) {
         this.failedAdmission(command, operationId);
         return failure("rate-limited", "Too many active modern IRC operations.");
       }
-      label = `oi-modern-${++this.labelSequence}`;
-      this.pending.set(label, { operationId, command: command.type, started: this.deps.now() });
+      label = this.labelOperation(command, operationId);
       output = { ...output, tags: { ...output.tags, label } };
-      if (command.type === "history" && this.history?.operationId === operationId)
-        this.history.label = label;
     }
     if (command.type === "history" && this.history) this.history.started = this.deps.now();
     const result = await write(output);
@@ -634,6 +610,63 @@ export class ModernSession {
       this.failedAdmission(command, operationId);
     }
     return result;
+  }
+  /** Capabilities can be withdrawn (CAP DEL) between admission and the paced write. */
+  private stillAvailable(command: SessionCommand): boolean {
+    const features = this.features();
+    const required: Partial<Record<SessionCommand["type"], boolean>> = {
+      history: features.history,
+      typing: features.typing,
+      reaction: features.reactions,
+      redact: features.redaction,
+      "mark-read": features.readMarkers,
+    };
+    return required[command.type] !== false;
+  }
+  private request(command: SessionCommand): IrcFrame | undefined {
+    switch (command.type) {
+      case "history":
+        return this.historyRequest(command);
+      case "typing":
+        return this.output("TAGMSG", [command.target], {
+          [modernProtocol.typing]: command.active ? "active" : command.paused ? "paused" : "done",
+        });
+      case "reaction":
+        return this.output("TAGMSG", [command.target], {
+          [modernProtocol.reply]: command.serverId,
+          [command.remove ? modernProtocol.unreact : modernProtocol.react]: command.value,
+        });
+      case "redact":
+        return this.output("REDACT", [command.target, command.serverId]);
+      case "mark-read":
+        return this.output("MARKREAD", [
+          command.target,
+          `timestamp=${new Date(command.serverTime).toISOString()}`,
+        ]);
+      default:
+        return undefined;
+    }
+  }
+  private historyRequest(command: HistoryCommand): IrcFrame {
+    const reference = command.before
+      ? "serverId" in command.before
+        ? `msgid=${command.before.serverId}`
+        : `timestamp=${new Date(command.before.serverTime).toISOString()}`
+      : "*";
+    return this.output("CHATHISTORY", [
+      command.before ? "BEFORE" : "LATEST",
+      command.target,
+      reference,
+      String(command.limit),
+    ]);
+  }
+  /** Tracks a labeled-response operation so its reply, FAIL or timeout can be correlated. */
+  private labelOperation(command: SessionCommand, operationId: OperationId): string {
+    const label = `oi-modern-${++this.labelSequence}`;
+    this.pending.set(label, { operationId, command: command.type, started: this.deps.now() });
+    if (command.type === "history" && this.history?.operationId === operationId)
+      this.history.label = label;
+    return label;
   }
   private failedAdmission(command: SessionCommand, operationId: OperationId) {
     if (command.type === "history" && this.history?.operationId === operationId)

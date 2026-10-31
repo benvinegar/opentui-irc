@@ -26,6 +26,7 @@ bun run test:ergo       # interoperability against a local Ergo server (Docker)
 ```
 
 - Add focused tests for new behaviour. Name Bun-only tests `*.bun.test.ts`.
+- oxlint fails any function with a cyclomatic complexity above 20 (`.oxlintrc.json`). Split long branches into lookup tables or named helpers instead of disabling the rule.
 - Tests must use local fake servers or the loopback Ergo fixture. Never connect to public IRC networks or use real credentials.
 - Use [Conventional Commits](https://www.conventionalcommits.org): `feat(scope): …`, `fix(scope): …`, `docs: …`, `chore: …`.
 - Add user-visible changes to the `Unreleased` section of [CHANGELOG.md](CHANGELOG.md).

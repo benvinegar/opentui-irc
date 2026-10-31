@@ -1,15 +1,5 @@
 /* oxlint-disable no-control-regex -- Explicit terminal control rejection is a security boundary. */
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  For,
-  useContext,
-  onCleanup,
-  onMount,
-  Show,
-  untrack,
-} from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import {
   onBlur,
   onFocus,
@@ -27,7 +17,7 @@ import {
 } from "@opentui/core";
 import type { AppAction, AppApi } from "../contracts/app";
 import type { ConversationId, MessageId, NetworkId } from "../contracts/common";
-import type { ConnectionPhase, Message, TimelineSnapshot } from "../contracts/model";
+import type { Message, TimelineSnapshot } from "../contracts/model";
 import type { DiscoverySnapshot } from "../contracts/discovery";
 import type {
   CommandService,
@@ -36,31 +26,44 @@ import type {
   InputContext,
 } from "../contracts/services";
 import { useReadable } from "./bridge";
-import {
-  Button,
-  Dialog,
-  Field,
-  FocusContext,
-  FitText,
-  KeyHints,
-  ListItem,
-  Popover,
-  Splitter,
-  ThemeContext,
-  usePalette,
-} from "./primitives";
+import { Dialog, FocusContext, Splitter, ThemeContext, usePalette } from "./primitives";
 import { SettingsForm } from "./settings";
+import {
+  CommandPalette,
+  MessagePicker,
+  PasteReview,
+  QuitConfirm,
+  RedactConfirm,
+  SearchPanel,
+  TargetForm,
+  type PaletteEntry,
+} from "./dialogs";
+import { MessageMenu, PersonCard, REACTIONS, type MenuEntry, type MenuPage } from "./popovers";
+import {
+  ConversationHeader,
+  HelpPanel,
+  MemberList,
+  Sidebar,
+  StatusBar,
+  Welcome,
+} from "./shell-panels";
 import { DiscoveryPanel } from "./discovery";
 import { createTypingReporter } from "./typing";
-import { MessageRow } from "./transcript";
+import { keyStep, runKeyBinding, type KeyBinding, type KeyPress } from "./keys";
 import {
-  continuesGroup,
-  dayKey,
-  formatDay,
-  formatMessageTime,
-  nicknameColor,
-  transcriptGutterWidth,
-} from "./transcript-style";
+  conversationSubtitle,
+  compactDialog,
+  dialogTitle,
+  footerHints,
+  messageTime,
+  memberRole,
+  modalFocusTarget,
+  personCardLines,
+  typingLabel,
+  type Modal,
+} from "./shell-labels";
+import { formatMessageTime, transcriptGutterWidth } from "./transcript-style";
+import { Composer, Transcript } from "./conversation";
 import { isHistServMessage } from "../contracts/presentation";
 
 export interface UiOptions {
@@ -69,68 +72,8 @@ export interface UiOptions {
   readonly external: ExternalActions;
   readonly onQuit?: () => void | Promise<void>;
 }
-type Modal =
-  | "settings"
-  | "help"
-  | "join"
-  | "query"
-  | "switch"
-  | "search"
-  | "paste"
-  | "message"
-  | "messages"
-  | "directory"
-  | "whois"
-  | "person"
-  | "redact"
-  | "quit"
-  | null;
 const cleanPaste = (value: string) =>
   value.replace(/\r\n?/gu, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu, "");
-
-const messageTime = (message: Message) => message.serverTime ?? message.receivedAt;
-const phaseLabel = (phase: ConnectionPhase) =>
-  phase === "ready"
-    ? "connected"
-    : phase === "disconnected"
-      ? "offline"
-      : phase === "reconnecting"
-        ? "reconnecting…"
-        : "connecting…";
-const HELP_KEYS = [
-  ["ctrl+k", "jump to a conversation or action"],
-  ["ctrl+f", "search history"],
-  ["ctrl+j", "join a channel"],
-  ["ctrl+,", "settings"],
-  ["alt+↑↓", "previous / next conversation"],
-  ["ctrl+↑↓", "recall messages you sent"],
-  ["tab", "complete nicknames and commands"],
-  ["shift+tab", "move focus out of the composer"],
-  ["pgup pgdn", "scroll"],
-  ["ctrl+end", "jump to latest"],
-  ["esc", "close, or cancel a reply"],
-  ["click", "a message to copy, reply, react, or open links"],
-  ["drag", "select message text to copy it"],
-  ["click name", "see who someone is, or message them"],
-] as const;
-const REACTIONS = ["👍", "🎉", "😂", "👀", "🔥", "✅"] as const;
-interface MenuEntry {
-  readonly id: string;
-  readonly icon: string;
-  readonly label: string;
-  /** Single-key shortcut while the menu is open. */
-  readonly key: string;
-  /** Opens a submenu rather than acting. */
-  readonly more?: boolean;
-  readonly run: () => void;
-}
-interface PaletteEntry {
-  readonly id: string;
-  readonly label: string;
-  readonly group: string;
-  readonly hint?: string;
-  readonly run: () => void;
-}
 
 export function OpenIrc(props: UiOptions) {
   const document = useReadable(props.app.settings);
@@ -143,9 +86,6 @@ export function OpenIrc(props: UiOptions) {
 
 function Shell(props: UiOptions) {
   const colors = usePalette();
-  const theme = useContext(ThemeContext);
-  const phaseColor = (phase: ConnectionPhase) =>
-    phase === "ready" ? colors.green : phase === "disconnected" ? colors.muted : colors.yellow;
   const renderer = useRenderer();
   const dimensions = useTerminalDimensions();
   const state = useReadable(props.app.state);
@@ -250,6 +190,8 @@ function Shell(props: UiOptions) {
     messages().filter((message) => showHistServ() || !isHistServMessage(message)),
   );
   const histServCount = createMemo(() => messages().filter(isHistServMessage).length);
+  const truncatedWindow = () => (timeline()?.messages.length ?? 0) > 300;
+  const onlyHistServ = () => messages().length > 0 && visibleMessages().length === 0;
   const toggleHistServ = async () => {
     const document = settings();
     if (!document || savingHistServ()) return;
@@ -299,7 +241,6 @@ function Shell(props: UiOptions) {
     ),
   );
   const [resizing, setResizing] = createSignal<"sidebar" | "members" | "author">();
-  const [railHot, setRailHot] = createSignal(false);
   let transcriptFrame: Renderable | undefined;
   const followResize = (x: number) => {
     const target = resizing();
@@ -394,6 +335,7 @@ function Shell(props: UiOptions) {
   };
   // Dialog presses and divider drags end with a mouse-up on whatever lies beneath; ignore it.
   let ignoreClicksUntil = 0;
+  const clicksBlocked = () => !!modal() || !!resizing() || Date.now() < ignoreClicksUntil;
   const closeModal = () => {
     ignoreClicksUntil = Date.now() + 300;
     setModal(null);
@@ -409,27 +351,7 @@ function Shell(props: UiOptions) {
     setFormText("");
     setStatus("");
     setModal(value);
-    queueMicrotask(() => {
-      const target =
-        value === "settings"
-          ? "network-name"
-          : value === "whois"
-            ? "whois-nick"
-            : value === "directory"
-              ? "directory-filter"
-              : value === "message"
-                ? "copy-message"
-                : value === "person"
-                  ? "person-message"
-                  : value === "quit"
-                    ? "quit-confirm"
-                    : value === "redact"
-                      ? "redact-cancel"
-                      : ["join", "query", "switch", "search"].includes(value ?? "")
-                        ? "dialog-input"
-                        : "dialog-close";
-      focus(target);
-    });
+    queueMicrotask(() => focus(modalFocusTarget(value)));
   };
   const run = async (action: AppAction) => {
     if (
@@ -510,6 +432,47 @@ function Shell(props: UiOptions) {
     typing.activity(typingContext(text));
     void run({ type: "draft.set", conversationId: active()!.id, text });
   };
+  /** Literal drafts (pastes, recalled pastes) are messages even when they start with "/". */
+  const parseDraft = (text: string, conversationId: ConversationId) =>
+    literalDraft()
+      ? {
+          ok: true as const,
+          value: {
+            type: "action" as const,
+            action: { type: "message.send" as const, conversationId, text, kind: "text" as const },
+          },
+        }
+      : props.commands.parse(text, context());
+  /** Bounded per-conversation recall for ctrl+↑↓. */
+  const rememberSent = (conversationId: ConversationId, text: string) => {
+    const previous = histories.get(conversationId) ?? [];
+    histories.set(conversationId, [...previous.slice(-49), { text, literal: literalDraft() }]);
+    if (histories.size > 32) {
+      const oldest = histories.keys().next().value;
+      if (oldest) histories.delete(oldest);
+    }
+    historyIndex = 0;
+  };
+  const sendAction = async (action: AppAction, conversationId: ConversationId, text: string) => {
+    typing.stop();
+    sendBusy = true;
+    const replyTo = reply();
+    const result = await run(
+      action.type === "message.send" && replyTo ? { ...action, replyTo } : action,
+    );
+    sendBusy = false;
+    if (!result.ok) return;
+    if (action.type === "message.send") typing.messageSent(conversationId);
+    rememberSent(conversationId, text);
+    // Do not erase edits made while the acceptance promise was pending.
+    if (active()?.id === conversationId && composer?.plainText === text) {
+      composer.clear();
+      void run({ type: "draft.set", conversationId, text: "" });
+      setLiteralDraft(false);
+      literalConversations.delete(conversationId);
+      setReply(undefined);
+    }
+  };
   const send = async () => {
     if (modal() || sendBusy || !composer || !active()) return;
     const text = composer.plainText;
@@ -519,52 +482,15 @@ function Shell(props: UiOptions) {
       return;
     }
     const conversationId = active()!.id;
-    const intent = literalDraft()
-      ? {
-          ok: true as const,
-          value: {
-            type: "action" as const,
-            action: { type: "message.send" as const, conversationId, text, kind: "text" as const },
-          },
-        }
-      : props.commands.parse(text, context());
+    const intent = parseDraft(text, conversationId);
     if (!intent.ok) {
       setStatus(intent.error.message);
       return;
     }
     switch (intent.value.type) {
-      case "action": {
-        typing.stop();
-        sendBusy = true;
-        const action = intent.value.action;
-        const replyTo = reply();
-        const result = await run(
-          action.type === "message.send" && replyTo ? { ...action, replyTo } : action,
-        );
-        sendBusy = false;
-        if (result.ok) {
-          if (action.type === "message.send") typing.messageSent(conversationId);
-          const previous = histories.get(conversationId) ?? [];
-          histories.set(conversationId, [
-            ...previous.slice(-49),
-            { text, literal: literalDraft() },
-          ]);
-          if (histories.size > 32) {
-            const oldest = histories.keys().next().value;
-            if (oldest) histories.delete(oldest);
-          }
-          historyIndex = 0;
-          // Do not erase edits made while the acceptance promise was pending.
-          if (active()?.id === conversationId && composer.plainText === text) {
-            composer.clear();
-            void run({ type: "draft.set", conversationId, text: "" });
-            setLiteralDraft(false);
-            literalConversations.delete(conversationId);
-            setReply(undefined);
-          }
-        }
+      case "action":
+        await sendAction(intent.value.action, conversationId, text);
         break;
-      }
       case "help":
         setHelpCommand(intent.value.command);
         openModal("help");
@@ -658,153 +584,158 @@ function Shell(props: UiOptions) {
     );
     syncDraft();
   };
+  const openHelp = () => {
+    setHelpCommand(undefined);
+    openModal("help");
+  };
+  const openSearch = () => {
+    setResults([]);
+    openModal("search");
+  };
+  /** Esc backs out of a submenu, closes a modal, or cancels a reply. */
+  const dismiss = () => {
+    if (modal() === "message" && menuPage() !== "main") choose("main", "copy-message");
+    else if (modal()) closeModal();
+    else {
+      setReply(undefined);
+      focus("composer");
+    }
+  };
+  const cycleFocus = (step: -1 | 1) => {
+    const ids = orderedControls(modal() ? "modal" : "main");
+    const current = ids.indexOf(focusId());
+    const next = ids[(current + step + ids.length) % ids.length];
+    if (next) focus(next);
+  };
+  /** Arrow keys walk dialog lists; single-line fields have no vertical cursor movement. */
+  const walkDialog = (step: -1 | 1) => {
+    const ids = orderedControls("modal").filter((id) => id !== "dialog-close");
+    const current = ids.indexOf(focusId());
+    const next = ids[current < 0 ? 0 : (current + step + ids.length) % ids.length];
+    if (next) focus(next);
+  };
+  const scrollModal = (step: -1 | 1) => {
+    pendingFocusReveal = undefined;
+    const viewport = renderer.root.findDescendantById("modal-scroll");
+    if (viewport instanceof ScrollBoxRenderable) viewport.scrollBy(step, "viewport");
+  };
+  const movePaletteSelection = (step: -1 | 1) => {
+    const count = filteredPalette().length;
+    if (count) setPaletteIndex((index) => (index + step + count) % count);
+    const target = renderer.root.findDescendantById(filteredPalette()[paletteIndex()]?.id ?? "");
+    if (target) revealControl(target);
+  };
+  const submitDialogInput = () => {
+    if (modal() === "search") void search();
+    else if (modal() === "join" || modal() === "query") void submitTarget();
+    else if (modal() === "switch") filteredPalette()[paletteIndex()]?.run();
+  };
+  /** Popover letters run their entry; on the react page, 1–6 pick a reaction. */
+  const runPopoverShortcut = (event: KeyPress) => {
+    const reaction =
+      modal() === "message" && menuPage() === "react" && /^[1-6]$/u.test(event.name)
+        ? REACTIONS[Number(event.name) - 1]
+        : undefined;
+    const shortcut =
+      popoverOpen() && !event.ctrl && !event.meta
+        ? (modal() === "person" ? personMenu() : messageMenu()).find(
+            (entry) => entry.key === event.name,
+          )
+        : undefined;
+    if (!reaction && !shortcut) return false;
+    event.preventDefault();
+    if (reaction) react(reaction);
+    else shortcut!.run();
+    return true;
+  };
+  const activateNeighbour = (step: -1 | 1) => {
+    const all = state().conversations;
+    const index = all.findIndex((item) => item.id === active()?.id);
+    const next = all[(index + step + all.length) % all.length];
+    if (next) activate(next.id);
+  };
+  /** Ctrl+↑ steps back through messages sent here; the unsent draft is restored at the end. */
+  const recallHistory = (step: -1 | 1) => {
+    const conversation = active();
+    if (!composer || !conversation) return;
+    const items = histories.get(conversation.id) ?? [];
+    if (!items.length) return;
+    if (historyIndex === 0) {
+      historyDraft = composer.plainText;
+      historyLiteralDraft = literalDraft();
+    }
+    historyIndex = Math.min(items.length, Math.max(0, historyIndex + step));
+    const item = historyIndex ? items[items.length - historyIndex] : undefined;
+    composer.replaceText(item ? item.text : historyDraft);
+    setLiteralDraft(item ? item.literal : historyLiteralDraft);
+    if (literalDraft()) literalConversations.add(conversation.id);
+    else literalConversations.delete(conversation.id);
+    composer.gotoBufferEnd();
+    syncDraft();
+  };
+  // Binding tables run in order; the first match wins and consumes the key.
+  const globalKeys: readonly KeyBinding[] = [
+    { name: ["q", "c"], ctrl: true, run: () => openModal("quit") },
+    { name: ["escape"], run: dismiss },
+    {
+      name: ["tab"],
+      run: (event) => {
+        if (!modal() && focusId() === "composer" && !event.shift) complete();
+        else cycleFocus(event.shift ? -1 : 1);
+      },
+    },
+  ];
+  const modalKeys: readonly KeyBinding[] = [
+    { name: ["pageup", "pagedown"], run: (event) => scrollModal(keyStep(event.name)) },
+    {
+      name: ["up", "down"],
+      when: () => modal() === "switch" && focusId() === "dialog-input",
+      run: (event) => movePaletteSelection(keyStep(event.name)),
+    },
+    {
+      name: ["up", "down"],
+      when: () => modal() !== "settings",
+      run: (event) => walkDialog(keyStep(event.name)),
+    },
+    {
+      name: ["left", "right"],
+      when: () => popoverOpen(),
+      run: (event) => walkDialog(keyStep(event.name)),
+    },
+    { name: ["return"], when: () => focusId() === "dialog-input", run: submitDialogInput },
+  ];
+  const mainKeys: readonly KeyBinding[] = [
+    { name: ["f1"], run: openHelp },
+    { name: ["k", "p"], ctrl: true, run: () => openModal("switch") },
+    { name: ["f"], ctrl: true, run: openSearch },
+    { name: ["j"], ctrl: true, run: () => openModal("join") },
+    { name: [","], ctrl: true, run: () => openModal("settings") },
+    { name: ["up", "down"], meta: true, run: (event) => activateNeighbour(keyStep(event.name)) },
+    {
+      name: ["pageup", "pagedown"],
+      run: (event) => transcript?.scrollBy(keyStep(event.name), "viewport"),
+    },
+    { name: ["end"], ctrl: true, run: () => void jumpLatest() },
+    {
+      name: ["up", "down"],
+      ctrl: true,
+      when: () => !!composer && !!active(),
+      // Up recalls older messages.
+      run: (event) => recallHistory(event.name === "up" ? 1 : -1),
+    },
+  ];
   useKeyboard((event) => {
-    if (event.ctrl && (event.name === "q" || event.name === "c")) {
-      event.preventDefault();
-      openModal("quit");
+    if (runKeyBinding(event, globalKeys)) return;
+    if (!modal()) {
+      runKeyBinding(event, mainKeys);
       return;
     }
-    if (event.name === "escape") {
+    // Keys never reach the main layer behind a modal.
+    if (controls.get(focusId())?.layer !== "modal") {
       event.preventDefault();
-      if (modal() === "message" && menuPage() !== "main") choose("main", "copy-message");
-      else if (modal()) closeModal();
-      else {
-        setReply(undefined);
-        focus("composer");
-      }
       return;
     }
-    if (event.name === "tab") {
-      event.preventDefault();
-      if (!modal() && focusId() === "composer" && !event.shift) {
-        complete();
-        return;
-      }
-      const layer = modal() ? "modal" : "main";
-      const ids = orderedControls(layer);
-      const current = ids.indexOf(focusId());
-      const next = ids[(current + (event.shift ? -1 : 1) + ids.length) % ids.length];
-      if (next) focus(next);
-      return;
-    }
-    if (modal()) {
-      if (controls.get(focusId())?.layer !== "modal") {
-        event.preventDefault();
-        return;
-      }
-      const shortcut =
-        popoverOpen() && !event.ctrl && !event.meta
-          ? (modal() === "person" ? personMenu() : messageMenu()).find(
-              (entry) => entry.key === event.name,
-            )
-          : undefined;
-      const reaction =
-        modal() === "message" && menuPage() === "react" && /^[1-6]$/u.test(event.name)
-          ? REACTIONS[Number(event.name) - 1]
-          : undefined;
-      if (shortcut || reaction) {
-        event.preventDefault();
-        if (reaction) react(reaction);
-        else shortcut!.run();
-      } else if (event.name === "pageup" || event.name === "pagedown") {
-        event.preventDefault();
-        pendingFocusReveal = undefined;
-        const viewport = renderer.root.findDescendantById("modal-scroll");
-        if (viewport instanceof ScrollBoxRenderable)
-          viewport.scrollBy(event.name === "pageup" ? -1 : 1, "viewport");
-      } else if (
-        modal() === "switch" &&
-        focusId() === "dialog-input" &&
-        (event.name === "up" || event.name === "down")
-      ) {
-        event.preventDefault();
-        const count = filteredPalette().length;
-        if (count)
-          setPaletteIndex((index) => (index + (event.name === "up" ? -1 : 1) + count) % count);
-        const target = renderer.root.findDescendantById(
-          filteredPalette()[paletteIndex()]?.id ?? "",
-        );
-        if (target) revealControl(target);
-      } else if (
-        (event.name === "up" ||
-          event.name === "down" ||
-          (popoverOpen() && (event.name === "left" || event.name === "right"))) &&
-        modal() !== "settings"
-      ) {
-        // Arrow keys walk dialog lists; single-line fields have no vertical cursor movement.
-        event.preventDefault();
-        const ids = orderedControls("modal").filter((id) => id !== "dialog-close");
-        const current = ids.indexOf(focusId());
-        const next =
-          ids[
-            current < 0
-              ? 0
-              : (current + (event.name === "up" || event.name === "left" ? -1 : 1) + ids.length) %
-                ids.length
-          ];
-        if (next) focus(next);
-      } else if (event.name === "return" && focusId() === "dialog-input") {
-        event.preventDefault();
-        if (modal() === "search") void search();
-        else if (modal() === "join" || modal() === "query") void submitTarget();
-        else if (modal() === "switch") filteredPalette()[paletteIndex()]?.run();
-      }
-      return;
-    }
-    if (event.name === "f1") {
-      event.preventDefault();
-      setHelpCommand(undefined);
-      openModal("help");
-    } else if (event.ctrl && (event.name === "k" || event.name === "p")) {
-      event.preventDefault();
-      openModal("switch");
-    } else if (event.ctrl && event.name === "f") {
-      event.preventDefault();
-      setResults([]);
-      openModal("search");
-    } else if (event.ctrl && event.name === "j") {
-      event.preventDefault();
-      openModal("join");
-    } else if (event.ctrl && event.name === ",") {
-      event.preventDefault();
-      openModal("settings");
-    } else if (event.meta && (event.name === "up" || event.name === "down")) {
-      event.preventDefault();
-      const all = state().conversations;
-      const index = all.findIndex((item) => item.id === active()?.id);
-      const next = all[(index + (event.name === "up" ? -1 : 1) + all.length) % all.length];
-      if (next) activate(next.id);
-    } else if (event.name === "pageup" || event.name === "pagedown") {
-      event.preventDefault();
-      transcript?.scrollBy(event.name === "pageup" ? -1 : 1, "viewport");
-    } else if (event.ctrl && event.name === "end") {
-      event.preventDefault();
-      void jumpLatest();
-    } else if (
-      event.ctrl &&
-      (event.name === "up" || event.name === "down") &&
-      composer &&
-      active()
-    ) {
-      event.preventDefault();
-      const items = histories.get(active()!.id) ?? [];
-      if (!items.length) return;
-      if (historyIndex === 0) {
-        historyDraft = composer.plainText;
-        historyLiteralDraft = literalDraft();
-      }
-      historyIndex = Math.min(
-        items.length,
-        Math.max(0, historyIndex + (event.name === "up" ? 1 : -1)),
-      );
-      const item = historyIndex ? items[items.length - historyIndex] : undefined;
-      composer.replaceText(item ? item.text : historyDraft);
-      setLiteralDraft(item ? item.literal : historyLiteralDraft);
-      if (literalDraft()) literalConversations.add(active()!.id);
-      else literalConversations.delete(active()!.id);
-      composer.gotoBufferEnd();
-      syncDraft();
-    }
+    if (!runPopoverShortcut(event)) runKeyBinding(event, modalKeys);
   });
   const submitTarget = async () => {
     const intent = props.commands.parse(
@@ -926,7 +857,7 @@ function Shell(props: UiOptions) {
   };
   // Message menu and person card: small popovers anchored where they were opened.
   const [anchor, setAnchor] = createSignal({ x: 0, y: 0 });
-  const [menuPage, setMenuPage] = createSignal<"main" | "react" | "links">("main");
+  const [menuPage, setMenuPage] = createSignal<MenuPage>("main");
   const [person, setPerson] = createSignal<{ networkId: NetworkId; nick: string }>();
   const [personInfo, setPersonInfo] = createSignal<DiscoverySnapshot["user"]>();
   const popoverOpen = () => modal() === "message" || modal() === "person";
@@ -967,7 +898,7 @@ function Shell(props: UiOptions) {
     read();
     onCleanup(model.value.subscribe(read));
   });
-  const choose = (page: "main" | "react" | "links", first: string) => {
+  const choose = (page: MenuPage, first: string) => {
     setMenuPage(page);
     queueMicrotask(() => focus(first));
   };
@@ -1104,58 +1035,18 @@ function Shell(props: UiOptions) {
     ];
   };
   /** Card lines from the latest matching WHOIS reply; the network may omit any of them. */
-  const personLines = createMemo((): readonly (readonly [string, "text" | "muted" | "error"])[] => {
+  const personLines = createMemo(() => {
     const target = person();
     if (!target) return [];
-    const info = personInfo();
-    const details =
-      info?.details && info.details.nick.toLowerCase() === target.nick.toLowerCase()
-        ? info.details
-        : undefined;
-    if (state().networks.find((item) => item.id === target.networkId)?.phase !== "ready")
-      return [["Offline · details unavailable", "muted"]];
-    if (info?.state === "failed" && !details)
-      return [[info.error?.message ?? "No details available.", "error"]];
-    if (!details) return [["Looking up…", "muted"]];
-    const lines: [string, "text" | "muted"][] = [];
-    if (details.username || details.hostname)
-      lines.push([`${details.username ?? "?"}@${details.hostname ?? "?"}`, "muted"]);
-    if (details.realname) lines.push([`"${details.realname}"`, "text"]);
-    lines.push([details.account ? `account: ${details.account}` : "not identified", "muted"]);
-    if (details.awayReason) lines.push([`away: ${details.awayReason}`, "text"]);
-    if (details.channels.length) lines.push([`in ${details.channels.join(" ")}`, "muted"]);
-    return lines;
+    const net = state().networks.find((item) => item.id === target.networkId);
+    return personCardLines(target.nick, personInfo(), net?.phase === "ready");
   });
-  const personRole = () => {
-    const prefix = timeline()?.members.find(
-      (member) => member.nick.toLowerCase() === person()?.nick.toLowerCase(),
-    )?.prefixes[0];
-    return prefix === "~"
-      ? "owner"
-      : prefix === "&"
-        ? "admin"
-        : prefix === "@"
-          ? "op"
-          : prefix === "%"
-            ? "half-op"
-            : prefix === "+"
-              ? "voice"
-              : "";
-  };
-  const menuItems = (entries: readonly MenuEntry[]) => (
-    <For each={entries}>
-      {(entry) => (
-        <ListItem
-          id={entry.id}
-          layer="modal"
-          prefix={entry.icon}
-          label={entry.label}
-          hint={entry.more ? `${entry.key} ›` : `${entry.key}  `}
-          onPress={entry.run}
-        />
-      )}
-    </For>
-  );
+  const personRole = () =>
+    memberRole(
+      timeline()?.members.find(
+        (member) => member.nick.toLowerCase() === person()?.nick.toLowerCase(),
+      )?.prefixes[0],
+    );
   const showMembers = createMemo(
     () =>
       settings()?.tui.memberList === true &&
@@ -1172,14 +1063,29 @@ function Shell(props: UiOptions) {
       .slice(0, 200),
   );
   const headerName = () => active()?.name ?? "Welcome to opentui-irc";
-  const typingLabel = () => {
-    const ids = timeline()?.typing ?? [];
-    const nicks = ids
-      .map((id) => timeline()?.members.find((member) => member.id === id)?.nick)
-      .filter((nick): nick is string => !!nick);
-    if (!nicks.length || nicks.length !== ids.length) return "Someone is typing…";
-    if (nicks.length > 2) return "Several people are typing…";
-    return `${nicks.join(" and ")} ${nicks.length === 1 ? "is" : "are"} typing…`;
+  const headerPeople = () =>
+    active()?.kind === "channel" && !showMembers() ? (timeline()?.members.length ?? 0) : 0;
+  const composerFocused = () => !modal() && focusId() === "composer";
+  const typingNotice = () =>
+    timeline()?.typing.length
+      ? typingLabel(timeline()?.typing ?? [], timeline()?.members ?? [])
+      : "";
+  const behind = () => !atBottom() || timeline()?.atLatest === false;
+  const networkName = (id: NetworkId) => state().networks.find((item) => item.id === id)?.name;
+  const discoveryMode = () => {
+    const value = modal();
+    return value === "directory" || value === "whois" ? value : undefined;
+  };
+  const conversationName = (id: ConversationId) =>
+    state().conversations.find((item) => item.id === id)?.name;
+  /** Opens a search result in its conversation, briefly showing HistServ if it is one. */
+  const revealResult = (message: Message) => {
+    void run({ type: "history.reveal", messageId: message.id }).then((result) => {
+      if (!result.ok) return;
+      if (isHistServMessage(message)) setRevealHistServ(true);
+      setReveal(message.id);
+      closeToComposer();
+    });
   };
   const loadOlder = () => {
     if (active())
@@ -1194,36 +1100,6 @@ function Shell(props: UiOptions) {
     [...operations()].reverse().find((operation) => operation.state === "failed")?.error?.message ||
     state().error?.message ||
     "";
-  const footerHints = (): readonly (readonly [string, string])[] =>
-    modal() === "switch"
-      ? [
-          ["↑↓", "select"],
-          ["enter", "open"],
-          ["esc", "close"],
-        ]
-      : popoverOpen()
-        ? [
-            ["↑↓", "select"],
-            ["letter", "shortcut"],
-            ["esc", modal() === "message" && menuPage() !== "main" ? "back" : "close"],
-          ]
-        : modal() === "help" || modal() === "messages"
-          ? [
-              ["pgup pgdn", "scroll"],
-              ["esc", "close"],
-            ]
-          : modal()
-            ? [
-                ["tab", "next"],
-                ["enter", "choose"],
-                ["esc", "close"],
-              ]
-            : [
-                ["ctrl+k", "jump to…"],
-                ["ctrl+f", "search"],
-                ["f1", "help"],
-                ["ctrl+q", "quit"],
-              ];
   const paletteEntries = (): PaletteEntry[] => {
     const entries: PaletteEntry[] = state().conversations.map((item) => ({
       id: `switch-${item.id}`,
@@ -1255,10 +1131,7 @@ function Shell(props: UiOptions) {
         label: "Search history…",
         group: "Actions",
         hint: "ctrl+f",
-        run: () => {
-          setResults([]);
-          openModal("search");
-        },
+        run: openSearch,
       },
     );
     if (conversation) {
@@ -1361,10 +1234,7 @@ function Shell(props: UiOptions) {
         label: "Help: keys and commands",
         group: "opentui-irc",
         hint: "f1",
-        run: () => {
-          setHelpCommand(undefined);
-          openModal("help");
-        },
+        run: openHelp,
       },
       {
         id: "quit",
@@ -1422,365 +1292,78 @@ function Shell(props: UiOptions) {
         onMouseUp={finishResize}
       >
         <box flexDirection="row" flexGrow={1} minHeight={0}>
-          <scrollbox
-            id="sidebar"
+          <Sidebar
+            networks={state().networks}
+            conversations={state().conversations}
+            activeId={active()?.id}
             width={sidebarWidth()}
-            flexShrink={0}
-            backgroundColor={colors.panel}
-            contentOptions={{ flexDirection: "column", paddingTop: 1, paddingX: 1 }}
-            scrollX={false}
-          >
-            <box height={2} flexShrink={0} paddingX={1}>
-              <text height={1} fg={colors.accent}>
-                <b>opentui-irc</b>
-              </text>
-            </box>
-            <For each={state().networks}>
-              {(net) => {
-                const conversations = (kind: "channel" | "direct" | "status") =>
-                  state().conversations.filter(
-                    (item) => item.networkId === net.id && item.kind === kind,
-                  );
-                const status = () => conversations("status")[0];
-                return (
-                  <box flexDirection="column" flexShrink={0} paddingBottom={1}>
-                    <ListItem
-                      id={status() ? `conversation-${status()!.id}` : `network-${net.id}`}
-                      prefix="●"
-                      prefixColor={phaseColor(net.phase)}
-                      label={net.name}
-                      strong
-                      {...(net.phase === "ready" ? {} : { hint: phaseLabel(net.phase) })}
-                      active={!!status() && active()?.id === status()!.id}
-                      onPress={() => {
-                        if (status()) activate(status()!.id);
-                        else openModal("switch");
-                      }}
-                    />
-                    <Show when={net.lastError}>
-                      <box paddingX={1} flexShrink={0}>
-                        <text wrapMode="word" fg={colors.error}>
-                          {net.lastError?.message}
-                        </text>
-                      </box>
-                    </Show>
-                    <For each={["channel", "direct"] as const}>
-                      {(kind) => (
-                        <Show when={conversations(kind).length}>
-                          <box height={1} flexShrink={0} paddingX={1} marginTop={1}>
-                            <text fg={colors.muted}>
-                              {kind === "channel" ? "CHANNELS" : "DIRECT"}
-                            </text>
-                          </box>
-                          <For each={conversations(kind)}>
-                            {(conversation) => (
-                              <ListItem
-                                id={`conversation-${conversation.id}`}
-                                prefix={kind === "channel" ? "#" : "@"}
-                                label={
-                                  kind === "channel"
-                                    ? conversation.name.replace(/^#/u, "")
-                                    : conversation.name
-                                }
-                                {...(conversation.mentionCount
-                                  ? { badge: String(conversation.mentionCount), alert: true }
-                                  : conversation.unreadCount && !conversation.muted
-                                    ? { badge: String(conversation.unreadCount), strong: true }
-                                    : {})}
-                                dim={conversation.muted || !conversation.joined}
-                                active={active()?.id === conversation.id}
-                                onPress={() => activate(conversation.id)}
-                              />
-                            )}
-                          </For>
-                        </Show>
-                      )}
-                    </For>
-                    <Show
-                      when={
-                        net.phase === "ready" &&
-                        !conversations("channel").length &&
-                        !conversations("direct").length
-                      }
-                    >
-                      <box paddingX={1} flexShrink={0}>
-                        <text wrapMode="word" fg={colors.muted}>
-                          No channels yet. Press ctrl+j to join one.
-                        </text>
-                      </box>
-                    </Show>
-                  </box>
-                );
-              }}
-            </For>
-          </scrollbox>
+            activate={activate}
+            browse={() => openModal("switch")}
+          />
           <Splitter
             id="sidebar-splitter"
             active={resizing() === "sidebar"}
             onStart={() => setResizing("sidebar")}
           />
           <box flexGrow={1} minWidth={0} flexDirection="column">
-            <box
-              id="conversation-header"
-              height={2}
-              flexShrink={0}
-              paddingX={2}
-              flexDirection="row"
-              border={["bottom"]}
-              borderColor={colors.border}
-            >
-              <FitText
-                text={headerName()}
-                bold
-                fg={colors.text}
-                width={Math.min(
-                  Bun.stringWidth(headerName()),
-                  Math.max(8, dimensions().width - sidebarWidth() - 5),
-                )}
-              />
-              <box width={2} flexShrink={0} />
-              <FitText
-                fg={colors.muted}
-                text={
-                  active()?.kind === "direct"
-                    ? "Nicknames can be reused. Verify accounts."
-                    : active()?.kind === "status"
-                      ? [
-                          ["registering", "authenticating", "ready"].includes(
-                            network()?.phase ?? "",
-                          )
-                            ? network()?.secure
-                              ? "TLS"
-                              : "plaintext"
-                            : "",
-                          phaseLabel(network()?.phase ?? "disconnected"),
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")
-                      : active()?.topic || ""
-                }
-              />
-              <Show
-                when={active()?.kind === "channel" && timeline()?.members.length && !showMembers()}
-              >
-                <text flexShrink={0} height={1} fg={colors.muted}>
-                  {"  "}
-                  {timeline()!.members.length}{" "}
-                  {timeline()!.members.length === 1 ? "person" : "people"}
-                </text>
-              </Show>
-            </box>
+            <ConversationHeader
+              name={headerName()}
+              subtitle={conversationSubtitle(active(), network())}
+              people={headerPeople()}
+              maxNameWidth={Math.max(8, dimensions().width - sidebarWidth() - 5)}
+            />
             <Show
               when={active()}
               fallback={
-                <box flexGrow={1} paddingX={4} paddingTop={2} flexDirection="column">
-                  <box flexDirection="column" maxWidth={64} gap={1}>
-                    <text fg={colors.accent}>
-                      <b>Your next conversation starts here.</b>
-                    </text>
-                    <box flexDirection="column">
-                      <text fg={colors.text}>
-                        <span style={{ fg: colors.muted }}>1 </span> Add your IRC network
-                      </text>
-                      <text fg={colors.text}>
-                        <span style={{ fg: colors.muted }}>2 </span> Connect to it
-                      </text>
-                      <text fg={colors.text}>
-                        <span style={{ fg: colors.muted }}>3 </span> Join a channel or message
-                        someone
-                      </text>
-                    </box>
-                    <box flexDirection="row">
-                      <Button
-                        id="welcome-setup"
-                        label="Set up a network →"
-                        active
-                        onPress={() => openModal("settings")}
-                      />
-                    </box>
-                    <text fg={colors.muted} wrapMode="word">
-                      Local history is {settings()?.user.history.enabled ? "enabled" : "disabled"}.
-                      {settings()?.user.history.enabled
-                        ? ` Messages are retained ${settings()?.user.history.retentionDays === null ? "indefinitely" : `for ${settings()?.user.history.retentionDays} days`}.`
-                        : ""}{" "}
-                      Review privacy in Settings before connecting.
-                    </text>
-                  </box>
-                </box>
+                <Welcome history={settings()?.user.history} setup={() => openModal("settings")} />
               }
             >
               <box flexDirection="row" flexGrow={1} minHeight={0}>
                 <box flexGrow={1} minWidth={0} flexDirection="column">
-                  <box
-                    id="transcript-frame"
-                    ref={(element) => (transcriptFrame = element)}
-                    flexGrow={1}
-                    minHeight={0}
-                    flexDirection="column"
-                  >
-                    <scrollbox
-                      id="transcript"
-                      ref={(element) => (transcript = element)}
-                      flexGrow={1}
-                      minHeight={0}
-                      scrollX={false}
-                      stickyScroll
-                      stickyStart="bottom"
-                      contentOptions={{
-                        flexDirection: "column",
-                        // The scrollbar overlays the final cell; keep wrapped text clear of it.
-                        paddingRight: 1,
-                      }}
-                    >
-                      <box flexDirection="row" flexShrink={0} paddingLeft={gutterWidth() + 1}>
-                        <Button
-                          id="older"
-                          quiet
-                          label={
-                            timeline()?.loadingOlder
-                              ? "loading older messages…"
-                              : "↑ load older messages"
-                          }
-                          disabled={!!timeline()?.loadingOlder}
-                          onPress={loadOlder}
-                        />
-                      </box>
-                      <Show when={(timeline()?.messages.length ?? 0) > 300}>
-                        <box paddingLeft={gutterWidth() + 2}>
-                          <text fg={colors.muted}>
-                            Showing the latest 300 messages to keep terminal layout bounded. Use
-                            Search to reveal older context.
-                          </text>
-                        </box>
-                      </Show>
-                      <Show when={messages().length > 0 && visibleMessages().length === 0}>
-                        <box paddingLeft={gutterWidth() + 2}>
-                          <text wrapMode="word" fg={colors.muted}>
-                            Only HistServ entries are loaded. Load older for chat.
-                          </text>
-                        </box>
-                      </Show>
-                      <For each={visibleMessages()}>
-                        {(message, index) => {
-                          const previous = () => visibleMessages()[index() - 1];
-                          const unread = () => timeline()?.firstUnreadId === message.id;
-                          return (
-                            <MessageRow
-                              message={message}
-                              gutterWidth={gutterWidth()}
-                              firstUnread={unread()}
-                              spaced={settings()?.tui.density !== "compact"}
-                              continuation={
-                                !unread() &&
-                                continuesGroup(
-                                  previous() && { ...previous()!, at: messageTime(previous()!) },
-                                  { ...message, at: messageTime(message) },
-                                )
-                              }
-                              {...(previous() &&
-                              dayKey(messageTime(previous()!)) !== dayKey(messageTime(message))
-                                ? { dayLabel: `── ${formatDay(messageTime(message))} ──` }
-                                : {})}
-                              onSelect={(point) => {
-                                if (modal() || resizing() || Date.now() < ignoreClicksUntil) return;
-                                // A drag selected text: the release copies it instead.
-                                if (renderer.getSelection()?.getSelectedText()) return;
-                                openMessageMenu(message, point);
-                              }}
-                              {...(message.kind === "event"
-                                ? {}
-                                : {
-                                    onNick: (point: { x: number; y: number }) => {
-                                      if (modal() || resizing() || Date.now() < ignoreClicksUntil)
-                                        return;
-                                      openPerson(message.networkId, message.sender.nick, point);
-                                    },
-                                  })}
-                            />
-                          );
-                        }}
-                      </For>
-                    </scrollbox>
-                    <box
-                      id="transcript-divider"
-                      position="absolute"
-                      left={gutterWidth()}
-                      top={0}
-                      width={1}
-                      height="100%"
-                      border={["left"]}
-                      borderColor={
-                        railHot() || resizing() === "author" ? colors.accent : colors.border
-                      }
-                      zIndex={1}
-                      onMouseOver={() => setRailHot(true)}
-                      onMouseOut={() => setRailHot(false)}
-                      onMouseDown={(event) => {
-                        event.preventDefault();
-                        setRailHot(false);
-                        setResizing("author");
-                      }}
-                    />
-                  </box>
-                  <Show when={timeline()?.typing.length}>
-                    <box height={1} flexShrink={0} paddingX={2}>
-                      <FitText text={typingLabel()} fg={colors.muted} />
-                    </box>
-                  </Show>
-                  <Show when={reply()}>
-                    <box height={1} flexShrink={0} paddingX={2}>
-                      <text height={1} fg={colors.accent}>
-                        ↳ Replying to a message · esc to cancel
-                      </text>
-                    </box>
-                  </Show>
-                  <box
-                    id="composer-panel"
-                    height={composerRows() + 2}
-                    flexShrink={0}
-                    marginX={1}
-                    paddingX={1}
-                    flexDirection="row"
-                    border
-                    borderStyle="rounded"
-                    borderColor={
-                      !modal() && focusId() === "composer" ? colors.accent : colors.border
-                    }
-                    {...(literalDraft() ? { title: " pasted text sends literally " } : {})}
-                  >
-                    <text width={2} flexShrink={0} fg={colors.accent}>
-                      ›
-                    </text>
-                    <textarea
-                      ref={(element) => {
-                        composer = element;
-                        controls.set("composer", { layer: "main", control: element });
-                        onCleanup(() => {
-                          if (composer === element) {
-                            composer = undefined;
-                            controls.delete("composer");
-                          }
-                        });
-                      }}
-                      height={composerRows()}
-                      flexGrow={1}
-                      minWidth={0}
-                      focused={!modal() && focusId() === "composer"}
-                      onMouseDown={() => focus("composer")}
-                      initialValue={untrack(() => timeline()?.draft ?? "")}
-                      placeholder={`Message ${active()?.name ?? ""}`}
-                      wrapMode="word"
-                      backgroundColor={colors.bg}
-                      focusedBackgroundColor={colors.bg}
-                      textColor={colors.text}
-                      onContentChange={syncDraft}
-                      keyBindings={[
-                        { name: "return", action: "submit" },
-                        { name: "return", shift: true, action: "newline" },
-                      ]}
-                      onSubmit={() => void send()}
-                    />
-                  </box>
+                  <Transcript
+                    messages={visibleMessages()}
+                    gutterWidth={gutterWidth()}
+                    timeline={timeline()}
+                    spaced={settings()?.tui.density !== "compact"}
+                    truncated={truncatedWindow()}
+                    onlyHistServ={onlyHistServ()}
+                    resizingRail={resizing() === "author"}
+                    frameRef={(element) => (transcriptFrame = element)}
+                    scrollRef={(element) => (transcript = element)}
+                    loadOlder={loadOlder}
+                    select={(message, point) => {
+                      // A drag selected text: the release copies it instead.
+                      if (clicksBlocked() || renderer.getSelection()?.getSelectedText()) return;
+                      openMessageMenu(message, point);
+                    }}
+                    nick={(message, point) => {
+                      if (!clicksBlocked())
+                        openPerson(message.networkId, message.sender.nick, point);
+                    }}
+                    startRailDrag={() => setResizing("author")}
+                  />
+                  <Composer
+                    typing={typingNotice()}
+                    replying={!!reply()}
+                    rows={composerRows()}
+                    focused={composerFocused()}
+                    literal={literalDraft()}
+                    placeholder={`Message ${active()?.name ?? ""}`}
+                    initialDraft={timeline()?.draft ?? ""}
+                    textareaRef={(element) => {
+                      composer = element;
+                      controls.set("composer", { layer: "main", control: element });
+                      onCleanup(() => {
+                        if (composer === element) {
+                          composer = undefined;
+                          controls.delete("composer");
+                        }
+                      });
+                    }}
+                    focus={() => focus("composer")}
+                    change={syncDraft}
+                    submit={() => void send()}
+                  />
                 </box>
                 <Show when={showMembers()}>
                   <Splitter
@@ -1788,168 +1371,57 @@ function Shell(props: UiOptions) {
                     active={resizing() === "members"}
                     onStart={() => setResizing("members")}
                   />
-                  <scrollbox
-                    id="members"
+                  <MemberList
+                    members={sortedMembers()}
+                    total={timeline()?.members.length ?? 0}
                     width={memberWidth()}
-                    flexShrink={0}
-                    contentOptions={{ flexDirection: "column", paddingX: 1 }}
-                    scrollX={false}
-                  >
-                    <text height={1} flexShrink={0} fg={colors.muted}>
-                      PEOPLE · {timeline()?.members.length ?? 0}
-                    </text>
-                    <For each={sortedMembers()}>
-                      {(member) => (
-                        <box
-                          height={1}
-                          flexShrink={0}
-                          flexDirection="row"
-                          onMouseUp={(event) => {
-                            const net = network();
-                            if (!net || modal() || resizing() || Date.now() < ignoreClicksUntil)
-                              return;
-                            openPerson(net.id, member.nick, { x: event.x, y: event.y });
-                          }}
-                        >
-                          <FitText
-                            text={`${member.prefixes[0] ?? " "}${member.nick}`}
-                            fg={member.away ? colors.muted : nicknameColor(member.nick, theme())}
-                          />
-                        </box>
-                      )}
-                    </For>
-                  </scrollbox>
+                    pick={(nick, point) => {
+                      const net = network();
+                      if (net && !clicksBlocked()) openPerson(net.id, nick, point);
+                    }}
+                  />
                 </Show>
               </box>
             </Show>
           </box>
         </box>
-        <box
-          id="status-bar"
-          height={1}
-          flexShrink={0}
-          paddingX={2}
-          flexDirection="row"
-          backgroundColor={colors.panel}
-        >
-          <box flexGrow={1} minWidth={0}>
-            <Show
-              when={footerMessage()}
-              fallback={
-                <KeyHints
-                  hints={footerHints()}
-                  maxWidth={
-                    dimensions().width -
-                    6 -
-                    (network() ? network()!.nick.length + 14 : 0) -
-                    (!atBottom() || timeline()?.atLatest === false ? 10 : 0)
-                  }
-                />
-              }
-            >
-              <box height={1} flexDirection="row">
-                <FitText text={footerMessage() ?? ""} fg={colors.error} />
-              </box>
-            </Show>
-          </box>
-          <Show when={!atBottom() || timeline()?.atLatest === false}>
-            <Button id="latest" quiet label="↓ latest" onPress={() => void jumpLatest()} />
-          </Show>
-          <Show when={network()}>
-            <text flexShrink={0} height={1} fg={colors.muted}>
-              {"  "}
-              {network()!.nick}
-              <Show when={network()!.phase === "ready" && !network()!.secure}>
-                <span style={{ fg: colors.yellow }}> · plaintext</span>
-              </Show>
-              <span style={{ fg: phaseColor(network()!.phase) }}> ●</span>
-            </text>
-          </Show>
-        </box>
+        <StatusBar
+          message={footerMessage()}
+          hints={footerHints(modal(), modal() === "message" && menuPage() !== "main")}
+          width={dimensions().width}
+          network={network()}
+          behind={behind()}
+          jumpLatest={() => void jumpLatest()}
+        />
         <Show when={modal() === "message" && currentMessage()}>
-          <Popover
+          <MessageMenu
             anchor={anchor()}
             screenWidth={dimensions().width}
             screenHeight={dimensions().height}
-            width={
-              menuPage() === "links"
-                ? Math.min(64, Math.max(...messageLinks().map((url) => url.length)) + 10)
-                : 30
-            }
-            height={(menuPage() === "react" ? 1 : messageMenu().length) + 2}
             title={`${currentMessage()!.sender.nick} · ${formatMessageTime(messageTime(currentMessage()!))}`}
+            page={menuPage()}
+            entries={messageMenu()}
+            links={messageLinks()}
+            react={react}
             onClose={closeModal}
-          >
-            <Show when={menuPage() === "react"} fallback={menuItems(messageMenu())}>
-              <box flexDirection="row" height={1} paddingX={1}>
-                <For each={REACTIONS}>
-                  {(value, index) => (
-                    <Button
-                      id={`react-${index()}`}
-                      layer="modal"
-                      quiet
-                      label={value}
-                      onPress={() => react(value)}
-                    />
-                  )}
-                </For>
-              </box>
-            </Show>
-          </Popover>
+          />
         </Show>
         <Show when={modal() === "person" && person()}>
-          <Popover
+          <PersonCard
             anchor={anchor()}
             screenWidth={dimensions().width}
             screenHeight={dimensions().height}
-            width={36}
-            height={personLines().length + personMenu().length + 4}
+            nick={person()!.nick}
+            role={personRole()}
+            lines={personLines()}
+            entries={personMenu()}
             onClose={closeModal}
-          >
-            <box flexDirection="row" height={1} paddingX={1}>
-              <FitText text={person()!.nick} bold fg={nicknameColor(person()!.nick, theme())} />
-              <text flexShrink={0} fg={colors.muted}>
-                {personRole()}
-              </text>
-            </box>
-            <For each={personLines()}>
-              {([line, tone]) => (
-                <box flexDirection="row" height={1} paddingX={1}>
-                  <FitText
-                    text={line}
-                    fg={
-                      tone === "error" ? colors.error : tone === "text" ? colors.text : colors.muted
-                    }
-                  />
-                </box>
-              )}
-            </For>
-            <box height={1} border={["bottom"]} borderColor={colors.border} />
-            {menuItems(personMenu())}
-          </Popover>
+          />
         </Show>
         <Show when={modal() && !popoverOpen()}>
           <Dialog
-            title={
-              modal() === "settings"
-                ? "Settings · Add network"
-                : modal() === "paste"
-                  ? "Review paste — nothing has been sent"
-                  : modal() === "quit"
-                    ? "Disconnect and quit?"
-                    : modal() === "switch"
-                      ? "Jump to…"
-                      : modal() === "redact"
-                        ? "Remove message"
-                        : modal() === "whois"
-                          ? "Look up a person"
-                          : modal() === "messages"
-                            ? "Select a message"
-                            : modal() === "query"
-                              ? "Message someone"
-                              : `${modal()!.charAt(0).toUpperCase()}${modal()!.slice(1)}`
-            }
-            compact={["switch", "join", "query", "quit", "redact"].includes(modal() ?? "")}
+            title={dialogTitle(modal()!)}
+            compact={compactDialog(modal())}
             width={dimensions().width}
             height={dimensions().height}
             onClose={closeModal}
@@ -1976,219 +1448,68 @@ function Shell(props: UiOptions) {
               </Show>
             </Show>
             <Show when={modal() === "help"}>
-              <Show when={!helpCommand()}>
-                <box flexDirection="column" flexShrink={0}>
-                  <text fg={colors.accent}>
-                    <b>Keys</b>
-                  </text>
-                  <For each={HELP_KEYS}>
-                    {([key, description]) => (
-                      <box flexDirection="row" height={1} flexShrink={0}>
-                        <text width={12} flexShrink={0} fg={colors.text}>
-                          {key}
-                        </text>
-                        <FitText text={description} fg={colors.muted} />
-                      </box>
-                    )}
-                  </For>
-                </box>
-              </Show>
-              <box flexDirection="column" flexShrink={0}>
-                <text fg={colors.accent}>
-                  <b>Commands</b>
-                </text>
-                <For each={props.commands.help(helpCommand())}>
-                  {(entry) => (
-                    <box flexDirection="row" flexShrink={0}>
-                      <text width={24} flexShrink={0} fg={colors.text}>
-                        {entry.usage}
-                      </text>
-                      <text flexGrow={1} minWidth={0} wrapMode="word" fg={colors.muted}>
-                        {entry.description}
-                      </text>
-                    </box>
-                  )}
-                </For>
-              </box>
+              <HelpPanel commands={props.commands} command={helpCommand()} />
             </Show>
             <Show when={modal() === "join" || modal() === "query"}>
-              <text fg={colors.muted}>
-                Network: {network()?.name ?? "add a network in Settings first"}
-              </text>
-              <Field
-                id="dialog-input"
-                label={modal() === "join" ? "Channel name" : "Nickname"}
+              <TargetForm
+                kind={modal() === "query" ? "query" : "join"}
+                networkName={network()?.name}
                 value={formText()}
                 onInput={setFormText}
-                placeholder={modal() === "join" ? "#welcome" : "nickname"}
-              />
-              <Button
-                id="target-submit"
-                layer="modal"
-                label={modal() === "join" ? "Join channel" : "Start conversation"}
-                onPress={() => void submitTarget()}
+                submit={() => void submitTarget()}
               />
             </Show>
             <Show when={modal() === "switch"}>
-              <Field
-                id="dialog-input"
-                label="Filter"
-                hideLabel
-                placeholder="Type a channel, person, or action…"
-                value={formText()}
-                onInput={setFormText}
+              <CommandPalette
+                filter={formText()}
+                onFilter={setFormText}
+                entries={filteredPalette()}
+                selected={paletteIndex()}
               />
-              <box flexDirection="column" flexShrink={0}>
-                <For each={filteredPalette()}>
-                  {(entry, index) => (
-                    <>
-                      <Show when={filteredPalette()[index() - 1]?.group !== entry.group}>
-                        <box height={1} flexShrink={0} paddingX={1} marginTop={index() ? 1 : 0}>
-                          <text fg={colors.muted}>{entry.group}</text>
-                        </box>
-                      </Show>
-                      <ListItem
-                        id={entry.id}
-                        layer="modal"
-                        label={entry.label}
-                        {...(entry.hint ? { hint: entry.hint } : {})}
-                        active={index() === paletteIndex()}
-                        onPress={entry.run}
-                      />
-                    </>
-                  )}
-                </For>
-                <Show when={!filteredPalette().length}>
-                  <text fg={colors.muted}>Nothing matches. Try /join or /msg in the composer.</text>
-                </Show>
-              </box>
             </Show>
             <Show when={modal() === "search"}>
-              <Field
-                id="dialog-input"
-                label="Search local history (all conversations)"
-                hideLabel
-                placeholder="Search all conversations, then press enter…"
-                value={formText()}
-                onInput={setFormText}
+              <SearchPanel
+                query={formText()}
+                onQuery={setFormText}
+                searching={searching()}
+                results={results()}
+                search={() => void search()}
+                conversationName={conversationName}
+                reveal={revealResult}
               />
-              <box flexDirection="row" flexShrink={0} height={1} justifyContent="space-between">
-                <text fg={colors.muted}>
-                  {searching()
-                    ? "Searching…"
-                    : results().length
-                      ? `${results().length}${results().length === 50 ? "+" : ""} result${results().length === 1 ? "" : "s"} · enter to reveal in context`
-                      : "Up to 50 results from local history."}
-                </text>
-                <Button
-                  id="search-submit"
-                  layer="modal"
-                  quiet
-                  label="search"
-                  disabled={searching()}
-                  onPress={() => void search()}
-                />
-              </box>
-              <box flexDirection="column" flexShrink={0}>
-                <For each={results()}>
-                  {(message) => (
-                    <ListItem
-                      id={`result-${message.id}`}
-                      layer="modal"
-                      label={`${message.sender.nick}: ${message.text}`}
-                      hint={`${state().conversations.find((item) => item.id === message.conversationId)?.name ?? ""} ${formatMessageTime(messageTime(message))}`.trim()}
-                      onPress={() => {
-                        void run({ type: "history.reveal", messageId: message.id }).then(
-                          (result) => {
-                            if (result.ok) {
-                              if (isHistServMessage(message)) setRevealHistServ(true);
-                              setReveal(message.id);
-                              closeToComposer();
-                            }
-                          },
-                        );
-                      }}
-                    />
-                  )}
-                </For>
-              </box>
             </Show>
             <Show when={modal() === "paste"}>
-              <text fg={colors.muted}>
-                This paste will be inserted into the draft as literal text, not executed as slash
-                commands. You must still press Send.
-              </text>
-              <text selectable fg={colors.text}>
-                {paste().slice(0, 4_000)}
-                {paste().length > 4_000 ? "\n[preview truncated]" : ""}
-              </text>
-              <Button
-                id="paste-insert"
-                layer="modal"
-                label="Insert into draft (do not send)"
-                onPress={insertPaste}
-              />
+              <PasteReview text={paste()} insert={insertPaste} />
             </Show>
-            <Show when={(modal() === "directory" || modal() === "whois") && discoveryNetwork()}>
+            <Show when={discoveryMode() && discoveryNetwork()}>
               <DiscoveryPanel
                 app={props.app}
                 networkId={discoveryNetwork()!}
-                networkName={
-                  state().networks.find((item) => item.id === discoveryNetwork())?.name ??
-                  "Selected network"
-                }
-                mode={modal() === "directory" ? "directory" : "whois"}
+                networkName={networkName(discoveryNetwork()!) ?? "Selected network"}
+                mode={discoveryMode()!}
                 requestedNick={requestedNick()}
                 dispatch={async (action) => (await run(action)).ok}
                 close={closeToComposer}
               />
             </Show>
             <Show when={modal() === "messages"}>
-              <text fg={colors.muted}>
-                Select a message for copy, person details, or supported reply/reaction/removal
-                actions.
-              </text>
-              <For each={visibleMessages()}>
-                {(message) => (
-                  <Button
-                    id={`pick-${message.id}`}
-                    layer="modal"
-                    label={`${message.sender.nick}: ${message.redacted ? "[message removed]" : message.text.slice(0, 100)}`}
-                    onPress={() => openMessageMenu(message)}
-                  />
-                )}
-              </For>
+              <MessagePicker
+                messages={visibleMessages()}
+                pick={(message) => openMessageMenu(message)}
+              />
             </Show>
             <Show when={modal() === "redact"}>
-              <text fg={colors.error}>
-                Remove your message from this conversation? This cannot be undone. Other clients,
-                server history, exports, or logs may still retain a copy.
-              </text>
-              <Button
-                id="redact-confirm"
-                layer="modal"
-                label={redacting() ? "Requesting removal…" : "Yes, remove my message"}
-                disabled={
-                  redacting() ||
-                  !messages().some(
-                    (message) => message.id === selectedMessage()?.id && canRedact(message),
-                  )
-                }
-                onPress={() => void redact()}
+              <RedactConfirm
+                busy={redacting()}
+                allowed={messages().some(
+                  (message) => message.id === selectedMessage()?.id && canRedact(message),
+                )}
+                confirm={() => void redact()}
+                cancel={closeModal}
               />
-              <Button id="redact-cancel" layer="modal" label="Keep message" onPress={closeModal} />
             </Show>
             <Show when={modal() === "quit"}>
-              <text fg={colors.text}>
-                opentui-irc will close its connections and flush local history. It does not remain
-                connected in the background.
-              </text>
-              <Button
-                id="quit-confirm"
-                layer="modal"
-                label="Disconnect and quit"
-                onPress={() => void quit()}
-              />
+              <QuitConfirm quit={() => void quit()} />
             </Show>
             <Show when={status()}>
               <text fg={colors.error}>{status()}</text>

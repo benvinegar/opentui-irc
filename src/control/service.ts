@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import type { AppApi } from "../contracts/app";
-import type { Result } from "../contracts/common";
+import type { ConfigRevision, Result } from "../contracts/common";
 import type {
   ControlError,
   ControlHandler,
+  ControlMethod,
   ControlPermission,
   ControlRequest,
   ControlResponse,
@@ -15,7 +16,12 @@ import {
   CONTROL_METHODS,
   DEFAULT_CONTROL_PERMISSIONS,
 } from "../contracts/control";
-import type { SecretProvider, SettingsDocument, SettingsRepository } from "../contracts/settings";
+import type {
+  SecretProvider,
+  SettingsChange,
+  SettingsDocument,
+  SettingsRepository,
+} from "../contracts/settings";
 import type { SearchQuery } from "../contracts/storage";
 import { secretReference } from "../storage/validation";
 import { actionSchema, parseAppAction, permissionsForAction } from "./actions";
@@ -117,259 +123,249 @@ export function createControlService(options: ControlServiceOptions): ControlHan
       );
     return expected;
   };
+  /** Parameterless read-only methods share the same admission checks. */
+  const inspect = (request: ControlRequest) => {
+    fields(request.params, []);
+    requireRights(request, ["inspect"]);
+  };
+  const confirmFlag = (params: Record<string, unknown>) => {
+    if (params.confirm !== undefined) boolean(params.confirm);
+  };
+  /** Validate and plan a config edit against the current read model. */
+  const planConfig = async (request: ControlRequest, signal: AbortSignal) => {
+    const params = fields(request.params, ["edit", "expectedRevision"], ["confirm"]);
+    confirmFlag(params);
+    requireRights(request, ["inspect"]);
+    const current = await settings(signal);
+    const expected = checkRevision(current, params.expectedRevision);
+    const edit = unwrap(parseConfigEdit(params.edit));
+    const plan = unwrap(prepareConfigChange(current, edit));
+    return { params, expected, plan };
+  };
+  const saveConfig = async (
+    change: SettingsChange,
+    expected: ConfigRevision,
+    signal: AbortSignal,
+  ): Promise<{ saved: SettingsDocument; operationId?: string }> => {
+    if (!options.app)
+      return { saved: unwrap(await options.settings.save(change, expected, signal)) };
+    const operationId = unwrap(await options.app.saveSettings(change, expected, signal));
+    const saved = options.app.settings.getSnapshot();
+    if (!saved) fail("unavailable", "Settings are not ready.");
+    return { saved, operationId };
+  };
+  const applyConfig = async (request: ControlRequest, signal: AbortSignal) => {
+    const { params, expected, plan } = await planConfig(request, signal);
+    requireRights(request, ["configure", ...plan.requiredPermissions]);
+    if (plan.requiredPermissions.includes("destructive")) confirm(params.confirm);
+    // Even a no-op must not accidentally ignore external file changes hidden by the live read model.
+    checkRevision(unwrap(await options.settings.load(signal)), expected);
+    if (signal.aborted) fail("cancelled", "Control request cancelled before save.");
+    // Planning must still describe the live base after an asynchronous disk check.
+    if (options.app) {
+      const liveSettings = options.app.settings.getSnapshot();
+      if (!liveSettings) fail("unavailable", "Settings are not ready.");
+      checkRevision(liveSettings, expected);
+    }
+    if (!plan.changed) return { applied: false, revision: expected, plan };
+    const { saved, operationId } = await saveConfig(plan.change, expected, signal);
+    return {
+      applied: true,
+      revision: saved.revision,
+      plan,
+      ...(operationId ? { operationId } : {}),
+    };
+  };
+  const reloadConfig = async (request: ControlRequest, signal: AbortSignal) => {
+    const params = fields(request.params, [], ["dryRun", "expectedRevision", "confirm"]);
+    confirmFlag(params);
+    if (params.dryRun !== undefined) boolean(params.dryRun);
+    requireRights(request, ["inspect"]);
+    const disk = unwrap(await options.settings.load(signal));
+    if (signal.aborted) fail("cancelled", "Control request cancelled before reload.");
+    if (!options.app) return { applied: false, revision: disk.revision, mode: "offline" };
+    const current = await settings(signal);
+    const plans = [
+      unwrap(prepareConfigChange(current, { section: "user", value: jsonObjectCopy(disk.user) })),
+      unwrap(prepareConfigChange(current, { section: "tui", value: jsonObjectCopy(disk.tui) })),
+    ];
+    if (params.dryRun === true)
+      return { revision: disk.revision, liveRevision: current.revision, plans };
+    if (params.dryRun !== undefined) boolean(params.dryRun);
+    checkRevision(disk, params.expectedRevision);
+    const rights = [...new Set(plans.flatMap((plan) => plan.requiredPermissions))];
+    requireRights(request, ["configure", ...rights]);
+    if (rights.includes("destructive")) confirm(params.confirm);
+    if (signal.aborted) fail("cancelled", "Control request cancelled before reload.");
+    const operationId = unwrap(
+      await options.app.reloadSettings(disk.revision, current.revision, signal),
+    );
+    return { applied: true, revision: disk.revision, plans, operationId };
+  };
+  const searchQuery = (params: Record<string, unknown>): SearchQuery => ({
+    text: string(params.text, 4096),
+    limit: params.limit === undefined ? 50 : integer(params.limit, 1, 100),
+    ...(params.networkId !== undefined ? { networkId: opaqueId<"network">(params.networkId) } : {}),
+    ...(params.conversationId !== undefined
+      ? { conversationId: opaqueId<"conversation">(params.conversationId) }
+      : {}),
+    ...(params.sender !== undefined ? { sender: string(params.sender, 512) } : {}),
+    ...(params.after !== undefined
+      ? { after: integer(params.after, 0, Number.MAX_SAFE_INTEGER) }
+      : {}),
+    ...(params.before !== undefined
+      ? { before: integer(params.before, 0, Number.MAX_SAFE_INTEGER) }
+      : {}),
+    ...(params.cursor !== undefined ? { cursor: opaqueId<"cursor">(params.cursor, 16384) } : {}),
+  });
+  const storeSecret = async (value: string, signal: AbortSignal) =>
+    options.app
+      ? unwrap(await options.app.storeSecret(value, signal))
+      : unwrap(await options.secrets.store(value, signal));
+  /** One handler per method; each returns the result payload or throws a ControlFault. */
+  const handlers: Readonly<
+    Record<ControlMethod, (request: ControlRequest, signal: AbortSignal) => Promise<unknown>>
+  > = {
+    capabilities: async (request) => {
+      fields(request.params, []);
+      return {
+        protocolVersion: 1,
+        mode: options.app ? "live" : "offline",
+        permissions: allowed,
+        availablePermissions: ALL_CONTROL_PERMISSIONS,
+        methods: CONTROL_METHODS,
+        limits: {
+          maxRequestBytes: 1048576,
+          maxResponseBytes: 4194304,
+          replayEntries: REPLAY_LIMIT,
+          replayMaxBytes: REPLAY_MAX_BYTES,
+          replayTtlMs: REPLAY_TTL_MS,
+          replayDurable: false,
+        },
+        schemas: { settings: configurationSchema(), action: actionSchema() },
+        notes: [
+          "Secret references are visible; resolved credentials are never returned.",
+          "Local configure plus network authority can repoint a credential reference to another host and connect. This is same-UID consent, not a secret-vault sandbox.",
+          "Message/draft reads, sends, and destructive work require separate explicit permissions.",
+          "No automatic mutation retries. Replay protection is bounded and not durable across restart.",
+          "Offline mode never connects to IRC or opens local message history.",
+        ],
+      };
+    },
+    "config.schema": async (request) => {
+      fields(request.params, []);
+      return configurationSchema();
+    },
+    status: async (request) => {
+      inspect(request);
+      const state = options.app?.state.getSnapshot();
+      return {
+        running: !!state,
+        boot: state?.boot ?? "offline",
+        revision: state?.revision ?? 0,
+        networks:
+          state?.networks.map(({ lastError, ...network }) => ({
+            ...network,
+            ...(lastError ? { errorCode: lastError.code } : {}),
+          })) ?? [],
+        activeConversationId: state?.activeConversationId ?? null,
+        ...(state?.error ? { errorCode: state.error.code } : {}),
+        permissions: allowed,
+      };
+    },
+    "config.get": async (request, signal) => {
+      inspect(request);
+      return settings(signal);
+    },
+    "config.plan": async (request, signal) => (await planConfig(request, signal)).plan,
+    "config.apply": applyConfig,
+    "config.reload": reloadConfig,
+    "networks.list": async (request, signal) => {
+      inspect(request);
+      return (await settings(signal)).user.networks;
+    },
+    "conversations.list": async (request) => {
+      inspect(request);
+      return live()
+        .state.getSnapshot()
+        .conversations.map(({ topic: _topic, ...conversation }) => conversation);
+    },
+    "operations.list": async (request) => {
+      inspect(request);
+      return live()
+        .operations.getSnapshot()
+        .map(({ error, ...operation }) => ({
+          ...operation,
+          ...(error ? { errorCode: error.code } : {}),
+        }));
+    },
+    "action.dispatch": async (request, signal) => {
+      const params = fields(request.params, ["action"], ["confirm"]);
+      confirmFlag(params);
+      const action = unwrap(parseAppAction(params.action));
+      const rights = permissionsForAction(action);
+      requireRights(request, rights);
+      if (rights.includes("destructive")) confirm(params.confirm);
+      return unwrap(await live().dispatch(action, signal));
+    },
+    "timeline.get": async (request) => {
+      const params = fields(request.params, ["conversationId"]);
+      requireRights(request, ["read-messages"]);
+      return unwrap(live().timeline(opaqueId<"conversation">(params.conversationId))).getSnapshot();
+    },
+    "history.search": async (request, signal) => {
+      const params = fields(
+        request.params,
+        ["text"],
+        ["networkId", "conversationId", "sender", "after", "before", "cursor", "limit"],
+      );
+      requireRights(request, ["read-messages"]);
+      return unwrap(await live().search(searchQuery(params), signal));
+    },
+    "discovery.get": async (request) => {
+      const params = fields(request.params, ["networkId"]);
+      requireRights(request, ["inspect"]);
+      const snapshot = unwrap(
+        live().discovery(opaqueId<"network">(params.networkId)),
+      ).getSnapshot();
+      const { error: directoryError, ...directory } = snapshot.directory;
+      const { error: userError, ...user } = snapshot.user;
+      return {
+        networkId: snapshot.networkId,
+        directory: {
+          ...directory,
+          ...(directoryError ? { errorCode: directoryError.code } : {}),
+        },
+        user: { ...user, ...(userError ? { errorCode: userError.code } : {}) },
+      };
+    },
+    "secrets.store": async (request, signal) => {
+      const params = fields(request.params, ["value"]);
+      requireRights(request, ["configure"]);
+      const value = string(params.value, 65536);
+      if (!value || Buffer.byteLength(value) > 65536)
+        fail("invalid-input", "Credential input must contain 1–65536 UTF-8 bytes.");
+      const reference = await storeSecret(value, signal);
+      if (!secretReference(reference))
+        fail("internal", "Secret storage did not return a valid reference.");
+      return { reference };
+    },
+    "app.shutdown": async (request) => {
+      const params = fields(request.params, ["confirm"]);
+      requireRights(request, ["destructive"]);
+      confirm(params.confirm);
+      live();
+      // Composition root acts only after the socket response is flushed.
+      return { accepted: true };
+    },
+  };
   const execute = async (
     request: ControlRequest,
     signal: AbortSignal,
   ): Promise<ControlResponse> => {
     try {
       if (signal.aborted) fail("cancelled", "Control request cancelled before admission.");
-      switch (request.method) {
-        case "capabilities": {
-          fields(request.params, []);
-          return SUCCESS(request.id, {
-            protocolVersion: 1,
-            mode: options.app ? "live" : "offline",
-            permissions: allowed,
-            availablePermissions: ALL_CONTROL_PERMISSIONS,
-            methods: CONTROL_METHODS,
-            limits: {
-              maxRequestBytes: 1048576,
-              maxResponseBytes: 4194304,
-              replayEntries: REPLAY_LIMIT,
-              replayMaxBytes: REPLAY_MAX_BYTES,
-              replayTtlMs: REPLAY_TTL_MS,
-              replayDurable: false,
-            },
-            schemas: { settings: configurationSchema(), action: actionSchema() },
-            notes: [
-              "Secret references are visible; resolved credentials are never returned.",
-              "Local configure plus network authority can repoint a credential reference to another host and connect. This is same-UID consent, not a secret-vault sandbox.",
-              "Message/draft reads, sends, and destructive work require separate explicit permissions.",
-              "No automatic mutation retries. Replay protection is bounded and not durable across restart.",
-              "Offline mode never connects to IRC or opens local message history.",
-            ],
-          });
-        }
-        case "config.schema":
-          fields(request.params, []);
-          return SUCCESS(request.id, configurationSchema());
-        case "status": {
-          fields(request.params, []);
-          requireRights(request, ["inspect"]);
-          const state = options.app?.state.getSnapshot();
-          return SUCCESS(request.id, {
-            running: !!state,
-            boot: state?.boot ?? "offline",
-            revision: state?.revision ?? 0,
-            networks:
-              state?.networks.map(({ lastError, ...network }) => ({
-                ...network,
-                ...(lastError ? { errorCode: lastError.code } : {}),
-              })) ?? [],
-            activeConversationId: state?.activeConversationId ?? null,
-            ...(state?.error ? { errorCode: state.error.code } : {}),
-            permissions: allowed,
-          });
-        }
-        case "config.get":
-          fields(request.params, []);
-          requireRights(request, ["inspect"]);
-          return SUCCESS(request.id, await settings(signal));
-        case "config.plan":
-        case "config.apply": {
-          const params = fields(request.params, ["edit", "expectedRevision"], ["confirm"]);
-          if (params.confirm !== undefined) boolean(params.confirm);
-          requireRights(request, ["inspect"]);
-          const current = await settings(signal);
-          const expected = checkRevision(current, params.expectedRevision);
-          const edit = unwrap(parseConfigEdit(params.edit));
-          const plan = unwrap(prepareConfigChange(current, edit));
-          if (request.method === "config.plan") return SUCCESS(request.id, plan);
-          requireRights(request, ["configure", ...plan.requiredPermissions]);
-          if (plan.requiredPermissions.includes("destructive")) confirm(params.confirm);
-          // Even a no-op must not accidentally ignore external file changes hidden by the live read model.
-          checkRevision(unwrap(await options.settings.load(signal)), expected);
-          if (signal.aborted) fail("cancelled", "Control request cancelled before save.");
-          // Planning must still describe the live base after an asynchronous disk check.
-          if (options.app) {
-            const liveSettings = options.app.settings.getSnapshot();
-            if (!liveSettings) fail("unavailable", "Settings are not ready.");
-            checkRevision(liveSettings, expected);
-          }
-          if (!plan.changed)
-            return SUCCESS(request.id, { applied: false, revision: expected, plan });
-          let operationId: string | undefined;
-          let saved: SettingsDocument;
-          if (options.app) {
-            operationId = unwrap(await options.app.saveSettings(plan.change, expected, signal));
-            const current = options.app.settings.getSnapshot();
-            if (!current) fail("unavailable", "Settings are not ready.");
-            saved = current;
-          } else saved = unwrap(await options.settings.save(plan.change, expected, signal));
-          return SUCCESS(request.id, {
-            applied: true,
-            revision: saved.revision,
-            plan,
-            ...(operationId ? { operationId } : {}),
-          });
-        }
-        case "config.reload": {
-          const params = fields(request.params, [], ["dryRun", "expectedRevision", "confirm"]);
-          if (params.confirm !== undefined) boolean(params.confirm);
-          if (params.dryRun !== undefined) boolean(params.dryRun);
-          requireRights(request, ["inspect"]);
-          const disk = unwrap(await options.settings.load(signal));
-          if (signal.aborted) fail("cancelled", "Control request cancelled before reload.");
-          if (!options.app)
-            return SUCCESS(request.id, {
-              applied: false,
-              revision: disk.revision,
-              mode: "offline",
-            });
-          const current = await settings(signal);
-          const plans = [
-            unwrap(
-              prepareConfigChange(current, { section: "user", value: jsonObjectCopy(disk.user) }),
-            ),
-            unwrap(
-              prepareConfigChange(current, { section: "tui", value: jsonObjectCopy(disk.tui) }),
-            ),
-          ];
-          if (params.dryRun === true)
-            return SUCCESS(request.id, {
-              revision: disk.revision,
-              liveRevision: current.revision,
-              plans,
-            });
-          if (params.dryRun !== undefined) boolean(params.dryRun);
-          checkRevision(disk, params.expectedRevision);
-          const rights = [...new Set(plans.flatMap((plan) => plan.requiredPermissions))];
-          requireRights(request, ["configure", ...rights]);
-          if (rights.includes("destructive")) confirm(params.confirm);
-          if (signal.aborted) fail("cancelled", "Control request cancelled before reload.");
-          const operationId = unwrap(
-            await options.app.reloadSettings(disk.revision, current.revision, signal),
-          );
-          return SUCCESS(request.id, {
-            applied: true,
-            revision: disk.revision,
-            plans,
-            operationId,
-          });
-        }
-        case "networks.list": {
-          fields(request.params, []);
-          requireRights(request, ["inspect"]);
-          return SUCCESS(request.id, (await settings(signal)).user.networks);
-        }
-        case "conversations.list": {
-          fields(request.params, []);
-          requireRights(request, ["inspect"]);
-          return SUCCESS(
-            request.id,
-            live()
-              .state.getSnapshot()
-              .conversations.map(({ topic: _topic, ...conversation }) => conversation),
-          );
-        }
-        case "operations.list": {
-          fields(request.params, []);
-          requireRights(request, ["inspect"]);
-          return SUCCESS(
-            request.id,
-            live()
-              .operations.getSnapshot()
-              .map(({ error, ...operation }) => ({
-                ...operation,
-                ...(error ? { errorCode: error.code } : {}),
-              })),
-          );
-        }
-        case "action.dispatch": {
-          const params = fields(request.params, ["action"], ["confirm"]);
-          if (params.confirm !== undefined) boolean(params.confirm);
-          const action = unwrap(parseAppAction(params.action));
-          const rights = permissionsForAction(action);
-          requireRights(request, rights);
-          if (rights.includes("destructive")) confirm(params.confirm);
-          return SUCCESS(request.id, unwrap(await live().dispatch(action, signal)));
-        }
-        case "timeline.get": {
-          const params = fields(request.params, ["conversationId"]);
-          requireRights(request, ["read-messages"]);
-          return SUCCESS(
-            request.id,
-            unwrap(live().timeline(opaqueId<"conversation">(params.conversationId))).getSnapshot(),
-          );
-        }
-        case "history.search": {
-          const params = fields(
-            request.params,
-            ["text"],
-            ["networkId", "conversationId", "sender", "after", "before", "cursor", "limit"],
-          );
-          requireRights(request, ["read-messages"]);
-          const query: SearchQuery = {
-            text: string(params.text, 4096),
-            limit: params.limit === undefined ? 50 : integer(params.limit, 1, 100),
-            ...(params.networkId !== undefined
-              ? { networkId: opaqueId<"network">(params.networkId) }
-              : {}),
-            ...(params.conversationId !== undefined
-              ? { conversationId: opaqueId<"conversation">(params.conversationId) }
-              : {}),
-            ...(params.sender !== undefined ? { sender: string(params.sender, 512) } : {}),
-            ...(params.after !== undefined
-              ? { after: integer(params.after, 0, Number.MAX_SAFE_INTEGER) }
-              : {}),
-            ...(params.before !== undefined
-              ? { before: integer(params.before, 0, Number.MAX_SAFE_INTEGER) }
-              : {}),
-            ...(params.cursor !== undefined
-              ? { cursor: opaqueId<"cursor">(params.cursor, 16384) }
-              : {}),
-          };
-          return SUCCESS(request.id, unwrap(await live().search(query, signal)));
-        }
-        case "discovery.get": {
-          const params = fields(request.params, ["networkId"]);
-          requireRights(request, ["inspect"]);
-          const snapshot = unwrap(
-            live().discovery(opaqueId<"network">(params.networkId)),
-          ).getSnapshot();
-          const { error: directoryError, ...directory } = snapshot.directory;
-          const { error: userError, ...user } = snapshot.user;
-          return SUCCESS(request.id, {
-            networkId: snapshot.networkId,
-            directory: {
-              ...directory,
-              ...(directoryError ? { errorCode: directoryError.code } : {}),
-            },
-            user: { ...user, ...(userError ? { errorCode: userError.code } : {}) },
-          });
-        }
-        case "secrets.store": {
-          const params = fields(request.params, ["value"]);
-          requireRights(request, ["configure"]);
-          const value = string(params.value, 65536);
-          if (!value || Buffer.byteLength(value) > 65536)
-            fail("invalid-input", "Credential input must contain 1–65536 UTF-8 bytes.");
-          const reference = options.app
-            ? unwrap(await options.app.storeSecret(value, signal))
-            : unwrap(await options.secrets.store(value, signal));
-          if (!secretReference(reference))
-            fail("internal", "Secret storage did not return a valid reference.");
-          return SUCCESS(request.id, { reference });
-        }
-        case "app.shutdown": {
-          const params = fields(request.params, ["confirm"]);
-          requireRights(request, ["destructive"]);
-          confirm(params.confirm);
-          live();
-          // Composition root acts only after the socket response is flushed.
-          return SUCCESS(request.id, { accepted: true });
-        }
-      }
+      return SUCCESS(request.id, await handlers[request.method](request, signal));
     } catch (cause) {
       const detail: ControlError =
         cause instanceof ControlFault
