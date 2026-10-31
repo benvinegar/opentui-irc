@@ -34,6 +34,23 @@ Screenshots come from a local test server with made-up users.
 
 ## Install
 
+### Download a release
+
+Prebuilt binaries for Linux and macOS (x64 and arm64) are attached to each [GitHub release](https://github.com/benvinegar/opentui-irc/releases). They need neither Bun nor the source.
+
+```sh
+# pick linux or darwin, x64 or arm64, and the version you want
+curl -LO https://github.com/benvinegar/opentui-irc/releases/download/v0.1.0/opentui-irc-0.1.0-darwin-arm64.tar.gz
+tar -xzf opentui-irc-0.1.0-darwin-arm64.tar.gz
+install opentui-irc-0.1.0-darwin-arm64/openirc ~/.local/bin/   # or anywhere on your PATH
+```
+
+Each release includes a `SHA256SUMS` file; check a download with `sha256sum -c SHA256SUMS --ignore-missing` (`shasum -a 256 -c SHA256SUMS --ignore-missing` on macOS).
+
+**macOS:** the binaries are not signed or notarized. If Gatekeeper refuses to open `openirc` (typically after downloading it with a browser), clear the quarantine flag once: `xattr -d com.apple.quarantine ~/.local/bin/openirc`.
+
+### From source
+
 Requires [Bun](https://bun.sh) 1.3.14 or newer.
 
 ```sh
