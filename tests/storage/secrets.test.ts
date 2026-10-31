@@ -99,3 +99,85 @@ describe("credential references", () => {
     expect(set).not.toHaveBeenCalled();
   });
 });
+
+describe("OS vault edge cases", () => {
+  const reference = entityId<"secret-ref">("keychain:00000000-0000-0000-0000-000000000000");
+  test("a missing, rejected or throwing vault lookup is unavailable without leaking details", async () => {
+    const get = vi.fn(async (): Promise<string | null> => null);
+    vi.stubGlobal("Bun", { secrets: { get } });
+    const provider = createSecretProvider();
+    expect(await provider.resolve(reference, signal)).toMatchObject({
+      ok: false,
+      error: { code: "unavailable", message: expect.stringContaining("not available") },
+    });
+    expect(get).toHaveBeenCalledWith({
+      service: "org.openirc.credentials",
+      name: "00000000-0000-0000-0000-000000000000",
+    });
+    get.mockImplementationOnce(async () => {
+      throw new Error("private-test-value");
+    });
+    const rejected = await provider.resolve(reference, signal);
+    expect(rejected).toMatchObject({ ok: false, error: { code: "unavailable" } });
+    expect(JSON.stringify(rejected)).not.toContain("private-test-value");
+    get.mockImplementationOnce(() => {
+      throw new Error("private-test-value");
+    });
+    const thrown = await provider.resolve(reference, signal);
+    expect(thrown).toMatchObject({ ok: false, error: { code: "unavailable" } });
+    expect(JSON.stringify(thrown)).not.toContain("private-test-value");
+  });
+  test("a vault without get support is unsupported for lookups and storage", async () => {
+    const set = vi.fn();
+    vi.stubGlobal("Bun", { secrets: { set } });
+    const provider = createSecretProvider();
+    expect(await provider.resolve(reference, signal)).toMatchObject({
+      ok: false,
+      error: { code: "unsupported" },
+    });
+    expect(await provider.store("private-test-value", signal)).toMatchObject({
+      ok: false,
+      error: { code: "unsupported" },
+    });
+    expect(set).not.toHaveBeenCalled();
+  });
+  test.each([["a\u0000b"], ["x".repeat(65_537)]])(
+    "rejects unstorable credential %# before touching the vault",
+    async (value) => {
+      const set = vi.fn();
+      vi.stubGlobal("Bun", { secrets: { set, get: vi.fn() } });
+      expect(await createSecretProvider().store(value, signal)).toMatchObject({
+        ok: false,
+        error: { code: "invalid-input" },
+      });
+      expect(set).not.toHaveBeenCalled();
+    },
+  );
+  test("failed cleanup after an unverifiable or failed write never falls back to plaintext", async () => {
+    const remove = vi.fn(async () => {
+      throw new Error("locked");
+    });
+    vi.stubGlobal("Bun", {
+      secrets: { set: vi.fn(async () => {}), get: vi.fn(async () => "other"), delete: remove },
+    });
+    const provider = createSecretProvider();
+    expect(await provider.store("private-test-value", signal)).toMatchObject({
+      ok: false,
+      error: { code: "unsupported", message: expect.stringContaining("verified") },
+    });
+    vi.stubGlobal("Bun", {
+      secrets: {
+        set: vi.fn(async () => {
+          throw new Error("denied");
+        }),
+        get: vi.fn(),
+        delete: remove,
+      },
+    });
+    expect(await provider.store("private-test-value", signal)).toMatchObject({
+      ok: false,
+      error: { code: "unsupported" },
+    });
+    expect(remove).toHaveBeenCalledTimes(2);
+  });
+});
