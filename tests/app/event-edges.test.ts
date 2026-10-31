@@ -195,9 +195,108 @@ describe("connection attempts", () => {
     expect(c.h.sessions).toHaveLength(2);
     expect(c.network().phase).toBe("connecting");
   });
-  it.todo(
-    "BUG: an abandoned attempt (sequence gap / handler failure) shows phase 'reconnecting' but its retry sleep uses the already-aborted attempt signal, so no reconnect ever happens",
+
+  /** Abandons the first attempt either by a sequence gap or by a non-terminal handler failure. */
+  const abandon = async (how: "sequence gap" | "handler failure") => {
+    const c = await connect();
+    if (how === "sequence gap") {
+      // The stale event consumes a sequence number, so the next event reveals the gap.
+      c.session.emit({ type: "notice", text: "stale generation" }, { generation: 99 });
+      await c.emit({ type: "notice", text: "after the gap" });
+    } else {
+      Object.assign(c.deps.history, {
+        findByServerId: async () => {
+          throw new Error("private storage detail");
+        },
+      });
+      await c.chat({ serverId: "boom" });
+    }
+    return c;
+  };
+  const readyAgain = async (c: Awaited<ReturnType<typeof connect>>) => {
+    const next = c.h.session(networkId);
+    next.emit({
+      type: "state",
+      phase: "ready",
+      nick: "newcomer",
+      secure: true,
+      authenticated: false,
+    });
+    await settle();
+    return next;
+  };
+
+  it.each(["sequence gap", "handler failure"] as const)(
+    "after a %s the app retries with backoff under a new generation and reconnects",
+    async (how) => {
+      const c = await abandon(how);
+      expect(c.network()).toMatchObject({ phase: "reconnecting", lastError: { code: "internal" } });
+      expect(JSON.stringify(c.app.state.getSnapshot())).not.toContain("private storage detail");
+      c.h.advance(1_000);
+      await settle();
+      expect(c.h.sessions).toHaveLength(1);
+      c.h.advance(1_000);
+      await settle();
+      expect(c.h.sessions).toHaveLength(2);
+      expect(c.h.session(networkId).identity.generation).toBe(2);
+      const next = await readyAgain(c);
+      expect(c.network().phase).toBe("ready");
+      // Late events from the abandoned generation cannot touch the new attempt.
+      c.session.emit({ type: "notice", text: "from the old generation" });
+      next.emit({ type: "notice", text: "from the new generation" });
+      await settle();
+      expect(c.statusText()).toContain("from the new generation");
+      expect(c.statusText()).not.toContain("from the old generation");
+    },
   );
+
+  it("an abandoned attempt never replays a written send on retry", async () => {
+    const c = await connect({ capabilities: { "echo-message": null } });
+    const sent = value(
+      await c.dispatch({
+        type: "message.send",
+        conversationId: c.conversationId,
+        text: "once only",
+        kind: "text",
+      }),
+    );
+    await c.emit({ type: "send-state", operationId: sent.operationId, state: "written" });
+    c.session.emit({ type: "notice", text: "gap" }, { generation: 99 });
+    await c.emit({ type: "notice", text: "after the gap" });
+    c.h.advance(2_000);
+    await settle();
+    const next = await readyAgain(c);
+    expect(c.messages().find((m) => m.id === sent.messageId)?.sendState).toBe("uncertain");
+    expect(c.session.commands.map((entry) => entry.command.type)).toContain("send");
+    expect(next.commands.map((entry) => entry.command.type)).not.toContain("send");
+  });
+
+  it.each([
+    [
+      "a user disconnect",
+      (c: Awaited<ReturnType<typeof connect>>) =>
+        c.dispatch({ type: "network.disconnect", networkId }),
+    ],
+    ["shutdown", (c: Awaited<ReturnType<typeof connect>>) => c.app.shutdown()],
+  ])("%s during the backoff cancels the pending retry", async (_label, stop) => {
+    const c = await abandon("sequence gap");
+    expect(c.network().phase).toBe("reconnecting");
+    await stop(c);
+    await settle();
+    c.h.advance(60_000);
+    await settle();
+    expect(c.h.sessions).toHaveLength(1);
+  });
+
+  it("a manual reconnect during the backoff supersedes the pending retry", async () => {
+    const c = await abandon("sequence gap");
+    value(await c.dispatch({ type: "network.reconnect", networkId }));
+    await settle();
+    expect(c.h.sessions).toHaveLength(2);
+    c.h.advance(60_000);
+    await settle();
+    expect(c.h.sessions).toHaveLength(2);
+  });
 
   it("a dropped link fails unwritten sends and makes written ones uncertain", async () => {
     const c = await connect({ capabilities: { "echo-message": null } });
