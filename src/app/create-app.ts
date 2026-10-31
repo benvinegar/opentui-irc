@@ -95,6 +95,12 @@ interface Conversation {
 interface Attempt {
   readonly generation: number;
   readonly controller: AbortController;
+  /**
+   * Cancels the scheduled retry after this attempt ends. Separate from `controller` because an
+   * abandoned attempt aborts its own work but must still be able to schedule its replacement;
+   * user disconnect, a newer attempt and shutdown abort it.
+   */
+  readonly retry: AbortController;
   readonly historyRequested: Set<ConversationId>;
   /** At most MAX_CONVERSATIONS entries, deduplicated by historyRequested. */
   readonly historyQueue: ConversationId[];
@@ -881,7 +887,10 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     ensureConversation(networkId, "channel", channel);
   /** Abandons an attempt whose event stream skipped a sequence; only a reconnect can recover. */
   const abandonInterruptedAttempt = (networkId: NetworkId, attempt: Attempt) => {
-    attempt.error = error("internal", "Connection events were interrupted. Reconnect to recover.");
+    attempt.error = error(
+      "internal",
+      "Connection events were interrupted. Reconnecting automatically.",
+    );
     report(attempt.error, networkId);
     attempt.controller.abort();
     void attempt.session?.close();
@@ -1464,7 +1473,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     networks.set(networkId, { ...networks.get(networkId)!, phase: "reconnecting" });
     publish();
     void deps.clock
-      .sleep(delay, attempt.controller.signal)
+      .sleep(delay, attempt.retry.signal)
       .then(() =>
         serial(() => {
           if (attempts.get(networkId) === attempt && !stopping) startNetwork(networkId);
@@ -1476,6 +1485,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     const p = profile(networkId);
     const old = attempts.get(networkId);
     old?.controller.abort();
+    old?.retry.abort();
     if (old?.session) void old.session.close();
     const generation = (generations.get(networkId) ?? 0) + 1;
     generations.set(networkId, generation);
@@ -1483,6 +1493,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     const attempt: Attempt = {
       generation,
       controller: new AbortController(),
+      retry: new AbortController(),
       cursor: startSessionCursor(identity),
       historyRequested: new Set(),
       historyQueue: [],
@@ -1544,6 +1555,7 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
     const attempt = attempts.get(networkId);
     attempts.delete(networkId);
     attempt?.controller.abort();
+    attempt?.retry.abort();
     if (attempt?.session) {
       const result = await attempt.session.close("Leaving opentui-irc");
       if (!result.ok) report(result.error, networkId);
@@ -2052,7 +2064,10 @@ export const createApp: CreateApp = async (deps, rootSignal) => {
         let failure: AppError | undefined = durabilityFailure;
         const closing = [...attempts.values()];
         attempts.clear();
-        for (const attempt of closing) attempt.controller.abort();
+        for (const attempt of closing) {
+          attempt.controller.abort();
+          attempt.retry.abort();
+        }
         await Promise.all(
           closing.map(async (attempt) => {
             try {
