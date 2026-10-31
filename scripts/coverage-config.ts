@@ -18,6 +18,7 @@ export const exclusions: readonly { pattern: RegExp; reason: string }[] = [
 
 /**
  * Ratchet: merged totals rounded down to the integer. Raise these when coverage rises; lower
- * them only with a reviewed reason. Branches come from Vitest alone (Bun emits no branch data).
+ * them only with a reviewed reason. Branches come from Vitest alone (Bun emits no branch data);
+ * files only Bun runs are left out of the branch total.
  */
-export const floor = { lines: 90, functions: 95, branches: 77 };
+export const floor = { lines: 97, functions: 95, branches: 89 };

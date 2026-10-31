@@ -66,7 +66,7 @@ function print(summaries: FileSummary[], totals: Omit<FileSummary, "path">): voi
   for (const summary of summaries) console.log(row(summary.path, summary));
   console.log(row("All counted files", totals));
   console.log(
-    "* branches are Vitest-only; Bun LCOV has no branch data. Functions take the better suite per file.",
+    "* branches are Vitest-only (Bun LCOV has none); files only Bun runs show 0/0. Lines count V8 statements. Functions take the better suite per file.",
   );
   console.log(
     `Excluded: ${exclusions.map(({ pattern, reason }) => `${pattern.source} (${reason})`).join("; ")}`,
@@ -94,7 +94,9 @@ function checkFloor(totals: Omit<FileSummary, "path">): boolean {
 if (!process.argv.includes("--report")) await runSuites();
 const reports = await Promise.all(
   [vitestDirectory, bunDirectory].map(async (directory) =>
-    parseLcov(await readFile(resolve(root, directory, "lcov.info"), "utf8"), root),
+    parseLcov(await readFile(resolve(root, directory, "lcov.info"), "utf8"), root, {
+      statementLines: directory === vitestDirectory,
+    }),
   ),
 );
 const summaries = [...mergeReports(reports).values()]

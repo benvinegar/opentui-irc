@@ -8,6 +8,8 @@ export type FileCoverage = {
   functions: Map<string, number>;
   functionTotals?: { found: number; hit: number };
   branches: Map<string, number>;
+  /** V8 lists exactly the executable statements; Bun also lists case labels and continuation lines. */
+  statementLines?: boolean;
 };
 
 export type Ratio = { covered: number; total: number };
@@ -44,7 +46,11 @@ function applyLine(file: FileCoverage, tag: string, value: string): void {
     file.functionTotals = { found: file.functionTotals?.found ?? 0, hit: count(value) };
 }
 
-export function parseLcov(text: string, root: string): FileCoverage[] {
+export function parseLcov(
+  text: string,
+  root: string,
+  options: { statementLines?: boolean } = {},
+): FileCoverage[] {
   const files: FileCoverage[] = [];
   let current: FileCoverage | undefined;
   for (const raw of text.split(/\r?\n/u)) {
@@ -58,7 +64,11 @@ export function parseLcov(text: string, root: string): FileCoverage[] {
     if (separator < 0) continue;
     const tag = line.slice(0, separator);
     const value = line.slice(separator + 1);
-    if (tag === "SF") current = emptyFile(normalizePath(value, root));
+    if (tag === "SF")
+      current = {
+        ...emptyFile(normalizePath(value, root)),
+        statementLines: options.statementLines === true,
+      };
     else if (current) applyLine(current, tag, value);
   }
   return files;
@@ -77,16 +87,30 @@ function fraction(ratio: Ratio): number {
 }
 
 /**
- * Unions records by path. Lines and branches take the max hit count per key. Per-function
+ * Unions records by path. Lines and branches take the max hit count per key; when one record
+ * lists statement lines (V8), only those lines count, so Bun-only listings of non-statement lines
+ * are not reported as uncovered. Per-function
  * names are only available from V8, so functions keep whichever record reports the higher
  * ratio (a lower bound of the true union).
  */
+function executed(file: FileCoverage): boolean {
+  return [...file.lines.values()].some((hits) => hits > 0);
+}
+
 export function mergeFiles(left: FileCoverage, right: FileCoverage): FileCoverage {
   const merged = emptyFile(left.path);
+  const statements = [left, right].find((source) => source.statementLines && source.lines.size > 0);
+  if (statements) merged.statementLines = true;
   for (const source of [left, right]) {
-    for (const [line, hits] of source.lines) maxInto(merged.lines, line, hits);
-    for (const [key, hits] of source.branches) maxInto(merged.branches, key, hits);
+    for (const [line, hits] of source.lines)
+      if (!statements || statements.lines.has(line)) maxInto(merged.lines, line, hits);
   }
+  // Only V8 records branches. If V8 never ran a file that Bun did, its branches are unknown,
+  // not uncovered, so leave them out rather than count them as zero.
+  const unmeasured = [left, right].some((source) => !executed(source) && source.branches.size > 0);
+  if (!(unmeasured && executed(left) !== executed(right)))
+    for (const source of [left, right])
+      for (const [key, hits] of source.branches) maxInto(merged.branches, key, hits);
   const best = fraction(functionRatio(right)) > fraction(functionRatio(left)) ? right : left;
   for (const [name, hits] of best.functions) merged.functions.set(name, hits);
   if (best.functionTotals) merged.functionTotals = best.functionTotals;
