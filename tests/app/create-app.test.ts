@@ -410,6 +410,57 @@ describe("application coordinator", () => {
       h.app.state.getSnapshot().conversations.find((c) => c.id === h.conversationId)?.unreadCount,
     ).toBe(0);
   });
+  it("clears unread for the conversation being viewed and keeps it clear as messages arrive", async () => {
+    const h = await connected();
+    h.session.emit({
+      type: "membership",
+      channel: "#lounge",
+      change: { kind: "join", nick: "newcomer", prefixes: [] },
+    });
+    const lounge = (text: string, serverId: string): SessionPayload => ({
+      type: "chat",
+      message: {
+        target: "#lounge",
+        sender: { nick: "peer" },
+        kind: "text",
+        text,
+        receivedAt: 1_700_000_002_000,
+        serverId,
+        source: "live",
+      },
+    });
+    for (let index = 0; index < 9; index++) {
+      h.session.emit(lounge(`hello ${index}`, `l${index}`));
+      await settle();
+    }
+    const view = () => h.app.state.getSnapshot().conversations.find((c) => c.name === "#lounge")!;
+    expect(view().unreadCount).toBe(9);
+    value(
+      await h.app.dispatch({ type: "conversation.activate", conversationId: view().id }, signal()),
+    );
+    const report = (focused: boolean) =>
+      h.app.dispatch(
+        {
+          type: "view.report",
+          conversationId: view().id,
+          focused,
+          atBottom: true,
+          lastVisibleMessageId: timeline(h.app, view().id).messages.at(-1)!.id,
+        },
+        signal(),
+      );
+    // Without terminal attention the app stays conservative.
+    value(await report(false));
+    expect(view().unreadCount).toBe(9);
+    value(await report(true));
+    expect(view()).toMatchObject({ unreadCount: 0, mentionCount: 0 });
+    expect(timeline(h.app, view().id).firstUnreadId).toBeUndefined();
+    h.session.emit(lounge("while watching", "l9"));
+    await settle();
+    // A new arrival is only read once a report shows it rendered at the bottom.
+    value(await report(true));
+    expect(view().unreadCount).toBe(0);
+  });
   it("filters excluded bodies and drafts before persistence", async () => {
     const config = {
       ...settings,

@@ -50,13 +50,19 @@ export function SettingsForm(props: {
     hasStoredSecret: !!storedSecret(),
     channel: channel(),
   });
-  /** Hands a typed password to the vault once; undefined means it failed and the form says why. */
-  const passwordRef = async (): Promise<{ ref: SecretRef | undefined } | undefined> => {
-    if (!account()) return { ref: storedSecret() };
-    if (authMode() === "environment") return { ref: entityId<"secret-ref">(`env:${variable()}`) };
-    if (storedSecret()) return { ref: storedSecret() };
-    const secretValue = password();
-    setPassword("");
+  /**
+   * Hands a typed password to the vault once; undefined means it failed and the form says why.
+   * Uses the validated snapshot so edits made while the vault is busy cannot change what is saved.
+   */
+  const passwordRef = async (
+    form: NetworkFormValues,
+    secretValue: string,
+  ): Promise<{ ref: SecretRef | undefined } | undefined> => {
+    const stored = storedSecret();
+    if (!form.account) return { ref: stored };
+    if (form.authMode === "environment")
+      return { ref: entityId<"secret-ref">(`env:${form.variable}`) };
+    if (stored) return { ref: stored };
     const secured = await props.app.storeSecret(secretValue, formAbort.signal);
     if (!secured.ok) {
       setError(
@@ -69,14 +75,18 @@ export function SettingsForm(props: {
   };
   const add = async () => {
     if (busy()) return;
-    const problem = networkFormError(formValues());
+    // One snapshot is validated and saved; later edits wait for the next Save.
+    const form = formValues();
+    const problem = networkFormError(form);
     if (problem) {
       setError(problem);
       return;
     }
+    const secretValue = password();
+    setPassword("");
     setBusy(true);
     setError("");
-    const secret = await passwordRef();
+    const secret = await passwordRef(form, secretValue);
     if (!secret || formAbort.signal.aborted) {
       setBusy(false);
       return;
@@ -87,7 +97,7 @@ export function SettingsForm(props: {
         section: "user",
         value: {
           ...original.user,
-          networks: [...original.user.networks, networkProfile(id, formValues(), secret.ref)],
+          networks: [...original.user.networks, networkProfile(id, form, secret.ref)],
         },
       },
       original.revision,
