@@ -22,86 +22,93 @@ function resolve(root: JsonObject, shape: JsonObject): JsonObject {
     : shape;
 }
 
-// A dependency-free test interpreter for every assertion keyword used by our discovery schema.
-// Runtime-only relational/string constraints are explicitly documented, not pretended to be JSON Schema.
-function matches(root: JsonObject, value: unknown, shape: JsonObject): boolean {
-  if (typeof shape.$ref === "string" && !matches(root, value, resolve(root, shape))) return false;
-  if (object(shape.not) && matches(root, value, shape.not)) return false;
+function typeMatches(value: unknown, type: unknown): boolean {
+  if (type === "null") return value === null;
+  if (type === "array") return Array.isArray(value);
+  if (type === "object")
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  if (type === "integer") return typeof value === "number" && Number.isInteger(value);
+  return typeof value === type;
+}
+/** const, enum and type: assertions about the value itself. */
+function matchesValue(value: unknown, shape: JsonObject): boolean {
   if (shape.const !== undefined && value !== shape.const) return false;
   if (Array.isArray(shape.enum) && !shape.enum.includes(value)) return false;
-  const typeMatches = (type: unknown) =>
-    type === "null"
-      ? value === null
-      : type === "array"
-        ? Array.isArray(value)
-        : type === "object"
-          ? typeof value === "object" && value !== null && !Array.isArray(value)
-          : type === "integer"
-            ? typeof value === "number" && Number.isInteger(value)
-            : typeof value === type;
-  if (
-    shape.type !== undefined &&
-    !(Array.isArray(shape.type) ? shape.type.some(typeMatches) : typeMatches(shape.type))
-  )
-    return false;
+  return (
+    shape.type === undefined ||
+    (Array.isArray(shape.type)
+      ? shape.type.some((type: JsonValue) => typeMatches(value, type))
+      : typeMatches(value, shape.type))
+  );
+}
+/** $ref, not, anyOf and if/then: assertions delegated to nested schemas. */
+function matchesSubschemas(root: JsonObject, value: unknown, shape: JsonObject): boolean {
+  if (typeof shape.$ref === "string" && !matches(root, value, resolve(root, shape))) return false;
+  if (object(shape.not) && matches(root, value, shape.not)) return false;
   if (
     Array.isArray(shape.anyOf) &&
     !shape.anyOf.some((branch: JsonValue) => object(branch) && matches(root, value, branch))
   )
     return false;
-  if (
+  return !(
     object(shape.if) &&
     matches(root, value, shape.if) &&
     object(shape.then) &&
     !matches(root, value, shape.then)
-  )
+  );
+}
+function matchesNumber(value: number, shape: JsonObject): boolean {
+  return !(
+    (typeof shape.minimum === "number" && value < shape.minimum) ||
+    (typeof shape.maximum === "number" && value > shape.maximum)
+  );
+}
+function matchesString(value: string, shape: JsonObject): boolean {
+  if (typeof shape.minLength === "number" && Array.from(value).length < shape.minLength)
     return false;
+  if (typeof shape.maxLength === "number" && Array.from(value).length > shape.maxLength)
+    return false;
+  if (typeof shape.pattern === "string" && !new RegExp(shape.pattern, "u").test(value))
+    return false;
+  return !(shape.format === "ipv6" && isIP(value) !== 6);
+}
+function matchesArray(root: JsonObject, value: unknown[], shape: JsonObject): boolean {
+  if (typeof shape.minItems === "number" && value.length < shape.minItems) return false;
+  if (typeof shape.maxItems === "number" && value.length > shape.maxItems) return false;
   if (
-    typeof value === "number" &&
-    ((typeof shape.minimum === "number" && value < shape.minimum) ||
-      (typeof shape.maximum === "number" && value > shape.maximum))
+    shape.uniqueItems === true &&
+    new Set(value.map((item: unknown) => JSON.stringify(item))).size !== value.length
   )
     return false;
-  if (typeof value === "string") {
-    if (typeof shape.minLength === "number" && Array.from(value).length < shape.minLength)
-      return false;
-    if (typeof shape.maxLength === "number" && Array.from(value).length > shape.maxLength)
-      return false;
-    if (typeof shape.pattern === "string" && !new RegExp(shape.pattern, "u").test(value))
-      return false;
-    if (shape.format === "ipv6" && isIP(value) !== 6) return false;
-  }
-  if (Array.isArray(value)) {
-    if (typeof shape.minItems === "number" && value.length < shape.minItems) return false;
-    if (typeof shape.maxItems === "number" && value.length > shape.maxItems) return false;
-    if (
-      shape.uniqueItems === true &&
-      new Set(value.map((item: unknown) => JSON.stringify(item))).size !== value.length
-    )
-      return false;
-    const items = shape.items;
-    if (object(items) && !value.every((item: unknown) => matches(root, item, items))) return false;
-  } else if (typeof value === "object" && value !== null) {
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    const keys = Object.keys(descriptors);
-    if (typeof shape.maxProperties === "number" && keys.length > shape.maxProperties) return false;
-    if (
-      Array.isArray(shape.required) &&
-      !shape.required.every(
-        (key: JsonValue) => typeof key === "string" && Object.hasOwn(value, key),
-      )
-    )
-      return false;
-    for (const key of keys) {
-      if (object(shape.propertyNames) && !matches(root, key, shape.propertyNames)) return false;
-      const declared = object(shape.properties) && Object.hasOwn(shape.properties, key);
-      const child =
-        declared && object(shape.properties) ? shape.properties[key] : shape.additionalProperties;
-      if (child === false || (object(child) && !matches(root, descriptors[key]?.value, child)))
-        return false;
-    }
-  }
-  return true;
+  const items = shape.items;
+  return !object(items) || value.every((item: unknown) => matches(root, item, items));
+}
+function matchesObject(root: JsonObject, value: object, shape: JsonObject): boolean {
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Object.keys(descriptors);
+  if (typeof shape.maxProperties === "number" && keys.length > shape.maxProperties) return false;
+  if (
+    Array.isArray(shape.required) &&
+    !shape.required.every((key: JsonValue) => typeof key === "string" && Object.hasOwn(value, key))
+  )
+    return false;
+  return keys.every((key) => {
+    if (object(shape.propertyNames) && !matches(root, key, shape.propertyNames)) return false;
+    const declared = object(shape.properties) && Object.hasOwn(shape.properties, key);
+    const child =
+      declared && object(shape.properties) ? shape.properties[key] : shape.additionalProperties;
+    return child !== false && (!object(child) || matches(root, descriptors[key]?.value, child));
+  });
+}
+
+// A dependency-free test interpreter for every assertion keyword used by our discovery schema.
+// Runtime-only relational/string constraints are explicitly documented, not pretended to be JSON Schema.
+function matches(root: JsonObject, value: unknown, shape: JsonObject): boolean {
+  if (!matchesSubschemas(root, value, shape) || !matchesValue(value, shape)) return false;
+  if (typeof value === "number") return matchesNumber(value, shape);
+  if (typeof value === "string") return matchesString(value, shape);
+  if (Array.isArray(value)) return matchesArray(root, value, shape);
+  return typeof value !== "object" || value === null || matchesObject(root, value, shape);
 }
 
 const fullProfile = {

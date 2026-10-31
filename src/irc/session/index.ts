@@ -61,6 +61,28 @@ const ECHO_DEPENDENCIES = ["message-tags", "batch", "labeled-response", "echo-me
 const QUIET_NUMERICS = new Set(["004", "042", "324", "328", "329", "333"]);
 // Prose whose leading parameters only repeat our own identity.
 const TRAILING_NUMERICS = new Set(["900", "901"]);
+/** Friendly text for common rejection numerics; others report their code. */
+const REJECTIONS: Readonly<Record<string, string>> = {
+  "401": "No such nickname or channel.",
+  "402": "No such server.",
+  "403": "The channel does not exist.",
+  "404": "You cannot send to this channel.",
+  "405": "You have joined too many channels.",
+  "406": "There was no such nickname.",
+  "411": "No recipient was given.",
+  "412": "No text to send.",
+  "432": "The nickname is invalid.",
+  "437": "The channel is temporarily unavailable.",
+  "442": "You are not joined to this channel.",
+  "471": "The channel is full.",
+  "473": "The channel requires an invitation.",
+  "474": "You are banned from this channel.",
+  "475": "A valid channel key is required.",
+  "476": "The channel name is invalid.",
+  "477": "The channel requires an authenticated account.",
+  "481": "You need IRC operator privileges.",
+  "482": "You do not have permission to change this channel.",
+};
 
 export interface SessionPolicy extends ModernPolicy {
   readonly connectTimeoutMs: number;
@@ -122,6 +144,37 @@ const frame = (
   tags: Readonly<Record<string, string | null>> = {},
 ): IrcFrame => ({ command, params, tags });
 const byteLength = (value: string) => new TextEncoder().encode(value).length;
+const isCasemapping = (value: string): value is ProtocolSupport["casemapping"] =>
+  value === "ascii" || value === "rfc1459" || value === "strict-rfc1459";
+/** Applies one validated ISUPPORT token; malformed or unrelated tokens leave support unchanged. */
+function withSupportToken(
+  support: ProtocolSupport,
+  name: string | undefined,
+  value: string,
+): ProtocolSupport {
+  switch (name) {
+    case "CASEMAPPING":
+      return isCasemapping(value) ? { ...support, casemapping: value } : support;
+    case "CHANTYPES":
+      return value && /^[^\s\x00-\x1f,]+$/.test(value)
+        ? { ...support, channelTypes: plain(value) }
+        : support;
+    case "PREFIX": {
+      // An explicitly empty PREFIX means the network has no member prefixes at all.
+      const match = /^(?:\(([a-zA-Z]+)\)([^\s]+))?$/.exec(value);
+      if (!match || (match[1] ?? "").length !== (match[2] ?? "").length) return support;
+      return { ...support, prefixModes: match[1] ?? "", prefixSymbols: plain(match[2] ?? "") };
+    }
+    case "CHANMODES": {
+      const groups = value.split(",");
+      if (groups.length !== 4 || !groups.every((group) => /^[a-zA-Z]*$/.test(group)))
+        return support;
+      return { ...support, channelModeGroups: [groups[0]!, groups[1]!, groups[2]!, groups[3]!] };
+    }
+    default:
+      return support;
+  }
+}
 type Member = { nick: string; prefixes: string[] };
 type Channel = {
   name: string;
@@ -157,6 +210,15 @@ type Whois = {
   expired: boolean;
 };
 type Directory = { operationId: OperationId; count: number; started: number; expired: boolean };
+type SendCommand = Extract<SessionCommand, { type: "send" }>;
+/** Estimated outgoing queue footprint of an admitted command. */
+type Cost = { bytes: number; fragments: number; emptyLines: number };
+const queueCost = (bytes: number, fragments = 1, emptyLines = 0): Result<Cost> => ({
+  ok: true,
+  value: { bytes: 32 + bytes, fragments, emptyLines },
+});
+/** Handles one inbound command; a returned promise is awaited before the next frame. */
+type Handler = (input: IrcFrame, sender: string) => Promise<unknown> | void;
 
 export function createSessionFactory(options: SessionFactoryOptions): SessionFactory {
   const policy = { ...defaultSessionPolicy, ...options.policy };
@@ -264,6 +326,7 @@ class Attempt {
   private statusPrefixes = "";
   private whois: Whois | undefined;
   private directory: Directory | undefined;
+  private readonly handlers = this.routes();
   private lastReceived: number;
   private pingSentAt: number | undefined;
   private readonly startedAt: number;
@@ -509,71 +572,82 @@ class Attempt {
           signal,
         );
         if (signal.aborted || this.shuttingDown) return;
-        const now = this.options.clock.now();
-        if (!this.ready && now - this.startedAt >= this.policy.registrationTimeoutMs) {
-          this.stop(problem("network", "IRC registration timed out."));
-          return;
-        }
-        if (
-          !this.capEnded &&
-          !this.saslStarted &&
-          this.capStartedAt !== undefined &&
-          now - this.capStartedAt >= this.policy.capTimeoutMs
-        ) {
-          this.emit({
-            type: "notice",
-            text: "Capability negotiation timed out; trying basic IRC registration.",
-          });
-          await this.endCap();
-          if (this.stopped) return;
-        }
-        if (
-          this.pingSentAt !== undefined &&
-          now - this.pingSentAt >= this.policy.staleTimeoutMs - this.policy.keepaliveMs
-        ) {
-          this.stop(problem("network", "IRC keepalive timed out."));
-          return;
-        }
-        if (
-          this.connection &&
-          now - this.lastReceived >= this.policy.keepaliveMs &&
-          this.pingSentAt === undefined
-        ) {
-          this.pingSentAt = now;
-          await this.control("PING", [`openirc-${now}`]);
-        }
-        for (const query of [this.whois, this.directory])
-          if (query && !query.expired && now - query.started >= this.policy.queryTimeoutMs) {
-            query.expired = true;
-            this.emit({
-              type: "error",
-              operationId: query.operationId,
-              error: problem(
-                "unavailable",
-                "IRC query timed out; waiting for its terminator before another query.",
-              ),
-            });
-          }
-        for (const send of this.sends.values())
-          if (
-            send.fragments > 0 &&
-            send.written === send.fragments &&
-            now - send.updatedAt >= this.policy.queryTimeoutMs
-          ) {
-            if (send.expectsEcho)
-              this.emit({
-                type: "send-state",
-                operationId: send.operationId,
-                state: "uncertain",
-                error: problem("unavailable", "Server echo was not observed."),
-              });
-            this.forgetSend(send);
-          }
-        this.modern.tick(now);
+        if (!(await this.watch(this.options.clock.now()))) return;
       }
     } catch {
       if (!signal.aborted) this.stop(problem("internal", "IRC clock failed."));
     }
+  }
+  /** One monitor pass over every deadline; false once the attempt has stopped. */
+  private async watch(now: number): Promise<boolean> {
+    if (!this.ready && now - this.startedAt >= this.policy.registrationTimeoutMs) {
+      this.stop(problem("network", "IRC registration timed out."));
+      return false;
+    }
+    if (
+      !this.capEnded &&
+      !this.saslStarted &&
+      this.capStartedAt !== undefined &&
+      now - this.capStartedAt >= this.policy.capTimeoutMs
+    ) {
+      this.emit({
+        type: "notice",
+        text: "Capability negotiation timed out; trying basic IRC registration.",
+      });
+      await this.endCap();
+      if (this.stopped) return false;
+    }
+    if (
+      this.pingSentAt !== undefined &&
+      now - this.pingSentAt >= this.policy.staleTimeoutMs - this.policy.keepaliveMs
+    ) {
+      this.stop(problem("network", "IRC keepalive timed out."));
+      return false;
+    }
+    if (
+      this.connection &&
+      now - this.lastReceived >= this.policy.keepaliveMs &&
+      this.pingSentAt === undefined
+    ) {
+      this.pingSentAt = now;
+      await this.control("PING", [`openirc-${now}`]);
+    }
+    this.expireQueries(now);
+    this.expireSends(now);
+    this.modern.tick(now);
+    return true;
+  }
+  private expireQueries(now: number) {
+    for (const query of [this.whois, this.directory])
+      if (query && !query.expired && now - query.started >= this.policy.queryTimeoutMs) {
+        query.expired = true;
+        this.emit({
+          type: "error",
+          operationId: query.operationId,
+          error: problem(
+            "unavailable",
+            "IRC query timed out; waiting for its terminator before another query.",
+          ),
+        });
+      }
+  }
+  /** Fully written sends whose echo never arrived are released as uncertain. */
+  private expireSends(now: number) {
+    for (const send of this.sends.values())
+      if (
+        send.fragments > 0 &&
+        send.written === send.fragments &&
+        now - send.updatedAt >= this.policy.queryTimeoutMs
+      ) {
+        if (send.expectsEcho)
+          this.emit({
+            type: "send-state",
+            operationId: send.operationId,
+            state: "uncertain",
+            error: problem("unavailable", "Server echo was not observed."),
+          });
+        this.forgetSend(send);
+      }
   }
   private fold(value: string) {
     return foldIdentifier(value, this.support.casemapping);
@@ -643,74 +717,79 @@ class Attempt {
     const list = input.params.at(-1) ?? "";
     // After registration only cap-notify updates (NEW/DEL) and answers to our requests matter.
     if (this.capEnded && !["NEW", "DEL", "ACK", "NAK"].includes(sub ?? "")) return;
-    if (sub === "LS") {
-      if (!this.advertise(list)) return;
-      if (input.params[2] === "*") return;
-      this.capLsComplete = true;
-      for (const name of this.wantedCapabilities()) this.requested.add(name);
-      if (this.profile.sasl?.required && !this.requested.has("sasl")) {
-        this.stop(
-          problem("authentication", "Server does not offer required SASL PLAIN authentication."),
-        );
-        return;
-      }
-      if (this.requested.size) await this.control("CAP", ["REQ", [...this.requested].join(" ")]);
-      else await this.endCap();
-    } else if (sub === "ACK" || sub === "NAK") {
-      let answered = false;
-      for (const token of list.split(" ")) {
-        const name = token.replace(/^-/, "").split("=")[0]!;
-        if (!this.requested.has(name)) continue;
-        answered = true;
-        this.requested.delete(name);
-        if (sub === "ACK" && !token.startsWith("-"))
-          this.capabilities.set(name, this.advertised.get(name) ?? null);
-        else this.capabilities.delete(name);
-      }
-      if (answered && !this.requested.size && this.capLsComplete) {
-        if (
-          this.capabilities.has("echo-message") &&
-          !ECHO_DEPENDENCIES.every((name) => this.capabilities.has(name))
-        ) {
-          // Do not expose/use echo until reliable correlation dependencies are ACKed.
-          this.capabilities.delete("echo-message");
-          await this.control("CAP", ["REQ", "-echo-message"]);
-        }
-        if (this.capEnded) this.publishSupport();
-        else if (this.profile.sasl && this.capabilities.has("sasl") && !this.saslStarted) {
-          this.saslStarted = true;
-          this.state("authenticating");
-          await this.control("AUTHENTICATE", ["PLAIN"]);
-        } else if (!this.saslStarted || this.authenticated) await this.endCap();
-      }
-    } else if (sub === "NEW") {
-      const added = this.advertise(list);
-      if (!added || !this.capLsComplete) return;
-      // A newly offered dependency can make the whole reliable-echo set worth requesting.
-      const echoUnlocked = added.some((name) => ECHO_DEPENDENCIES.includes(name));
-      const request = this.wantedCapabilities().filter(
-        (name) =>
-          !this.capabilities.has(name) &&
-          !this.requested.has(name) &&
-          (added.includes(name) || (echoUnlocked && ECHO_DEPENDENCIES.includes(name))),
+    if (sub === "LS") await this.capList(list, input.params[2] === "*");
+    else if (sub === "ACK" || sub === "NAK") await this.capAnswer(sub === "ACK", list);
+    else if (sub === "NEW") await this.capNew(list);
+    else if (sub === "DEL") await this.capDel(list);
+  }
+  private async capList(list: string, more: boolean) {
+    if (!this.advertise(list) || more) return;
+    this.capLsComplete = true;
+    for (const name of this.wantedCapabilities()) this.requested.add(name);
+    if (this.profile.sasl?.required && !this.requested.has("sasl")) {
+      this.stop(
+        problem("authentication", "Server does not offer required SASL PLAIN authentication."),
       );
-      if (!request.length) return;
-      for (const name of request) this.requested.add(name);
-      await this.control("CAP", ["REQ", request.join(" ")]);
-    } else if (sub === "DEL") {
-      for (const name of list.split(" ")) {
-        this.capabilities.delete(name);
-        this.advertised.delete(name);
-      }
-      if (
-        this.capabilities.has("echo-message") &&
-        !ECHO_DEPENDENCIES.every((name) => this.capabilities.has(name))
-      ) {
-        this.capabilities.delete("echo-message");
-        await this.control("CAP", ["REQ", "-echo-message"]);
-      }
-      this.publishSupport();
+      return;
     }
+    if (this.requested.size) await this.control("CAP", ["REQ", [...this.requested].join(" ")]);
+    else await this.endCap();
+  }
+  private async capAnswer(ack: boolean, list: string) {
+    let answered = false;
+    for (const token of list.split(" ")) {
+      const name = token.replace(/^-/, "").split("=")[0]!;
+      if (!this.requested.has(name)) continue;
+      answered = true;
+      this.requested.delete(name);
+      if (ack && !token.startsWith("-"))
+        this.capabilities.set(name, this.advertised.get(name) ?? null);
+      else this.capabilities.delete(name);
+    }
+    if (answered && !this.requested.size && this.capLsComplete) await this.capsSettled();
+  }
+  /** Every outstanding request is answered: continue to SASL, end CAP, or publish live changes. */
+  private async capsSettled() {
+    await this.dropUnreliableEcho();
+    if (this.capEnded) this.publishSupport();
+    else if (this.profile.sasl && this.capabilities.has("sasl") && !this.saslStarted) {
+      this.saslStarted = true;
+      this.state("authenticating");
+      await this.control("AUTHENTICATE", ["PLAIN"]);
+    } else if (!this.saslStarted || this.authenticated) await this.endCap();
+  }
+  private async capNew(list: string) {
+    const added = this.advertise(list);
+    if (!added || !this.capLsComplete) return;
+    // A newly offered dependency can make the whole reliable-echo set worth requesting.
+    const echoUnlocked = added.some((name) => ECHO_DEPENDENCIES.includes(name));
+    const request = this.wantedCapabilities().filter(
+      (name) =>
+        !this.capabilities.has(name) &&
+        !this.requested.has(name) &&
+        (added.includes(name) || (echoUnlocked && ECHO_DEPENDENCIES.includes(name))),
+    );
+    if (!request.length) return;
+    for (const name of request) this.requested.add(name);
+    await this.control("CAP", ["REQ", request.join(" ")]);
+  }
+  private async capDel(list: string) {
+    for (const name of list.split(" ")) {
+      this.capabilities.delete(name);
+      this.advertised.delete(name);
+    }
+    await this.dropUnreliableEcho();
+    this.publishSupport();
+  }
+  /** Do not expose/use echo until reliable correlation dependencies are ACKed. */
+  private async dropUnreliableEcho() {
+    if (
+      !this.capabilities.has("echo-message") ||
+      ECHO_DEPENDENCIES.every((name) => this.capabilities.has(name))
+    )
+      return;
+    this.capabilities.delete("echo-message");
+    await this.control("CAP", ["REQ", "-echo-message"]);
   }
   private async authenticate(input: IrcFrame) {
     if (!this.saslStarted || this.saslSent || input.params[0] !== "+" || !this.profile.sasl) {
@@ -740,291 +819,245 @@ class Attempt {
     if (encoded.length % 400 === 0) await this.control("AUTHENTICATE", ["+"]);
   }
   private async handle(input: IrcFrame) {
-    const p = input.params;
     const sender = input.prefix?.split("!")[0] ?? "";
     if (input.prefix?.includes("!") && this.self(sender))
       this.ownPrefixBytes = byteLength(input.prefix) + 2;
-    if (input.command === "FAIL" || /^[45][0-9]{2}$/.test(input.command)) {
-      const label = this.modern.label(input);
-      const rejected = label ? this.labels.get(label) : undefined;
-      if (rejected) {
-        this.emit({
-          type: "send-state",
-          operationId: rejected.operationId,
-          state: "failed",
-          error: problem(
-            "unavailable",
-            `Server rejected a message fragment (${input.command}); other fragments may already have been written.`,
-          ),
-        });
-        this.forgetSend(rejected);
-        return;
-      }
-    }
+    if (this.rejectedFragment(input)) return;
     if (this.modern.handle(input, sender) || this.stopped) return;
-    switch (input.command) {
-      case "PING":
-        await this.control("PONG", p);
-        return;
-      case "PONG":
-        if (p.at(-1) === `openirc-${this.pingSentAt}`) this.pingSentAt = undefined;
-        return;
-      case "CAP":
-        await this.cap(input);
-        return;
-      case "AUTHENTICATE":
-        await this.authenticate(input);
-        return;
-      case "903":
-        if (!this.saslStarted || !this.saslSent) {
-          this.stop(problem("authentication", "Unexpected SASL success."));
-          return;
-        }
-        this.authenticated = true;
-        await this.endCap();
-        return;
-      case "904":
-      case "905":
-      case "906":
-      case "907":
-        await this.saslFailed();
-        return;
-      case "001":
-        // Optional SASL must not turn a server that registers us without CAP into a failure.
-        if (!this.capEnded && !this.profile.sasl?.required && !this.saslStarted)
-          await this.endCap();
-        if (!this.capEnded || (this.profile.sasl?.required && !this.authenticated)) {
-          this.stop(
-            problem(
-              "authentication",
-              "Server registered before required authentication completed.",
-            ),
-          );
-          return;
-        }
-        if (p[0] && atom(p[0])) this.nick = p[0];
-        this.ready = true;
-        this.state("ready");
-        return;
-      case "005":
-        this.isupport(p.slice(1, -1));
-        return;
-      case "432":
-      case "433":
-      case "436":
-      case "437":
-        if (this.ready) {
-          // 437 also covers temporarily unavailable channels; only nickname replies are conflicts.
-          if (input.command === "432" || (input.command === "437" && this.isChannel(p[1] ?? "")))
-            break;
-          this.emit({ type: "error", error: problem("conflict", "Nickname is unavailable.") });
-        } else if (this.alternate < this.profile.identity.alternateNicks.length) {
-          this.nick = this.profile.identity.alternateNicks[this.alternate++]!;
-          await this.control("NICK", [this.nick]);
-          this.state(this.phase);
-        } else
-          this.stop(
-            problem(
-              "conflict",
-              "Every configured nickname was rejected or is in use; add an alternate nickname.",
-            ),
-          );
-        return;
-      case "421":
-        if (!this.ready && p[1]?.toUpperCase() === "CAP") await this.endCap();
-        else this.emit({ type: "notice", text: "Server does not support this IRC command." });
-        return;
-      case "464":
-      case "465":
-        this.stop(problem("authentication", "Server rejected registration credentials or access."));
-        return;
-      case "ERROR":
-        this.stop(problem("network", "Server terminated the IRC connection."));
-        return;
-      case "NOTICE":
-        // No prefix means the server itself; nicknames cannot contain dots, server names do.
-        if (!input.prefix || (!input.prefix.includes("!") && sender.includes("."))) {
-          const text = plain(p[1] ?? "").trim();
-          if (text) this.emit({ type: "notice", text });
-          return;
-        }
-        this.chat(input, sender);
-        return;
-      case "PRIVMSG":
-        this.chat(input, sender);
-        return;
-      // IRCv3 standard replies; FAIL is handled with labeled requests.
-      case "WARN":
-      case "NOTE":
-        if (p.length >= 3 && plain(p.at(-1)!).trim())
-          this.emit({ type: "notice", text: plain(p.at(-1)!).trim() });
-        return;
-      case "JOIN":
-        if (p[0] && atom(sender)) {
-          const channel = this.channel(p[0]);
-          if (channel) {
-            if (this.self(sender) && !channel.names) channel.names = new Map();
-            this.member(channel, sender, [], "join");
-          }
-          if (this.capabilities.has("extended-join") && p[1])
-            this.emit({
-              type: "account",
-              nick: plain(sender),
-              account: p[1] === "*" ? null : plain(p[1]),
-            });
-        }
-        return;
-      case "PART":
-        if (p[0]) this.remove(p[0], sender, p[1] ?? "");
-        return;
-      case "KICK":
-        if (p[0] && p[1]) this.remove(p[0], p[1], p[2] ?? "");
-        return;
-      case "QUIT":
-        this.modern.clearTyping(sender);
-        for (const channel of this.channels.values()) {
-          channel.members.delete(this.fold(sender));
-          this.touch(channel, this.fold(sender));
-        }
-        this.emit({ type: "quit", nick: plain(sender), reason: plain(p[0] ?? "") });
-        return;
-      case "NICK":
-        if (p[0] && atom(p[0])) this.rename(sender, p[0]);
-        return;
-      case "353":
-        if (p[2] && p[3] !== undefined) this.names(p[2], p[3]);
-        return;
-      case "366":
-        if (p[1]) this.namesEnd(p[1]);
-        return;
-      case "MODE":
-        if (p[0] && p[1]) this.modes(p[0], p[1], p.slice(2));
-        return;
-      case "TOPIC":
-        if (p[0]) this.emit({ type: "topic", channel: plain(p[0]), text: plain(p[1] ?? "") });
-        return;
-      case "332":
-        if (p[1]) this.emit({ type: "topic", channel: plain(p[1]), text: plain(p[2] ?? "") });
-        return;
-      case "331":
-        if (p[1]) this.emit({ type: "topic", channel: plain(p[1]), text: "" });
-        return;
-      case "AWAY":
-        this.emit({ type: "away", nick: plain(sender), away: p.length > 0 });
-        return;
-      // Successful registration may end with ERR_NOMOTD instead of the MOTD numerics.
-      case "422":
-        this.emit({ type: "notice", text: "The server has no message of the day." });
-        return;
-      case "305":
-      case "306":
-        this.emit({ type: "away", nick: plain(this.nick), away: input.command === "306" });
-        return;
-      case "INVITE":
-        if (p[1])
-          this.emit({ type: "notice", text: `${plain(sender)} invited you to ${plain(p[1])}.` });
-        return;
-      case "ACCOUNT":
-        if (p[0])
-          this.emit({
-            type: "account",
-            nick: plain(sender),
-            account: p[0] === "*" ? null : plain(p[0]),
-          });
-        return;
-      case "322":
-        this.directoryItem(p);
-        return;
-      case "323":
-        if (this.directory && !this.directory.expired)
-          this.emit({ type: "directory-complete", operationId: this.directory.operationId });
-        this.directory = undefined;
-        return;
-      case "311":
-      case "319":
-      case "301":
-      case "330":
-      case "318":
-      case "401":
-        // 401 also answers messages to absent nicknames; report those as ordinary rejections.
-        if (this.whoisReply(input.command, p) || input.command !== "401") return;
-        break;
+    const handler = this.handlers.get(input.command);
+    if (!handler) {
+      this.reply(input);
+      return;
     }
-    const rejection: Readonly<Record<string, string>> = {
-      "401": "No such nickname or channel.",
-      "402": "No such server.",
-      "403": "The channel does not exist.",
-      "404": "You cannot send to this channel.",
-      "405": "You have joined too many channels.",
-      "406": "There was no such nickname.",
-      "411": "No recipient was given.",
-      "412": "No text to send.",
-      "432": "The nickname is invalid.",
-      "437": "The channel is temporarily unavailable.",
-      "442": "You are not joined to this channel.",
-      "471": "The channel is full.",
-      "473": "The channel requires an invitation.",
-      "474": "You are banned from this channel.",
-      "475": "A valid channel key is required.",
-      "476": "The channel name is invalid.",
-      "477": "The channel requires an authenticated account.",
-      "481": "You need IRC operator privileges.",
-      "482": "You do not have permission to change this channel.",
+    const pending = handler(input, sender);
+    if (pending) await pending;
+  }
+  /** Command and numeric handlers; anything absent falls back to generic numeric replies. */
+  private routes(): Map<string, Handler> {
+    const routes = new Map<string, Handler>();
+    const on = (commands: string, handler: Handler) => {
+      for (const command of commands.split(" ")) routes.set(command, handler);
     };
-    if (/^[45][0-9]{2}$/.test(input.command))
-      this.emit({
-        type: "error",
-        error: problem(
-          "unavailable",
-          rejection[input.command] ?? `IRC server rejected a request (${input.command}).`,
-        ),
-      });
-    else if (READABLE_NUMERICS.has(input.command)) {
+    on("PING", ({ params }) => this.control("PONG", params));
+    on("PONG", ({ params }) => {
+      if (params.at(-1) === `openirc-${this.pingSentAt}`) this.pingSentAt = undefined;
+    });
+    on("CAP", (input) => this.cap(input));
+    on("AUTHENTICATE", (input) => this.authenticate(input));
+    on("903", () => this.saslSucceeded());
+    on("904 905 906 907", () => this.saslFailed());
+    on("001", ({ params }) => this.registered(params[0]));
+    on("005", ({ params }) => this.isupport(params.slice(1, -1)));
+    on("432 433 436 437", (input) => this.nickRejected(input));
+    on("421", ({ params }) => {
+      if (!this.ready && params[1]?.toUpperCase() === "CAP") return this.endCap();
+      this.emit({ type: "notice", text: "Server does not support this IRC command." });
+    });
+    on("464 465", () =>
+      this.stop(problem("authentication", "Server rejected registration credentials or access.")),
+    );
+    on("ERROR", () => this.stop(problem("network", "Server terminated the IRC connection.")));
+    on("NOTICE", (input, sender) => this.notice(input, sender));
+    on("PRIVMSG", (input, sender) => this.chat(input, sender));
+    // IRCv3 standard replies; FAIL is handled with labeled requests.
+    on("WARN NOTE", ({ params }) => {
+      const text = params.length >= 3 ? plain(params.at(-1)!).trim() : "";
+      if (text) this.emit({ type: "notice", text });
+    });
+    on("JOIN", ({ params }, sender) => this.joined(sender, params[0], params[1]));
+    on("PART", ({ params: p }, sender) => {
+      if (p[0]) this.remove(p[0], sender, p[1] ?? "");
+    });
+    on("KICK", ({ params: p }) => {
+      if (p[0] && p[1]) this.remove(p[0], p[1], p[2] ?? "");
+    });
+    on("QUIT", ({ params }, sender) => this.quit(sender, params[0] ?? ""));
+    on("NICK", ({ params: p }, sender) => {
+      if (p[0] && atom(p[0])) this.rename(sender, p[0]);
+    });
+    on("353", ({ params: p }) => {
+      if (p[2] && p[3] !== undefined) this.names(p[2], p[3]);
+    });
+    on("366", ({ params: p }) => {
+      if (p[1]) this.namesEnd(p[1]);
+    });
+    on("MODE", ({ params: p }) => {
+      if (p[0] && p[1]) this.modes(p[0], p[1], p.slice(2));
+    });
+    on("TOPIC", ({ params: p }) => {
+      if (p[0]) this.emit({ type: "topic", channel: plain(p[0]), text: plain(p[1] ?? "") });
+    });
+    on("332", ({ params: p }) => {
+      if (p[1]) this.emit({ type: "topic", channel: plain(p[1]), text: plain(p[2] ?? "") });
+    });
+    on("331", ({ params: p }) => {
+      if (p[1]) this.emit({ type: "topic", channel: plain(p[1]), text: "" });
+    });
+    on("AWAY", ({ params }, sender) =>
+      this.emit({ type: "away", nick: plain(sender), away: params.length > 0 }),
+    );
+    // Successful registration may end with ERR_NOMOTD instead of the MOTD numerics.
+    on("422", () => this.emit({ type: "notice", text: "The server has no message of the day." }));
+    on("305 306", ({ command }) =>
+      this.emit({ type: "away", nick: plain(this.nick), away: command === "306" }),
+    );
+    on("INVITE", ({ params: p }, sender) => {
+      if (p[1])
+        this.emit({ type: "notice", text: `${plain(sender)} invited you to ${plain(p[1])}.` });
+    });
+    on("ACCOUNT", ({ params: p }, sender) => {
+      if (p[0]) this.account(sender, p[0]);
+    });
+    on("322", ({ params }) => this.directoryItem(params));
+    on("323", () => this.directoryEnd());
+    on("311 319 301 330 318 401", (input) => {
+      // 401 also answers messages to absent nicknames; report those as ordinary rejections.
+      if (!this.whoisReply(input.command, input.params) && input.command === "401")
+        this.reply(input);
+    });
+    return routes;
+  }
+  /** A labeled error for one of our message fragments fails that whole logical send. */
+  private rejectedFragment(input: IrcFrame): boolean {
+    if (input.command !== "FAIL" && !/^[45][0-9]{2}$/.test(input.command)) return false;
+    const label = this.modern.label(input);
+    const rejected = label ? this.labels.get(label) : undefined;
+    if (!rejected) return false;
+    this.emit({
+      type: "send-state",
+      operationId: rejected.operationId,
+      state: "failed",
+      error: problem(
+        "unavailable",
+        `Server rejected a message fragment (${input.command}); other fragments may already have been written.`,
+      ),
+    });
+    this.forgetSend(rejected);
+    return true;
+  }
+  /** Generic numerics: rejections become errors, prose becomes notices, the rest stays opaque. */
+  private reply(input: IrcFrame) {
+    const { command, params } = input;
+    if (/^[45][0-9]{2}$/.test(command)) {
+      const message = REJECTIONS[command] ?? `IRC server rejected a request (${command}).`;
+      this.emit({ type: "error", error: problem("unavailable", message) });
+    } else if (READABLE_NUMERICS.has(command)) {
       // Welcome, user counts and MOTD are prose meant for people; show it instead of a code.
-      const prose = TRAILING_NUMERICS.has(input.command) ? (p.at(-1) ?? "") : p.slice(1).join(" ");
+      const prose = TRAILING_NUMERICS.has(command)
+        ? (params.at(-1) ?? "")
+        : params.slice(1).join(" ");
       const text = plain(prose).replace(/^- ?/u, "").trimEnd();
       if (text.trim()) this.emit({ type: "notice", text });
-    } else if (/^[0-9]{3}$/.test(input.command) && !QUIET_NUMERICS.has(input.command))
-      this.emit({ type: "notice", text: `IRC server response ${input.command}.` });
+    } else if (/^[0-9]{3}$/.test(command) && !QUIET_NUMERICS.has(command))
+      this.emit({ type: "notice", text: `IRC server response ${command}.` });
+  }
+  private async saslSucceeded() {
+    if (!this.saslStarted || !this.saslSent) {
+      this.stop(problem("authentication", "Unexpected SASL success."));
+      return;
+    }
+    this.authenticated = true;
+    await this.endCap();
+  }
+  private async registered(nick: string | undefined) {
+    // Optional SASL must not turn a server that registers us without CAP into a failure.
+    if (!this.capEnded && !this.profile.sasl?.required && !this.saslStarted) await this.endCap();
+    if (!this.capEnded || (this.profile.sasl?.required && !this.authenticated)) {
+      this.stop(
+        problem("authentication", "Server registered before required authentication completed."),
+      );
+      return;
+    }
+    if (nick && atom(nick)) this.nick = nick;
+    this.ready = true;
+    this.state("ready");
+  }
+  private nickRejected(input: IrcFrame): Promise<void> | void {
+    if (!this.ready) return this.nextNick();
+    // 437 also covers temporarily unavailable channels; only nickname replies are conflicts.
+    if (
+      input.command === "432" ||
+      (input.command === "437" && this.isChannel(input.params[1] ?? ""))
+    ) {
+      this.reply(input);
+      return;
+    }
+    this.emit({ type: "error", error: problem("conflict", "Nickname is unavailable.") });
+  }
+  /** During registration, fall back through the configured alternate nicknames. */
+  private async nextNick() {
+    if (this.alternate >= this.profile.identity.alternateNicks.length) {
+      this.stop(
+        problem(
+          "conflict",
+          "Every configured nickname was rejected or is in use; add an alternate nickname.",
+        ),
+      );
+      return;
+    }
+    this.nick = this.profile.identity.alternateNicks[this.alternate++]!;
+    await this.control("NICK", [this.nick]);
+    this.state(this.phase);
+  }
+  private notice(input: IrcFrame, sender: string) {
+    // No prefix means the server itself; nicknames cannot contain dots, server names do.
+    if (input.prefix && (input.prefix.includes("!") || !sender.includes("."))) {
+      this.chat(input, sender);
+      return;
+    }
+    const text = plain(input.params[1] ?? "").trim();
+    if (text) this.emit({ type: "notice", text });
+  }
+  private joined(sender: string, name: string | undefined, account: string | undefined) {
+    if (!name || !atom(sender)) return;
+    const channel = this.channel(name);
+    if (channel) {
+      if (this.self(sender) && !channel.names) channel.names = new Map();
+      this.member(channel, sender, [], "join");
+    }
+    if (this.capabilities.has("extended-join") && account) this.account(sender, account);
+  }
+  private account(nick: string, account: string) {
+    this.emit({
+      type: "account",
+      nick: plain(nick),
+      account: account === "*" ? null : plain(account),
+    });
+  }
+  private quit(sender: string, reason: string) {
+    this.modern.clearTyping(sender);
+    for (const channel of this.channels.values()) {
+      channel.members.delete(this.fold(sender));
+      this.touch(channel, this.fold(sender));
+    }
+    this.emit({ type: "quit", nick: plain(sender), reason: plain(reason) });
+  }
+  private directoryEnd() {
+    if (this.directory && !this.directory.expired)
+      this.emit({ type: "directory-complete", operationId: this.directory.operationId });
+    this.directory = undefined;
   }
   private isupport(tokens: readonly string[]) {
     this.modern.isupport(tokens);
     let support = this.support;
     for (const token of tokens) {
       const [name, value = ""] = token.split("=");
-      if (name === "CASEMAPPING" && ["ascii", "rfc1459", "strict-rfc1459"].includes(value)) {
-        if (value !== support.casemapping && this.channels.size) {
-          this.stop(
-            problem(
-              "conflict",
-              "Server changed IRC casemapping with active membership; reconnect required.",
-            ),
-          );
-          return;
-        }
-        if (value === "ascii" || value === "rfc1459" || value === "strict-rfc1459")
-          support = { ...support, casemapping: value };
-      } else if (name === "CHANTYPES" && value && /^[^\s\x00-\x1f,]+$/.test(value))
-        support = { ...support, channelTypes: plain(value) };
-      else if (name === "PREFIX") {
-        // An explicitly empty PREFIX means the network has no member prefixes at all.
-        const match = /^(?:\(([a-zA-Z]+)\)([^\s]+))?$/.exec(value);
-        if (match && (match[1] ?? "").length === (match[2] ?? "").length)
-          support = {
-            ...support,
-            prefixModes: match[1] ?? "",
-            prefixSymbols: plain(match[2] ?? ""),
-          };
-      } else if (name === "STATUSMSG" && /^[^\s\x00-\x1f,#&]*$/.test(value))
-        this.statusPrefixes = value;
-      else if (name === "CHANMODES") {
-        const groups = value.split(",");
-        if (groups.length === 4 && groups.every((group) => /^[a-zA-Z]*$/.test(group)))
-          support = {
-            ...support,
-            channelModeGroups: [groups[0]!, groups[1]!, groups[2]!, groups[3]!],
-          };
+      if (
+        name === "CASEMAPPING" &&
+        isCasemapping(value) &&
+        value !== support.casemapping &&
+        this.channels.size
+      ) {
+        this.stop(
+          problem(
+            "conflict",
+            "Server changed IRC casemapping with active membership; reconnect required.",
+          ),
+        );
+        return;
       }
+      if (name === "STATUSMSG" && /^[^\s\x00-\x1f,#&]*$/.test(value)) this.statusPrefixes = value;
+      support = withSupportToken(support, name, value);
     }
     this.support = support;
     this.publishSupport();
@@ -1043,33 +1076,47 @@ class Attempt {
     // STATUSMSG (`@#room`) reaches a subset of the channel; it still belongs in the channel.
     if (this.statusPrefixes.includes(target[0]!) && this.isChannel(target.slice(1)))
       target = target.slice(1);
-    let text = body;
-    let kind: ChatEnvelope["kind"] = input.command === "NOTICE" ? "notice" : "text";
-    if (body.startsWith("\x01")) {
-      // The closing \x01 is optional in practice. No CTCP is executed or answered: replies leak privacy.
-      const [command = "", ...rest] = body.slice(1).replace(/\x01$/u, "").split(" ");
-      const name = plain(command).toUpperCase().slice(0, 32);
-      if (name === "ACTION") {
-        kind = "action";
-        text = rest.join(" ");
-      } else {
-        if (name)
-          this.emit({
-            type: "notice",
-            text:
-              input.command === "NOTICE"
-                ? `${plain(sender)} sent a CTCP ${name} reply.`
-                : `${plain(sender)} sent a CTCP ${name} request; opentui-irc does not answer CTCP requests.`,
-          });
-        return;
-      }
-    }
-    const serverTime = input.tags.time ? Date.parse(input.tags.time) : NaN;
+    const parsed = this.chatBody(input.command, sender, body);
+    if (!parsed) return;
     this.modern.observeChat(input, sender, target);
     const label = this.modern.playback(input) ? undefined : this.modern.label(input);
     const send = label ? this.labels.get(label) : undefined;
+    const message = this.envelope(input, sender, target, parsed);
+    if (send && label && this.self(sender) && this.fold(target) === this.fold(send.target))
+      this.echoed(send, label, message);
+    else this.emit({ type: "chat", message });
+  }
+  /** Plain text or a CTCP ACTION; any other CTCP is reported, never answered, and yields nothing. */
+  private chatBody(
+    command: string,
+    sender: string,
+    body: string,
+  ): { kind: ChatEnvelope["kind"]; text: string } | undefined {
+    if (!body.startsWith("\x01"))
+      return { kind: command === "NOTICE" ? "notice" : "text", text: body };
+    // The closing \x01 is optional in practice. No CTCP is executed or answered: replies leak privacy.
+    const [ctcp = "", ...rest] = body.slice(1).replace(/\x01$/u, "").split(" ");
+    const name = plain(ctcp).toUpperCase().slice(0, 32);
+    if (name === "ACTION") return { kind: "action", text: rest.join(" ") };
+    if (name)
+      this.emit({
+        type: "notice",
+        text:
+          command === "NOTICE"
+            ? `${plain(sender)} sent a CTCP ${name} reply.`
+            : `${plain(sender)} sent a CTCP ${name} request; opentui-irc does not answer CTCP requests.`,
+      });
+    return undefined;
+  }
+  private envelope(
+    input: IrcFrame,
+    sender: string,
+    target: string,
+    { kind, text }: { kind: ChatEnvelope["kind"]; text: string },
+  ): ChatEnvelope {
+    const serverTime = input.tags.time ? Date.parse(input.tags.time) : NaN;
     const reply = input.tags[modernProtocol.reply];
-    const message: ChatEnvelope = {
+    return {
       target: plain(target),
       sender: {
         nick: plain(sender),
@@ -1087,28 +1134,28 @@ class Attempt {
         : {}),
       ...(reply && validServerId(reply) ? { replyToServerId: reply } : {}),
     };
-    if (send && label && this.self(sender) && this.fold(target) === this.fold(send.target)) {
-      send.echoes.set(label, message);
-      if (send.echoes.size === send.fragments) {
-        // A split logical send cannot truthfully expose one fragment's server ID as its own.
-        const logical: ChatEnvelope =
-          send.fragments === 1
-            ? { ...message, operationId: send.operationId }
-            : {
-                target: message.target,
-                sender: message.sender,
-                kind: send.kind,
-                text: plainMultiline(send.text),
-                receivedAt: message.receivedAt,
-                source: "live",
-                operationId: send.operationId,
-                ...(send.replyToServerId ? { replyToServerId: send.replyToServerId } : {}),
-              };
-        this.emit({ type: "chat", message: logical });
-        this.emit({ type: "send-state", operationId: send.operationId, state: "echo-observed" });
-        this.forgetSend(send);
-      }
-    } else this.emit({ type: "chat", message });
+  }
+  /** Our labeled echo; the logical send completes once every fragment's echo is observed. */
+  private echoed(send: Send, label: string, message: ChatEnvelope) {
+    send.echoes.set(label, message);
+    if (send.echoes.size !== send.fragments) return;
+    // A split logical send cannot truthfully expose one fragment's server ID as its own.
+    const logical: ChatEnvelope =
+      send.fragments === 1
+        ? { ...message, operationId: send.operationId }
+        : {
+            target: message.target,
+            sender: message.sender,
+            kind: send.kind,
+            text: plainMultiline(send.text),
+            receivedAt: message.receivedAt,
+            source: "live",
+            operationId: send.operationId,
+            ...(send.replyToServerId ? { replyToServerId: send.replyToServerId } : {}),
+          };
+    this.emit({ type: "chat", message: logical });
+    this.emit({ type: "send-state", operationId: send.operationId, state: "echo-observed" });
+    this.forgetSend(send);
   }
   private forgetSend(send: Send) {
     this.sends.delete(send.operationId);
@@ -1327,84 +1374,10 @@ class Attempt {
   ): Promise<Result<void>> {
     if (signal.aborted) return failure("cancelled", "Operation cancelled.");
     if (!this.ready || this.stopped) return failure("unavailable", "IRC connection is not ready.");
-    if (
-      this.sends.has(operationId) ||
-      this.queue.some((item) => item.operationId === operationId) ||
-      this.whois?.operationId === operationId ||
-      this.directory?.operationId === operationId ||
-      this.modern.hasOperation(operationId)
-    )
-      return failure("conflict", "Operation is already active.");
-    let bytes = 32;
-    let fragments = 1;
-    let emptyLines = 0;
-    switch (command.type) {
-      case "join":
-      case "part":
-      case "topic":
-        if (!atom(command.channel) || !this.support.channelTypes.includes(command.channel[0]!))
-          return failure("invalid-input", "Invalid IRC channel.");
-        if (command.type === "join" && command.key && !this.secure)
-          return failure("authentication", "Channel keys require a verified TLS connection.");
-        if (command.type === "part" && command.reason !== undefined && !content(command.reason))
-          return failure("invalid-input", "Invalid part reason.");
-        if (command.type === "topic" && command.text !== undefined && !content(command.text))
-          return failure("invalid-input", "Invalid topic.");
-        bytes +=
-          byteLength(command.channel) +
-          (command.type === "part"
-            ? byteLength(command.reason ?? "")
-            : command.type === "topic"
-              ? byteLength(command.text ?? "")
-              : 0);
-        break;
-      case "send":
-        if (
-          !atom(command.target) ||
-          command.target.includes("*") ||
-          !command.text ||
-          /[\r\0]/.test(command.text) ||
-          command.text.includes("\x01")
-        )
-          return failure("invalid-input", "Invalid message target or content.");
-        if (command.replyToServerId !== undefined) {
-          if (!this.modern.features().replies)
-            return failure(
-              "unsupported",
-              "Replies require permitted message tags and observed server message IDs.",
-            );
-          if (!validServerId(command.replyToServerId))
-            return failure("invalid-input", "Invalid reply message reference.");
-        }
-        if (this.sends.size >= this.policy.maxPendingSends)
-          return failure("rate-limited", "Too many unresolved message sends.");
-        {
-          const plan = this.split(command);
-          if (!plan.ok) return plan;
-          fragments = plan.value.pieces.length;
-          emptyLines = plan.value.emptyLines;
-        }
-        bytes += byteLength(command.target) + byteLength(command.text);
-        break;
-      case "nick":
-        if (!atom(command.nick)) return failure("invalid-input", "Invalid nickname.");
-        bytes += byteLength(command.nick);
-        break;
-      case "away":
-        if (command.reason !== null && !content(command.reason))
-          return failure("invalid-input", "Invalid away reason.");
-        bytes += byteLength(command.reason ?? "");
-        break;
-      case "whois":
-        if (!atom(command.nick)) return failure("invalid-input", "Invalid WHOIS nickname.");
-        if (this.whois) return failure("conflict", "Another WHOIS request is still active.");
-        break;
-      case "list":
-        if (this.directory) return failure("conflict", "Another LIST request is still active.");
-        break;
-      default:
-        bytes += byteLength(JSON.stringify(command));
-    }
+    if (this.active(operationId)) return failure("conflict", "Operation is already active.");
+    const cost = this.cost(command);
+    if (!cost.ok) return cost;
+    const { bytes, fragments, emptyLines } = cost.value;
     if (
       this.queue.length >= this.policy.maxQueueCommands ||
       bytes > this.policy.maxQueueBytes - this.queueBytes ||
@@ -1418,6 +1391,101 @@ class Attempt {
       command.type === "history" && command.before
         ? { ...command, before: { ...command.before } }
         : { ...command };
+    this.track(command, operationId);
+    this.queue.push({ command: owned, operationId, bytes, fragments });
+    this.queueBytes += bytes;
+    this.queueFragments += fragments;
+    if (emptyLines)
+      this.emit({
+        type: "notice",
+        text: "Basic IRC represents each empty line as a single space; the original multiline text is preserved locally.",
+      });
+    void this.drain();
+    return ok();
+  }
+  private active(operationId: OperationId) {
+    return (
+      this.sends.has(operationId) ||
+      this.queue.some((item) => item.operationId === operationId) ||
+      this.whois?.operationId === operationId ||
+      this.directory?.operationId === operationId ||
+      this.modern.hasOperation(operationId)
+    );
+  }
+  /** Validates a command for admission and estimates its outgoing queue footprint. */
+  private cost(command: SessionCommand): Result<Cost> {
+    switch (command.type) {
+      case "join":
+      case "part":
+      case "topic":
+        return this.channelCost(command);
+      case "send":
+        return this.sendCost(command);
+      case "nick":
+        if (!atom(command.nick)) return failure("invalid-input", "Invalid nickname.");
+        return queueCost(byteLength(command.nick));
+      case "away":
+        if (command.reason !== null && !content(command.reason))
+          return failure("invalid-input", "Invalid away reason.");
+        return queueCost(byteLength(command.reason ?? ""));
+      case "whois":
+        if (!atom(command.nick)) return failure("invalid-input", "Invalid WHOIS nickname.");
+        if (this.whois) return failure("conflict", "Another WHOIS request is still active.");
+        return queueCost(0);
+      case "list":
+        if (this.directory) return failure("conflict", "Another LIST request is still active.");
+        return queueCost(0);
+      default:
+        return queueCost(byteLength(JSON.stringify(command)));
+    }
+  }
+  private channelCost(
+    command: Extract<SessionCommand, { type: "join" | "part" | "topic" }>,
+  ): Result<Cost> {
+    if (!atom(command.channel) || !this.support.channelTypes.includes(command.channel[0]!))
+      return failure("invalid-input", "Invalid IRC channel.");
+    switch (command.type) {
+      case "join":
+        if (command.key && !this.secure)
+          return failure("authentication", "Channel keys require a verified TLS connection.");
+        return queueCost(byteLength(command.channel));
+      case "part":
+        if (command.reason !== undefined && !content(command.reason))
+          return failure("invalid-input", "Invalid part reason.");
+        return queueCost(byteLength(command.channel) + byteLength(command.reason ?? ""));
+      case "topic":
+        if (command.text !== undefined && !content(command.text))
+          return failure("invalid-input", "Invalid topic.");
+        return queueCost(byteLength(command.channel) + byteLength(command.text ?? ""));
+    }
+  }
+  private sendCost(command: SendCommand): Result<Cost> {
+    if (
+      !atom(command.target) ||
+      command.target.includes("*") ||
+      !command.text ||
+      /[\r\0]/.test(command.text) ||
+      command.text.includes("\x01")
+    )
+      return failure("invalid-input", "Invalid message target or content.");
+    if (command.replyToServerId !== undefined) {
+      if (!this.modern.features().replies)
+        return failure(
+          "unsupported",
+          "Replies require permitted message tags and observed server message IDs.",
+        );
+      if (!validServerId(command.replyToServerId))
+        return failure("invalid-input", "Invalid reply message reference.");
+    }
+    if (this.sends.size >= this.policy.maxPendingSends)
+      return failure("rate-limited", "Too many unresolved message sends.");
+    const plan = this.split(command);
+    if (!plan.ok) return plan;
+    const bytes = byteLength(command.target) + byteLength(command.text);
+    return queueCost(bytes, plan.value.pieces.length, plan.value.emptyLines);
+  }
+  /** Registers the query or send state that later replies and echoes correlate against. */
+  private track(command: SessionCommand, operationId: OperationId) {
     if (command.type === "whois")
       this.whois = {
         operationId,
@@ -1443,16 +1511,6 @@ class Attempt {
         expectsEcho: false,
         ...(command.replyToServerId ? { replyToServerId: command.replyToServerId } : {}),
       });
-    this.queue.push({ command: owned, operationId, bytes, fragments });
-    this.queueBytes += bytes;
-    this.queueFragments += fragments;
-    if (emptyLines)
-      this.emit({
-        type: "notice",
-        text: "Basic IRC represents each empty line as a single space; the original multiline text is preserved locally.",
-      });
-    void this.drain();
-    return ok();
   }
   private async pacedWrite(output: IrcFrame, send?: Send) {
     while (this.nextWriteAt > this.options.clock.now()) {
@@ -1550,7 +1608,7 @@ class Attempt {
         return this.modern.perform(command, item.operationId, (output) => this.pacedWrite(output));
     }
   }
-  private split(command: Extract<SessionCommand, { type: "send" }>) {
+  private split(command: SendCommand) {
     return splitMessage({
       text: command.text,
       target: command.target,
@@ -1563,7 +1621,7 @@ class Attempt {
   }
   private async send(
     operationId: OperationId,
-    command: Extract<SessionCommand, { type: "send" }>,
+    command: SendCommand,
     item: Queued,
   ): Promise<Result<void>> {
     const send = this.sends.get(operationId)!;

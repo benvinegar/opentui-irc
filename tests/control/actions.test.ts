@@ -48,45 +48,54 @@ const samples = [
 function object(value: JsonValue | undefined): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+function typeMatches(value: unknown, kind: unknown): boolean {
+  return kind === "null"
+    ? value === null
+    : kind === "object"
+      ? value !== null && typeof value === "object" && !Array.isArray(value)
+      : typeof value === kind;
+}
+function matchesValue(value: unknown, shape: JsonObject): boolean {
+  if (
+    shape.type &&
+    !(Array.isArray(shape.type)
+      ? shape.type.some((kind: JsonValue) => typeMatches(value, kind))
+      : typeMatches(value, shape.type))
+  )
+    return false;
+  if (shape.const !== undefined && shape.const !== value) return false;
+  return !(Array.isArray(shape.enum) && !shape.enum.includes(value));
+}
+function matchesString(value: string, shape: JsonObject): boolean {
+  if (typeof shape.minLength === "number" && value.length < shape.minLength) return false;
+  if (typeof shape.maxLength === "number" && value.length > shape.maxLength) return false;
+  return !(typeof shape.pattern === "string" && !new RegExp(shape.pattern, "u").test(value));
+}
+function matchesProperties(value: object, shape: JsonObject): boolean {
+  if (!object(shape.properties)) return false;
+  const properties = shape.properties;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (
+    Array.isArray(shape.required) &&
+    !shape.required.every((key: JsonValue) => typeof key === "string" && Object.hasOwn(value, key))
+  )
+    return false;
+  return Object.keys(descriptors).every((key) => {
+    const child = properties[key];
+    return object(child) && matches(descriptors[key]?.value, child);
+  });
+}
 /** Test interpreter for the action schema's actual assertion keywords. */
 function matches(value: unknown, shape: JsonObject): boolean {
   if (Array.isArray(shape.oneOf))
     return (
       shape.oneOf.filter((item: JsonValue) => object(item) && matches(value, item)).length === 1
     );
-  const type = (kind: unknown) =>
-    kind === "null"
-      ? value === null
-      : kind === "object"
-        ? value !== null && typeof value === "object" && !Array.isArray(value)
-        : typeof value === kind;
-  if (shape.type && !(Array.isArray(shape.type) ? shape.type.some(type) : type(shape.type)))
-    return false;
-  if (shape.const !== undefined && shape.const !== value) return false;
-  if (Array.isArray(shape.enum) && !shape.enum.includes(value)) return false;
-  if (typeof value === "string") {
-    if (typeof shape.minLength === "number" && value.length < shape.minLength) return false;
-    if (typeof shape.maxLength === "number" && value.length > shape.maxLength) return false;
-    if (typeof shape.pattern === "string" && !new RegExp(shape.pattern, "u").test(value))
-      return false;
-  }
-  if (typeof value === "object" && value !== null) {
-    if (!object(shape.properties)) return false;
-    const properties = shape.properties;
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    if (
-      Array.isArray(shape.required) &&
-      !shape.required.every(
-        (key: JsonValue) => typeof key === "string" && Object.hasOwn(value, key),
-      )
-    )
-      return false;
-    for (const key of Object.keys(descriptors)) {
-      const child = properties[key];
-      if (!object(child) || !matches(descriptors[key]?.value, child)) return false;
-    }
-  }
-  return true;
+  return (
+    matchesValue(value, shape) &&
+    (typeof value !== "string" || matchesString(value, shape)) &&
+    (typeof value !== "object" || value === null || matchesProperties(value, shape))
+  );
 }
 
 describe("control action schema and parser", () => {

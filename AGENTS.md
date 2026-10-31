@@ -28,6 +28,7 @@ Read `docs/AGENT_GUIDE.md`. Use `bun run --silent ctl --help`, `config schema`, 
 - Runtime validate external data. No unsafe type casts/`any` to bypass contract coordination.
 - No power-user/moderation/plugin/DCC work in the initial slice. Modern features are capability-negotiated.
 - Do not add dependencies without checking Bun compatibility and coordinating package/lockfile edits.
+- oxlint enforces cyclomatic complexity ≤ 20 (`.oxlintrc.json`). Prefer handler tables and named helpers; never disable the rule or raise the limit to land a change.
 - Production OpenTUI JSX setup must follow the real Solid renderer documentation; no browser DOM assumptions.
 
 ## Validation

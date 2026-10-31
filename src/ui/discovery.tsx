@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import type { AppAction, AppApi } from "../contracts/app";
 import type { NetworkId } from "../contracts/common";
-import type { DiscoverySnapshot } from "../contracts/discovery";
+import type { ChannelListing, DiscoverySnapshot } from "../contracts/discovery";
 import { Button, Field, usePalette } from "./primitives";
 
 export function DiscoveryPanel(props: {
@@ -55,6 +55,13 @@ export function DiscoveryPanel(props: {
     if (await props.dispatch({ type: "conversation.join", networkId: props.networkId, channel }))
       props.close();
   };
+  const startConversation = (value: string) => {
+    void props
+      .dispatch({ type: "conversation.query", networkId: props.networkId, nick: value })
+      .then((ok) => {
+        if (ok) props.close();
+      });
+  };
   return (
     <>
       <text fg={colors.muted}>
@@ -67,139 +74,170 @@ export function DiscoveryPanel(props: {
       <Show
         when={props.mode === "directory"}
         fallback={
-          <>
-            <Field
-              id="whois-nick"
-              label="Look up a nickname"
-              value={nick()}
-              onInput={setNick}
-              onSubmit={requestUser}
-            />
-            <Button
-              id="whois-request"
-              layer="modal"
-              label={snapshot()?.user.state === "loading" ? "Looking up…" : "Look up person"}
-              disabled={snapshot()?.user.state === "loading"}
-              onPress={requestUser}
-            />
-            <Show when={snapshot()?.user.state === "loading"}>
-              <text fg={colors.muted}>Waiting for the network’s WHOIS response…</text>
-            </Show>
-            <Show when={snapshot()?.user.state === "idle"}>
-              <text fg={colors.muted}>
-                Enter a nickname and choose Look up person. The network may omit private details.
-              </text>
-            </Show>
-            <Show when={snapshot()?.user.error}>
-              <text fg={colors.error}>{snapshot()?.user.error?.message}</text>
-            </Show>
-            <Show when={snapshot()?.user.state === "ready" && snapshot()?.user.details}>
-              {() => {
-                const details = () => snapshot()?.user.details;
-                return (
-                  <>
-                    <text fg={colors.accent}>
-                      <b>{details()?.nick}</b>
-                    </text>
-                    <text fg={colors.text}>Name: {details()?.realname ?? "not provided"}</text>
-                    <text fg={colors.text}>Account: {details()?.account ?? "not provided"}</text>
-                    <text fg={colors.muted}>
-                      Username: {details()?.username ?? "not provided"} · Host:{" "}
-                      {details()?.hostname ?? "not provided"}
-                    </text>
-                    <text fg={colors.text}>
-                      {details()?.awayReason
-                        ? `Away: ${details()?.awayReason}`
-                        : "No away message reported."}
-                    </text>
-                    <Button
-                      id="whois-message"
-                      layer="modal"
-                      label="Start a direct conversation"
-                      onPress={() => {
-                        const value = details()?.nick;
-                        if (value)
-                          void props
-                            .dispatch({
-                              type: "conversation.query",
-                              networkId: props.networkId,
-                              nick: value,
-                            })
-                            .then((ok) => {
-                              if (ok) props.close();
-                            });
-                      }}
-                    />
-                    <text fg={colors.muted}>
-                      Visible channels: {details()?.channels.join(", ") || "none reported"}
-                    </text>
-                  </>
-                );
-              }}
-            </Show>
-          </>
+          <WhoisLookup
+            user={snapshot()?.user}
+            nick={nick()}
+            onNick={setNick}
+            request={requestUser}
+            startConversation={startConversation}
+          />
         }
       >
-        <Field
-          id="directory-filter"
-          label="Filter channel names and topics locally"
-          value={filter()}
-          onInput={setFilter}
-          placeholder="Search this directory"
-        />
-        <Button
-          id="directory-refresh"
-          layer="modal"
-          label={
-            snapshot()?.directory.state === "loading"
-              ? "Receiving directory…"
-              : "Request channel directory"
-          }
-          disabled={snapshot()?.directory.state === "loading"}
-          onPress={() => {
+        <ChannelDirectory
+          directory={snapshot()?.directory}
+          filter={filter()}
+          onFilter={setFilter}
+          matches={matches()}
+          refresh={() => {
             void props.dispatch({
               type: "irc.request",
               networkId: props.networkId,
               command: { type: "list" },
             });
           }}
+          join={(channel) => void join(channel)}
         />
-        <Show when={snapshot()?.directory.state === "idle"}>
-          <text fg={colors.muted}>
-            Choose Request channel directory to ask the network for public channels.
-          </text>
-        </Show>
-        <Show when={snapshot()?.directory.error}>
-          <text fg={colors.error}>{snapshot()?.directory.error?.message}</text>
-        </Show>
-        <Show when={snapshot()?.directory.truncated}>
-          <text fg={colors.error}>
-            The network directory exceeded the application limit. Some channels are omitted; you can
-            still join a channel by name.
-          </text>
-        </Show>
+      </Show>
+    </>
+  );
+}
+
+function WhoisLookup(props: {
+  user: DiscoverySnapshot["user"] | undefined;
+  nick: string;
+  onNick: (value: string) => void;
+  request: () => void;
+  startConversation: (nick: string) => void;
+}) {
+  const colors = usePalette();
+  const loading = () => props.user?.state === "loading";
+  return (
+    <>
+      <Field
+        id="whois-nick"
+        label="Look up a nickname"
+        value={props.nick}
+        onInput={props.onNick}
+        onSubmit={props.request}
+      />
+      <Button
+        id="whois-request"
+        layer="modal"
+        label={loading() ? "Looking up…" : "Look up person"}
+        disabled={loading()}
+        onPress={props.request}
+      />
+      <Show when={loading()}>
+        <text fg={colors.muted}>Waiting for the network’s WHOIS response…</text>
+      </Show>
+      <Show when={props.user?.state === "idle"}>
         <text fg={colors.muted}>
-          {matches().length} matches · displaying up to 100. Refine the filter to find more.{" "}
-          {snapshot()?.directory.state === "loading" ? "Results are still arriving." : ""}
+          Enter a nickname and choose Look up person. The network may omit private details.
         </text>
-        <For each={matches().slice(0, 100)}>
-          {(item, index) => (
-            <box flexDirection="column" flexShrink={0}>
+      </Show>
+      <Show when={props.user?.error}>
+        <text fg={colors.error}>{props.user?.error?.message}</text>
+      </Show>
+      <Show when={props.user?.state === "ready" && props.user?.details}>
+        {() => {
+          const details = () => props.user?.details;
+          return (
+            <>
+              <text fg={colors.accent}>
+                <b>{details()?.nick}</b>
+              </text>
+              <text fg={colors.text}>Name: {details()?.realname ?? "not provided"}</text>
+              <text fg={colors.text}>Account: {details()?.account ?? "not provided"}</text>
+              <text fg={colors.muted}>
+                Username: {details()?.username ?? "not provided"} · Host:{" "}
+                {details()?.hostname ?? "not provided"}
+              </text>
+              <text fg={colors.text}>
+                {details()?.awayReason
+                  ? `Away: ${details()?.awayReason}`
+                  : "No away message reported."}
+              </text>
               <Button
-                id={`directory-join-${index()}`}
+                id="whois-message"
                 layer="modal"
-                label={`Join ${item.channel} · ${item.userCount} people`}
-                onPress={() => void join(item.channel)}
+                label="Start a direct conversation"
+                onPress={() => {
+                  const value = details()?.nick;
+                  if (value) props.startConversation(value);
+                }}
               />
-              <text fg={colors.muted}>{item.topic || "No topic provided"}</text>
-            </box>
-          )}
-        </For>
-        <Show when={snapshot()?.directory.state === "ready" && !matches().length}>
-          <text fg={colors.muted}>
-            No channels match. Try a shorter filter or join a known channel by name.
-          </text>
-        </Show>
+              <text fg={colors.muted}>
+                Visible channels: {details()?.channels.join(", ") || "none reported"}
+              </text>
+            </>
+          );
+        }}
+      </Show>
+    </>
+  );
+}
+
+function ChannelDirectory(props: {
+  directory: DiscoverySnapshot["directory"] | undefined;
+  filter: string;
+  onFilter: (value: string) => void;
+  matches: readonly ChannelListing[];
+  refresh: () => void;
+  join: (channel: string) => void;
+}) {
+  const colors = usePalette();
+  const loading = () => props.directory?.state === "loading";
+  return (
+    <>
+      <Field
+        id="directory-filter"
+        label="Filter channel names and topics locally"
+        value={props.filter}
+        onInput={props.onFilter}
+        placeholder="Search this directory"
+      />
+      <Button
+        id="directory-refresh"
+        layer="modal"
+        label={loading() ? "Receiving directory…" : "Request channel directory"}
+        disabled={loading()}
+        onPress={props.refresh}
+      />
+      <Show when={props.directory?.state === "idle"}>
+        <text fg={colors.muted}>
+          Choose Request channel directory to ask the network for public channels.
+        </text>
+      </Show>
+      <Show when={props.directory?.error}>
+        <text fg={colors.error}>{props.directory?.error?.message}</text>
+      </Show>
+      <Show when={props.directory?.truncated}>
+        <text fg={colors.error}>
+          The network directory exceeded the application limit. Some channels are omitted; you can
+          still join a channel by name.
+        </text>
+      </Show>
+      <text fg={colors.muted}>
+        {props.matches.length} matches · displaying up to 100. Refine the filter to find more.{" "}
+        {loading() ? "Results are still arriving." : ""}
+      </text>
+      <For each={props.matches.slice(0, 100)}>
+        {(item, index) => (
+          <box flexDirection="column" flexShrink={0}>
+            <Button
+              id={`directory-join-${index()}`}
+              layer="modal"
+              label={`Join ${item.channel} · ${item.userCount} people`}
+              onPress={() => props.join(item.channel)}
+            />
+            <text fg={colors.muted}>{item.topic || "No topic provided"}</text>
+          </box>
+        )}
+      </For>
+      <Show when={props.directory?.state === "ready" && !props.matches.length}>
+        <text fg={colors.muted}>
+          No channels match. Try a shorter filter or join a known channel by name.
+        </text>
       </Show>
     </>
   );

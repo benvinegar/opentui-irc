@@ -55,125 +55,130 @@ export function secretReference(value: unknown): value is string {
 function channel(value: unknown): value is string {
   return identifier(value) && /^[#&+!][^ ,:]+$/u.test(value);
 }
+function endpoint(value: unknown): value is Record<string, unknown> {
+  return (
+    record(value) &&
+    keys(value, ["host", "port", "tls"]) &&
+    identifier(value.host) &&
+    (isIP(value.host) !== 0 || !/[/:@[\]]/u.test(value.host)) &&
+    integer(value.port, 1, 65535) &&
+    typeof value.tls === "boolean"
+  );
+}
+function identity(value: unknown): boolean {
+  return (
+    record(value) &&
+    keys(value, ["nick", "alternateNicks", "username", "realname"]) &&
+    identifier(value.nick) &&
+    identifier(value.username) &&
+    text(value.realname, 512) &&
+    !/[\n\t]/u.test(value.realname) &&
+    list(value.alternateNicks, identifier, 16) &&
+    unique([value.nick, ...value.alternateNicks])
+  );
+}
+/** SASL PLAIN sends the password in the clear, so every endpoint must use TLS. */
+function sasl(value: unknown, endpoints: readonly unknown[]): boolean {
+  return (
+    record(value) &&
+    keys(value, ["mechanism", "account", "password", "required"]) &&
+    value.mechanism === "PLAIN" &&
+    identifier(value.account) &&
+    secretReference(value.password) &&
+    typeof value.required === "boolean" &&
+    endpoints.every((item) => record(item) && item.tls === true)
+  );
+}
+function autoJoin(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 1000) return false;
+  const channels: string[] = [];
+  for (const join of value) {
+    if (
+      !record(join) ||
+      !keys(join, ["channel", "key"]) ||
+      !channel(join.channel) ||
+      (join.key !== undefined && !secretReference(join.key))
+    )
+      return false;
+    channels.push(join.channel);
+  }
+  return unique(channels);
+}
+function network(value: unknown): value is Record<string, unknown> & { id: string } {
+  return (
+    record(value) &&
+    keys(value, [
+      "id",
+      "name",
+      "endpoints",
+      "identity",
+      "serverPassword",
+      "sasl",
+      "autoConnect",
+      "autoJoin",
+    ]) &&
+    identifier(value.id) &&
+    label(value.name) &&
+    typeof value.autoConnect === "boolean" &&
+    list(value.endpoints, endpoint, 16) &&
+    value.endpoints.length >= 1 &&
+    identity(value.identity) &&
+    (value.serverPassword === undefined || secretReference(value.serverPassword)) &&
+    (value.sasl === undefined || sasl(value.sasl, value.endpoints)) &&
+    autoJoin(value.autoJoin)
+  );
+}
+function exclusion(
+  value: unknown,
+  networkIds: readonly string[],
+): value is Record<string, unknown> {
+  return (
+    record(value) &&
+    keys(value, ["networkId", "kind", "name"]) &&
+    identifier(value.networkId) &&
+    networkIds.includes(value.networkId) &&
+    oneOf(value.kind, ["channel", "direct", "status"]) &&
+    (value.kind === "status" ? label(value.name) : identifier(value.name))
+  );
+}
+function history(value: unknown, networkIds: readonly string[]): boolean {
+  if (
+    !record(value) ||
+    !keys(value, ["enabled", "retentionDays", "excludedConversations", "persistDrafts"]) ||
+    typeof value.enabled !== "boolean" ||
+    typeof value.persistDrafts !== "boolean" ||
+    !(value.retentionDays === null || integer(value.retentionDays, 1, 36500)) ||
+    !Array.isArray(value.excludedConversations) ||
+    value.excludedConversations.length > 10000
+  )
+    return false;
+  const exclusions: string[] = [];
+  for (const item of value.excludedConversations) {
+    if (!exclusion(item, networkIds)) return false;
+    exclusions.push(JSON.stringify([item.networkId, item.kind, item.name]));
+  }
+  return unique(exclusions);
+}
+function notifications(value: unknown): boolean {
+  return (
+    record(value) &&
+    keys(value, ["desktop", "previews", "bell"]) &&
+    typeof value.desktop === "boolean" &&
+    typeof value.previews === "boolean" &&
+    typeof value.bell === "boolean"
+  );
+}
 export function validUserSettings(value: unknown): value is UserSettings {
   if (
     !record(value) ||
     !keys(value, ["schemaVersion", "networks", "history", "notifications", "sendTyping"]) ||
     value.schemaVersion !== 1 ||
-    typeof value.sendTyping !== "boolean"
+    typeof value.sendTyping !== "boolean" ||
+    !list(value.networks, network, 100)
   )
     return false;
-  if (!Array.isArray(value.networks) || value.networks.length > 100) return false;
-  const ids: string[] = [];
-  for (const network of value.networks) {
-    if (
-      !record(network) ||
-      !keys(network, [
-        "id",
-        "name",
-        "endpoints",
-        "identity",
-        "serverPassword",
-        "sasl",
-        "autoConnect",
-        "autoJoin",
-      ]) ||
-      !identifier(network.id) ||
-      !label(network.name) ||
-      typeof network.autoConnect !== "boolean"
-    )
-      return false;
-    ids.push(network.id);
-    if (
-      !Array.isArray(network.endpoints) ||
-      network.endpoints.length < 1 ||
-      network.endpoints.length > 16 ||
-      !network.endpoints.every(
-        (endpoint: unknown) =>
-          record(endpoint) &&
-          keys(endpoint, ["host", "port", "tls"]) &&
-          identifier(endpoint.host) &&
-          (isIP(endpoint.host) !== 0 || !/[/:@[\]]/u.test(endpoint.host)) &&
-          integer(endpoint.port, 1, 65535) &&
-          typeof endpoint.tls === "boolean",
-      )
-    )
-      return false;
-    const identity = network.identity;
-    if (
-      !record(identity) ||
-      !keys(identity, ["nick", "alternateNicks", "username", "realname"]) ||
-      !identifier(identity.nick) ||
-      !identifier(identity.username) ||
-      !text(identity.realname, 512) ||
-      /[\n\t]/u.test(identity.realname) ||
-      !list(identity.alternateNicks, identifier, 16) ||
-      !unique([identity.nick, ...identity.alternateNicks])
-    )
-      return false;
-    if (network.serverPassword !== undefined && !secretReference(network.serverPassword))
-      return false;
-    if (network.sasl !== undefined) {
-      const sasl = network.sasl;
-      if (
-        !record(sasl) ||
-        !keys(sasl, ["mechanism", "account", "password", "required"]) ||
-        sasl.mechanism !== "PLAIN" ||
-        !identifier(sasl.account) ||
-        !secretReference(sasl.password) ||
-        typeof sasl.required !== "boolean" ||
-        !network.endpoints.every((endpoint: unknown) => record(endpoint) && endpoint.tls === true)
-      )
-        return false;
-    }
-    if (!Array.isArray(network.autoJoin) || network.autoJoin.length > 1000) return false;
-    const channels: string[] = [];
-    for (const join of network.autoJoin) {
-      if (
-        !record(join) ||
-        !keys(join, ["channel", "key"]) ||
-        !channel(join.channel) ||
-        (join.key !== undefined && !secretReference(join.key))
-      )
-        return false;
-      channels.push(join.channel);
-    }
-    if (!unique(channels)) return false;
-  }
-  if (!unique(ids)) return false;
-  const history = value.history;
-  if (
-    !record(history) ||
-    !keys(history, ["enabled", "retentionDays", "excludedConversations", "persistDrafts"]) ||
-    typeof history.enabled !== "boolean" ||
-    typeof history.persistDrafts !== "boolean" ||
-    !(history.retentionDays === null || integer(history.retentionDays, 1, 36500)) ||
-    !Array.isArray(history.excludedConversations) ||
-    history.excludedConversations.length > 10000
-  )
-    return false;
-  const exclusions: string[] = [];
-  for (const exclusion of history.excludedConversations) {
-    if (
-      !record(exclusion) ||
-      !keys(exclusion, ["networkId", "kind", "name"]) ||
-      !identifier(exclusion.networkId) ||
-      !ids.includes(exclusion.networkId) ||
-      !oneOf(exclusion.kind, ["channel", "direct", "status"]) ||
-      !(exclusion.kind === "status" ? label(exclusion.name) : identifier(exclusion.name))
-    )
-      return false;
-    exclusions.push(JSON.stringify([exclusion.networkId, exclusion.kind, exclusion.name]));
-  }
-  const notifications = value.notifications;
-  return (
-    unique(exclusions) &&
-    record(notifications) &&
-    keys(notifications, ["desktop", "previews", "bell"]) &&
-    typeof notifications.desktop === "boolean" &&
-    typeof notifications.previews === "boolean" &&
-    typeof notifications.bell === "boolean"
-  );
+  const ids = value.networks.map((item) => item.id);
+  return unique(ids) && history(value.history, ids) && notifications(value.notifications);
 }
 export function validTuiSettings(value: unknown): value is TuiSettings {
   if (
@@ -220,6 +225,33 @@ export function validConversation(value: unknown): value is ConversationRecord {
     (value.kind === "status" ? label(value.name) : identifier(value.name))
   );
 }
+function sender(value: unknown): boolean {
+  return (
+    record(value) &&
+    keys(value, ["nick", "userId", "account"]) &&
+    identifier(value.nick) &&
+    (value.userId === undefined || identifier(value.userId)) &&
+    (value.account === undefined || identifier(value.account))
+  );
+}
+function replyTarget(value: unknown): boolean {
+  return (
+    record(value) &&
+    keys(value, ["serverId", "localId"]) &&
+    identifier(value.serverId) &&
+    (value.localId === undefined || identifier(value.localId))
+  );
+}
+function reaction(value: unknown): value is Record<string, unknown> {
+  return (
+    record(value) &&
+    keys(value, ["value", "count", "reactedBySelf"]) &&
+    text(value.value, 128) &&
+    value.value.length > 0 &&
+    integer(value.count, 1, 1000000000) &&
+    typeof value.reactedBySelf === "boolean"
+  );
+}
 export function validMessage(value: unknown): value is Message {
   if (
     !record(value) ||
@@ -253,36 +285,10 @@ export function validMessage(value: unknown): value is Message {
     typeof value.redacted !== "boolean"
   )
     return false;
-  const sender = value.sender;
-  if (
-    !record(sender) ||
-    !keys(sender, ["nick", "userId", "account"]) ||
-    !identifier(sender.nick) ||
-    (sender.userId !== undefined && !identifier(sender.userId)) ||
-    (sender.account !== undefined && !identifier(sender.account))
-  )
-    return false;
-  const reply = value.replyTo;
-  if (
-    reply !== undefined &&
-    (!record(reply) ||
-      !keys(reply, ["serverId", "localId"]) ||
-      !identifier(reply.serverId) ||
-      (reply.localId !== undefined && !identifier(reply.localId)))
-  )
-    return false;
   return (
-    Array.isArray(value.reactions) &&
-    value.reactions.length <= 1000 &&
-    value.reactions.every(
-      (reaction: unknown) =>
-        record(reaction) &&
-        keys(reaction, ["value", "count", "reactedBySelf"]) &&
-        text(reaction.value, 128) &&
-        reaction.value.length > 0 &&
-        integer(reaction.count, 1, 1000000000) &&
-        typeof reaction.reactedBySelf === "boolean",
-    )
+    sender(value.sender) &&
+    (value.replyTo === undefined || replyTarget(value.replyTo)) &&
+    list(value.reactions, reaction, 1000)
   );
 }
 export function validReadPosition(value: unknown): value is ReadPosition {

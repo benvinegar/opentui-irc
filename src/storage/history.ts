@@ -97,6 +97,107 @@ function decodeMessage(row: MessageRow): Message {
   return value;
 }
 
+/** Creates schema v2 in an empty database; anything else is left untouched. */
+function createSchema(db: Database): void {
+  if (
+    db
+      .query<{ count: number }, []>(
+        "SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+      )
+      .get()?.count !== 0
+  )
+    throw new StorageFault("unsupported", "Unrecognized history database; it was not modified.");
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE conversations (id TEXT PRIMARY KEY, network_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('channel','direct','status')), name TEXT NOT NULL, UNIQUE(id, network_id));
+      CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, network_id TEXT NOT NULL, server_id TEXT, order_time INTEGER NOT NULL, sender TEXT NOT NULL, search_text TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(id, conversation_id), FOREIGN KEY(conversation_id, network_id) REFERENCES conversations(id, network_id));
+      CREATE UNIQUE INDEX message_server_identity ON messages(network_id, conversation_id, server_id) WHERE server_id IS NOT NULL;
+      CREATE INDEX message_conversation_order ON messages(conversation_id, order_time DESC, id DESC);
+      CREATE INDEX message_order ON messages(order_time DESC, id DESC);
+      CREATE INDEX message_network_order ON messages(network_id, order_time DESC, id DESC);
+      CREATE TABLE read_positions (conversation_id TEXT PRIMARY KEY REFERENCES conversations(id), message_id TEXT NOT NULL, read_at INTEGER NOT NULL, FOREIGN KEY(message_id, conversation_id) REFERENCES messages(id, conversation_id) ON DELETE CASCADE);
+      CREATE TABLE workspace (singleton INTEGER PRIMARY KEY CHECK(singleton=1), body TEXT NOT NULL);
+      PRAGMA user_version = 2;
+    `);
+  })();
+}
+async function migrateFromV1(db: Database, path: string): Promise<void> {
+  // VACUUM INTO snapshots committed WAL content too. Some SQLite builds (macOS system
+  // SQLite) refuse an existing target, so write into a private temporary directory and
+  // hard-link it into place: the link never overwrites an earlier migration backup.
+  const backupPath = `${path}.schema-v1.bak`;
+  const conflict = () =>
+    new StorageFault(
+      "conflict",
+      "History migration backup already exists. Preserve it and inspect before retrying.",
+    );
+  if (await exists(backupPath)) throw conflict();
+  let staging;
+  try {
+    staging = await mkdtemp(join(dirname(path), ".history-migration-"));
+    await chmod(staging, 0o700);
+  } catch {
+    throw new StorageFault("storage", "Could not create a private history migration backup.");
+  }
+  try {
+    const snapshot = join(staging, "backup.sqlite");
+    db.query("VACUUM INTO ?").run(snapshot);
+    await chmod(snapshot, 0o600);
+    try {
+      await link(snapshot, backupPath);
+    } catch (cause) {
+      if (cause instanceof Error && "code" in cause && cause.code === "EEXIST") throw conflict();
+      throw cause;
+    }
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => {});
+  }
+  db.transaction(() => {
+    db.exec(`
+      DROP INDEX message_server_identity;
+      CREATE UNIQUE INDEX message_server_identity ON messages(network_id, conversation_id, server_id) WHERE server_id IS NOT NULL;
+      PRAGMA user_version = 2;
+    `);
+  })();
+}
+function validSearch(query: SearchQuery): boolean {
+  return (
+    typeof query.text === "string" &&
+    query.text.trim() !== "" &&
+    query.text.length <= 4096 &&
+    validLimit(query.limit) &&
+    (query.networkId === undefined || identifier(query.networkId)) &&
+    (query.conversationId === undefined || identifier(query.conversationId)) &&
+    (query.sender === undefined || identifier(query.sender)) &&
+    (query.after === undefined || timestamp(query.after)) &&
+    (query.before === undefined || timestamp(query.before)) &&
+    (query.after === undefined || query.before === undefined || query.after < query.before)
+  );
+}
+function searchFilters(query: SearchQuery): { where: string[]; params: (string | number)[] } {
+  const where = ["instr(search_text, ?) > 0"];
+  const params: (string | number)[] = [query.text];
+  for (const [column, value] of [
+    ["network_id", query.networkId],
+    ["conversation_id", query.conversationId],
+    ["sender", query.sender],
+  ] as const) {
+    if (value !== undefined) {
+      where.push(`${column}=?`);
+      params.push(value);
+    }
+  }
+  if (query.after !== undefined) {
+    where.push("order_time>?");
+    params.push(query.after);
+  }
+  if (query.before !== undefined) {
+    where.push("order_time<?");
+    params.push(query.before);
+  }
+  return { where, params };
+}
+
 /** Opens an explicit SQLite path; schema v1 uses indexed keyset order (effective time, local ID). */
 export async function createHistoryRepository(path: string): Promise<Result<HistoryRepository>> {
   let db: Database | undefined;
@@ -112,72 +213,8 @@ export async function createHistoryRepository(path: string): Promise<Result<Hist
       .get()?.user_version;
     if (version !== 0 && version !== 1 && version !== 2)
       throw new StorageFault("unsupported", "History database schema is not supported.");
-    if (version === 0) {
-      if (
-        db
-          .query<{ count: number }, []>(
-            "SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-          )
-          .get()?.count !== 0
-      )
-        throw new StorageFault(
-          "unsupported",
-          "Unrecognized history database; it was not modified.",
-        );
-      db.transaction(() => {
-        db!.exec(`
-          CREATE TABLE conversations (id TEXT PRIMARY KEY, network_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('channel','direct','status')), name TEXT NOT NULL, UNIQUE(id, network_id));
-          CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, network_id TEXT NOT NULL, server_id TEXT, order_time INTEGER NOT NULL, sender TEXT NOT NULL, search_text TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(id, conversation_id), FOREIGN KEY(conversation_id, network_id) REFERENCES conversations(id, network_id));
-          CREATE UNIQUE INDEX message_server_identity ON messages(network_id, conversation_id, server_id) WHERE server_id IS NOT NULL;
-          CREATE INDEX message_conversation_order ON messages(conversation_id, order_time DESC, id DESC);
-          CREATE INDEX message_order ON messages(order_time DESC, id DESC);
-          CREATE INDEX message_network_order ON messages(network_id, order_time DESC, id DESC);
-          CREATE TABLE read_positions (conversation_id TEXT PRIMARY KEY REFERENCES conversations(id), message_id TEXT NOT NULL, read_at INTEGER NOT NULL, FOREIGN KEY(message_id, conversation_id) REFERENCES messages(id, conversation_id) ON DELETE CASCADE);
-          CREATE TABLE workspace (singleton INTEGER PRIMARY KEY CHECK(singleton=1), body TEXT NOT NULL);
-          PRAGMA user_version = 2;
-        `);
-      })();
-    }
-    if (version === 1) {
-      // VACUUM INTO snapshots committed WAL content too. Some SQLite builds (macOS system
-      // SQLite) refuse an existing target, so write into a private temporary directory and
-      // hard-link it into place: the link never overwrites an earlier migration backup.
-      const backupPath = `${path}.schema-v1.bak`;
-      const conflict = () =>
-        new StorageFault(
-          "conflict",
-          "History migration backup already exists. Preserve it and inspect before retrying.",
-        );
-      if (await exists(backupPath)) throw conflict();
-      let staging;
-      try {
-        staging = await mkdtemp(join(dirname(path), ".history-migration-"));
-        await chmod(staging, 0o700);
-      } catch {
-        throw new StorageFault("storage", "Could not create a private history migration backup.");
-      }
-      try {
-        const snapshot = join(staging, "backup.sqlite");
-        db.query("VACUUM INTO ?").run(snapshot);
-        await chmod(snapshot, 0o600);
-        try {
-          await link(snapshot, backupPath);
-        } catch (cause) {
-          if (cause instanceof Error && "code" in cause && cause.code === "EEXIST")
-            throw conflict();
-          throw cause;
-        }
-      } finally {
-        await rm(staging, { recursive: true, force: true }).catch(() => {});
-      }
-      db.transaction(() => {
-        db!.exec(`
-          DROP INDEX message_server_identity;
-          CREATE UNIQUE INDEX message_server_identity ON messages(network_id, conversation_id, server_id) WHERE server_id IS NOT NULL;
-          PRAGMA user_version = 2;
-        `);
-      })();
-    }
+    if (version === 0) createSchema(db);
+    if (version === 1) await migrateFromV1(db, path);
     db.exec("PRAGMA journal_mode = WAL;");
     return success(repository(db));
   } catch (error) {
@@ -236,6 +273,83 @@ function repository(db: Database): HistoryRepository {
         : {}),
     };
   }
+  function upsertConversation(conversation: ConversationRecord): void {
+    const existing = db
+      .query<{ network_id: string; kind: string }, [string]>(
+        "SELECT network_id, kind FROM conversations WHERE id=?",
+      )
+      .get(conversation.id);
+    if (
+      existing &&
+      (existing.network_id !== conversation.networkId || existing.kind !== conversation.kind)
+    )
+      throw new StorageFault("conflict", "Conversation identity cannot be reassigned.");
+    db.query(
+      "INSERT INTO conversations(id,network_id,kind,name) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name",
+    ).run(conversation.id, conversation.networkId, conversation.kind, conversation.name);
+  }
+  function upsertMessage(original: Message): void {
+    const message: Message = original.redacted
+      ? { ...original, text: "", reactions: [] }
+      : original;
+    const conversation = db
+      .query<{ network_id: string }, [string]>("SELECT network_id FROM conversations WHERE id=?")
+      .get(message.conversationId);
+    if (!conversation || conversation.network_id !== message.networkId)
+      throw new StorageFault("invalid-input", "Message conversation/network is not registered.");
+    const existing = db
+      .query<MessageRow, [string]>("SELECT * FROM messages WHERE id=?")
+      .get(message.id);
+    if (
+      existing &&
+      (existing.network_id !== message.networkId ||
+        existing.conversation_id !== message.conversationId ||
+        (existing.server_id !== null && existing.server_id !== message.serverId))
+    )
+      throw new StorageFault("conflict", "Message identity cannot be reassigned.");
+    if (existing && decodeMessage(existing).redacted && !message.redacted)
+      throw new StorageFault("conflict", "A redacted message cannot be restored by an upsert.");
+    if (message.serverId !== undefined) {
+      const collision = db
+        .query<{ id: string }, [string, string, string]>(
+          "SELECT id FROM messages WHERE network_id=? AND conversation_id=? AND server_id=?",
+        )
+        .get(message.networkId, message.conversationId, message.serverId);
+      if (collision && collision.id !== message.id)
+        throw new StorageFault("conflict", "Server message identity requires an explicit merge.");
+    }
+    db.query(
+      "INSERT INTO messages(id,conversation_id,network_id,server_id,order_time,sender,search_text,body) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET server_id=excluded.server_id,order_time=excluded.order_time,sender=excluded.sender,search_text=excluded.search_text,body=excluded.body",
+    ).run(
+      message.id,
+      message.conversationId,
+      message.networkId,
+      message.serverId ?? null,
+      message.serverTime ?? message.receivedAt,
+      message.sender.nick,
+      message.text,
+      JSON.stringify(message),
+    );
+  }
+  /** Read positions only move forward; an older position is ignored. */
+  function advanceReadPosition(position: ReadPosition): void {
+    const target = db
+      .query<{ conversation_id: string; order_time: number }, [string]>(
+        "SELECT conversation_id,order_time FROM messages WHERE id=?",
+      )
+      .get(position.messageId);
+    if (!target || target.conversation_id !== position.conversationId)
+      throw new StorageFault("invalid-input", "Read position does not belong to its conversation.");
+    const newerPosition = db
+      .query<{ id: string }, [string, number, number, string]>(
+        "SELECT m.id FROM read_positions r JOIN messages m ON m.id=r.message_id WHERE r.conversation_id=? AND (m.order_time > ? OR (m.order_time = ? AND m.id > ?))",
+      )
+      .get(position.conversationId, target.order_time, target.order_time, position.messageId);
+    if (newerPosition) return;
+    db.query(
+      "INSERT INTO read_positions(conversation_id,message_id,read_at) VALUES(?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET message_id=excluded.message_id,read_at=max(read_at,excluded.read_at)",
+    ).run(position.conversationId, position.messageId, position.readAt);
+  }
   return {
     commit(batch, signal) {
       return perform(signal, () => {
@@ -254,102 +368,9 @@ function repository(db: Database): HistoryRepository {
           throw new StorageFault("invalid-input", "Invalid history batch.");
         checkPayload([...batch.conversations, ...batch.messages, ...batch.readPositions]);
         db.transaction(() => {
-          for (const conversation of batch.conversations) {
-            const existing = db
-              .query<{ network_id: string; kind: string }, [string]>(
-                "SELECT network_id, kind FROM conversations WHERE id=?",
-              )
-              .get(conversation.id);
-            if (
-              existing &&
-              (existing.network_id !== conversation.networkId ||
-                existing.kind !== conversation.kind)
-            )
-              throw new StorageFault("conflict", "Conversation identity cannot be reassigned.");
-            db.query(
-              "INSERT INTO conversations(id,network_id,kind,name) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name",
-            ).run(conversation.id, conversation.networkId, conversation.kind, conversation.name);
-          }
-          for (const original of batch.messages) {
-            const message: Message = original.redacted
-              ? { ...original, text: "", reactions: [] }
-              : original;
-            const conversation = db
-              .query<{ network_id: string }, [string]>(
-                "SELECT network_id FROM conversations WHERE id=?",
-              )
-              .get(message.conversationId);
-            if (!conversation || conversation.network_id !== message.networkId)
-              throw new StorageFault(
-                "invalid-input",
-                "Message conversation/network is not registered.",
-              );
-            const existing = db
-              .query<MessageRow, [string]>("SELECT * FROM messages WHERE id=?")
-              .get(message.id);
-            if (
-              existing &&
-              (existing.network_id !== message.networkId ||
-                existing.conversation_id !== message.conversationId ||
-                (existing.server_id !== null && existing.server_id !== message.serverId))
-            )
-              throw new StorageFault("conflict", "Message identity cannot be reassigned.");
-            if (existing && decodeMessage(existing).redacted && !message.redacted)
-              throw new StorageFault(
-                "conflict",
-                "A redacted message cannot be restored by an upsert.",
-              );
-            if (message.serverId !== undefined) {
-              const collision = db
-                .query<{ id: string }, [string, string, string]>(
-                  "SELECT id FROM messages WHERE network_id=? AND conversation_id=? AND server_id=?",
-                )
-                .get(message.networkId, message.conversationId, message.serverId);
-              if (collision && collision.id !== message.id)
-                throw new StorageFault(
-                  "conflict",
-                  "Server message identity requires an explicit merge.",
-                );
-            }
-            db.query(
-              "INSERT INTO messages(id,conversation_id,network_id,server_id,order_time,sender,search_text,body) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET server_id=excluded.server_id,order_time=excluded.order_time,sender=excluded.sender,search_text=excluded.search_text,body=excluded.body",
-            ).run(
-              message.id,
-              message.conversationId,
-              message.networkId,
-              message.serverId ?? null,
-              message.serverTime ?? message.receivedAt,
-              message.sender.nick,
-              message.text,
-              JSON.stringify(message),
-            );
-          }
-          for (const position of batch.readPositions) {
-            const target = db
-              .query<{ conversation_id: string; order_time: number }, [string]>(
-                "SELECT conversation_id,order_time FROM messages WHERE id=?",
-              )
-              .get(position.messageId);
-            if (!target || target.conversation_id !== position.conversationId)
-              throw new StorageFault(
-                "invalid-input",
-                "Read position does not belong to its conversation.",
-              );
-            const newerPosition = db
-              .query<{ id: string }, [string, number, number, string]>(
-                "SELECT m.id FROM read_positions r JOIN messages m ON m.id=r.message_id WHERE r.conversation_id=? AND (m.order_time > ? OR (m.order_time = ? AND m.id > ?))",
-              )
-              .get(
-                position.conversationId,
-                target.order_time,
-                target.order_time,
-                position.messageId,
-              );
-            if (newerPosition) continue;
-            db.query(
-              "INSERT INTO read_positions(conversation_id,message_id,read_at) VALUES(?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET message_id=excluded.message_id,read_at=max(read_at,excluded.read_at)",
-            ).run(position.conversationId, position.messageId, position.readAt);
-          }
+          batch.conversations.forEach(upsertConversation);
+          batch.messages.forEach(upsertMessage);
+          batch.readPositions.forEach(advanceReadPosition);
         })();
       });
     },
@@ -383,19 +404,7 @@ function repository(db: Database): HistoryRepository {
     },
     search(query: SearchQuery, signal) {
       return perform(signal, () => {
-        if (
-          typeof query.text !== "string" ||
-          !query.text.trim() ||
-          query.text.length > 4096 ||
-          !validLimit(query.limit) ||
-          (query.networkId !== undefined && !identifier(query.networkId)) ||
-          (query.conversationId !== undefined && !identifier(query.conversationId)) ||
-          (query.sender !== undefined && !identifier(query.sender)) ||
-          (query.after !== undefined && !timestamp(query.after)) ||
-          (query.before !== undefined && !timestamp(query.before)) ||
-          (query.after !== undefined && query.before !== undefined && query.after >= query.before)
-        )
-          throw new StorageFault("invalid-input", "Invalid search request.");
+        if (!validSearch(query)) throw new StorageFault("invalid-input", "Invalid search request.");
         const fingerprint = hash([
           "search",
           query.text,
@@ -405,26 +414,7 @@ function repository(db: Database): HistoryRepository {
           query.after,
           query.before,
         ]);
-        const where = ["instr(search_text, ?) > 0"];
-        const params: (string | number)[] = [query.text];
-        for (const [column, value] of [
-          ["network_id", query.networkId],
-          ["conversation_id", query.conversationId],
-          ["sender", query.sender],
-        ] as const) {
-          if (value !== undefined) {
-            where.push(`${column}=?`);
-            params.push(value);
-          }
-        }
-        if (query.after !== undefined) {
-          where.push("order_time>?");
-          params.push(query.after);
-        }
-        if (query.before !== undefined) {
-          where.push("order_time<?");
-          params.push(query.before);
-        }
+        const { where, params } = searchFilters(query);
         return paginated(
           where,
           params,
