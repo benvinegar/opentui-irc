@@ -8,6 +8,7 @@ import {
   defaultTuiSettings,
   defaultUserSettings,
 } from "../../src/storage/settings";
+import { profile as settingsProfile } from "../fixtures/scenario";
 
 const hooks = vi.hoisted(() => ({
   preparing: undefined as (() => Promise<void>) | undefined,
@@ -330,5 +331,108 @@ describe("JSONC settings", () => {
     expect(invalidSave.ok ? null : invalidSave.error.code).toBe("invalid-input");
     await writeFile(join(directory, "tui.jsonc"), " ".repeat(1024 * 1024 + 1));
     expect((await repository.load(signal)).ok).toBe(false);
+  });
+});
+
+describe("JSONC settings edge cases", () => {
+  test("invalid UTF-8 and non-object TUI files are rejected without echoing content", async () => {
+    const { directory, repository } = await setup();
+    await writeFile(join(directory, "openirc.jsonc"), Buffer.from([0x7b, 0xff, 0xfe, 0x7d]));
+    const utf8 = await repository.load(signal);
+    expect(utf8).toMatchObject({ ok: false, error: { code: "invalid-input" } });
+    expect(utf8.ok ? "" : utf8.error.message).toContain("UTF-8");
+    await rm(join(directory, "openirc.jsonc"));
+    await writeFile(join(directory, "tui.jsonc"), "[1, 2]");
+    expect(await repository.load(signal)).toMatchObject({
+      ok: false,
+      error: { code: "invalid-input", message: expect.stringContaining("schema") },
+    });
+    await writeFile(join(directory, "tui.jsonc"), "{ broken");
+    expect(await repository.load(signal)).toMatchObject({
+      ok: false,
+      error: { code: "invalid-input", message: expect.stringContaining("JSONC") },
+    });
+  });
+
+  test("saves remove deleted keys and shrink arrays while keeping unrelated comments", async () => {
+    const { directory, repository } = await setup();
+    const second = { ...settingsProfile, id: entityId<"network">("second"), name: "Second" };
+    const user = { ...defaultUserSettings(), networks: [settingsProfile, second] };
+    const tui = { ...defaultTuiSettings(), keybindings: { quit: ["ctrl+q"], help: ["f1"] } };
+    await writeFile(
+      join(directory, "openirc.jsonc"),
+      `// networks kept here\n${JSON.stringify(user, null, 2)}`,
+    );
+    await writeFile(join(directory, "tui.jsonc"), `// keys\n${JSON.stringify(tui, null, 2)}`);
+    const loaded = value(await repository.load(signal));
+    const shrunk = value(
+      await repository.save(
+        { section: "user", value: { ...loaded.user, networks: [settingsProfile] } },
+        loaded.revision,
+        signal,
+      ),
+    );
+    expect(shrunk.user.networks.map((network) => network.id)).toEqual([settingsProfile.id]);
+    const userSource = await readFile(join(directory, "openirc.jsonc"), "utf8");
+    expect(userSource).toContain("// networks kept here");
+    expect(userSource).not.toContain('"Second"');
+    const removed = value(
+      await repository.save(
+        { section: "tui", value: { ...shrunk.tui, keybindings: { help: ["f1"] } } },
+        shrunk.revision,
+        signal,
+      ),
+    );
+    expect(removed.tui.keybindings).toEqual({ help: ["f1"] });
+    const tuiSource = await readFile(join(directory, "tui.jsonc"), "utf8");
+    expect(tuiSource).toContain("// keys");
+    expect(tuiSource).not.toContain("ctrl+q");
+  });
+
+  test("an edit that would push an existing file past the size limit is refused", async () => {
+    const { directory, repository } = await setup();
+    const body = JSON.stringify(defaultUserSettings(), null, 2);
+    const padding = `// ${"p".repeat(1024 * 1024 - body.length - 10)}\n`;
+    await writeFile(join(directory, "openirc.jsonc"), `${padding}${body}`);
+    const loaded = value(await repository.load(signal));
+    const original = await readFile(join(directory, "openirc.jsonc"), "utf8");
+    const result = await repository.save(
+      { section: "user", value: { ...loaded.user, networks: [settingsProfile] } },
+      loaded.revision,
+      signal,
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "invalid-input", message: expect.stringContaining("size limit") },
+    });
+    expect(await readFile(join(directory, "openirc.jsonc"), "utf8")).toBe(original);
+    expect((await readdir(directory)).sort()).toEqual(["openirc.jsonc"]);
+  });
+
+  test("cancellation while loading or after preparing a save leaves files untouched", async () => {
+    const { directory, repository } = await setup();
+    const loading = new AbortController();
+    const pendingLoad = repository.load(loading.signal);
+    loading.abort();
+    expect(await pendingLoad).toMatchObject({ ok: false, error: { code: "cancelled" } });
+    const loaded = value(await repository.load(signal));
+    const saving = new AbortController();
+    hooks.preparing = async () => saving.abort();
+    const result = await repository.save(
+      { section: "tui", value: { ...loaded.tui, theme: "light" } },
+      loaded.revision,
+      saving.signal,
+    );
+    expect(result).toMatchObject({ ok: false, error: { code: "cancelled" } });
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  test("saves also require an explicit directory", async () => {
+    const result = await createSettingsRepository("bad\0dir").save(
+      { section: "tui", value: defaultTuiSettings() },
+      entityId("revision"),
+      signal,
+    );
+    expect(result).toMatchObject({ ok: false, error: { code: "invalid-input" } });
   });
 });
