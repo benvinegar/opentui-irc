@@ -21,4 +21,4 @@ export const exclusions: readonly { pattern: RegExp; reason: string }[] = [
  * them only with a reviewed reason. Branches come from Vitest alone (Bun emits no branch data);
  * files only Bun runs are left out of the branch total.
  */
-export const floor = { lines: 97, functions: 95, branches: 89 };
+export const floor = { lines: 98, functions: 97, branches: 94 };
