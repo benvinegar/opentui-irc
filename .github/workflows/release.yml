@@ -1,0 +1,144 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Check tag matches package.json version
+        id: version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(bun -e 'console.log(require("./package.json").version)')"
+          if [ "$tag_version" != "$package_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $package_version"
+            exit 1
+          fi
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no non-empty '## [$VERSION]' section"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+
+  # OpenTUI embeds a per-platform native library (@opentui/core-<os>-<arch>) that bun
+  # only installs for the host, so each binary is built on a native runner.
+  build:
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os: linux
+            arch: x64
+            lib: so
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+            lib: so
+          - runner: macos-15-intel
+            os: darwin
+            arch: x64
+            lib: dylib
+          - runner: macos-latest
+            os: darwin
+            arch: arm64
+            lib: dylib
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Smoke-test the binary
+        run: |
+          echo "Runner: $(uname -sm)"
+          output="$(./dist/openirc --version)"
+          if [ "$output" != "opentui-irc $VERSION" ]; then
+            echo "::error::Expected 'opentui-irc $VERSION', got '$output'"
+            exit 1
+          fi
+          if ! grep -aq 'bunfs/root/libopentui-[a-z0-9]*\.${{ matrix.lib }}' dist/openirc; then
+            echo "::error::OpenTUI native library is not embedded in the binary"
+            exit 1
+          fi
+      - name: Package
+        id: package
+        run: |
+          name="opentui-irc-$VERSION-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "stage/$name"
+          cp dist/openirc LICENSE README.md "stage/$name/"
+          tar -C stage -czf "$name.tar.gz" "$name"
+          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  publish:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Generate SHA256SUMS
+        working-directory: artifacts
+        run: |
+          sha256sum opentui-irc-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create or update the GitHub Release
+        run: |
+          tag="$GITHUB_REF_NAME"
+          prerelease=()
+          case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release edit "$tag" --title "opentui-irc $VERSION" --notes-file artifacts/release-notes.md "${prerelease[@]}"
+            gh release upload "$tag" artifacts/opentui-irc-*.tar.gz artifacts/SHA256SUMS --clobber
+          else
+            gh release create "$tag" --verify-tag --title "opentui-irc $VERSION" --notes-file artifacts/release-notes.md "${prerelease[@]}" \
+              artifacts/opentui-irc-*.tar.gz artifacts/SHA256SUMS
+          fi
