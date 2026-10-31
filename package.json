@@ -39,11 +39,11 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
+    "coverage": "bun run scripts/coverage.ts",
     "test:bun": "bun run scripts/test-bun.ts",
     "test:ergo": "bun run scripts/smoke-ergo.ts",
     "test:terminal": "python3 scripts/smoke-terminal.py",
-    "check": "bun run format:check && bun run lint && bun run typecheck && bun run test && bun run test:bun",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run coverage",
     "prepare": "simple-git-hooks"
   },
   "dependencies": {
