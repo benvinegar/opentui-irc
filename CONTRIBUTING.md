@@ -37,6 +37,21 @@ bun run test:ergo       # interoperability against a local Ergo server (Docker)
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains the module boundaries, and [docs/CONTRACTS.md](docs/CONTRACTS.md) the behaviour each module must keep. [AGENTS.md](AGENTS.md) holds the working rules for coding agents, which apply to humans too.
 
+## Releasing
+
+Maintainers cut releases from `main`. Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml): it runs `bun run check`, builds `openirc` on native Linux and macOS runners (x64 and arm64), and publishes the archives, `SHA256SUMS` and release notes as a GitHub release.
+
+1. Set `"version"` in `package.json` to the new version, for example `0.1.0`.
+2. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [0.1.0] - YYYY-MM-DD` and review its entries; they become the release notes. Add a fresh `## [Unreleased]` section with empty `### Added`, `### Changed` and `### Fixed` headings above it.
+3. Commit as `chore: release v0.1.0` and merge to `main`. Then tag that commit and push the tag:
+
+   ```sh
+   git tag -a v0.1.0 -m "v0.1.0"
+   git push origin v0.1.0
+   ```
+
+The workflow fails if the tag does not match `package.json` or `CHANGELOG.md` has no matching version section. Versions with a hyphen (`0.2.0-rc.1`) are published as prereleases. Re-running the workflow for an existing tag updates that release's notes and assets.
+
 ## Scope
 
 Out of scope for now: plugins/scripting, DCC, moderation suites, split panes, cloud sync and a bundled bouncer. See [docs/PLAN.md](docs/PLAN.md).
