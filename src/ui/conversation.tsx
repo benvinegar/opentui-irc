@@ -94,7 +94,7 @@ export function Transcript(props: {
                   })
                 }
                 {...(previous() && dayKey(messageTime(previous()!)) !== dayKey(messageTime(message))
-                  ? { dayLabel: `── ${formatDay(messageTime(message))} ──` }
+                  ? { dayLabel: formatDay(messageTime(message)) }
                   : {})}
                 onSelect={(point) => props.select(message, point)}
                 {...(message.kind === "event"

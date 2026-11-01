@@ -1,6 +1,6 @@
 import { Show, useContext } from "solid-js";
 import type { Message } from "../contracts/model";
-import { FitText, ThemeContext, usePalette } from "./primitives";
+import { FitText, Rule, ThemeContext, usePalette } from "./primitives";
 import { formatMessageTime, nicknameColor } from "./transcript-style";
 
 export function MessageRow(props: {
@@ -9,7 +9,7 @@ export function MessageRow(props: {
   firstUnread: boolean;
   /** Same sender shortly after their previous line: omit the repeated gutter. */
   continuation?: boolean;
-  /** Shown above the row when the calendar day changes. */
+  /** Shown above the row as a full-width rule when the calendar day changes. */
   dayLabel?: string;
   /** Comfortable density: a blank line above each new sender group. */
   spaced?: boolean;
@@ -39,10 +39,13 @@ export function MessageRow(props: {
         <box height={1} flexShrink={0} />
       </Show>
       <Show when={props.dayLabel}>
-        <box flexDirection="row" height={1} flexShrink={0}>
-          <box width={props.gutterWidth + 2} flexShrink={0} />
-          <FitText text={props.dayLabel ?? ""} fg={colors.muted} />
-        </box>
+        <Rule
+          label={props.dayLabel ?? ""}
+          inset={props.gutterWidth + 1}
+          fg={colors.border}
+          labelFg={colors.muted}
+        />
+        <box height={1} flexShrink={0} />
       </Show>
       <Show when={props.firstUnread}>
         <box flexDirection="row" height={1} flexShrink={0}>

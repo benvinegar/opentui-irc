@@ -466,6 +466,24 @@ export function FitText(props: {
     </box>
   );
 }
+/** A horizontal line across the available width with a label `inset` cells from the left. */
+export function Rule(props: { label: string; inset: number; fg: string; labelFg: string }) {
+  return (
+    <box flexDirection="row" height={1} flexShrink={0}>
+      <text height={1} wrapMode="none" selectable={false} flexShrink={0} fg={props.fg}>
+        {"─".repeat(props.inset)}
+        <span style={{ fg: props.labelFg }}>{` ${props.label} `}</span>
+      </text>
+      {/* Clipped, so the line reaches the edge at any width without measuring it. */}
+      <box flexGrow={1} minWidth={0} height={1} overflow="hidden">
+        <text height={1} wrapMode="none" selectable={false} fg={props.fg}>
+          {RULE_LINE}
+        </text>
+      </box>
+    </box>
+  );
+}
+const RULE_LINE = "─".repeat(1024);
 /** Footer key legend: keys stand out, descriptions recede. */
 export function KeyHints(props: {
   hints: readonly (readonly [string, string])[];

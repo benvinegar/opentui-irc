@@ -8,6 +8,7 @@ import { createExternalActions } from "../../src/services/effects";
 import { createFakeApp } from "../fakes/app";
 import { conversationId, welcomeMessage } from "../fixtures/scenario";
 import { entityId } from "../../src/contracts/common";
+import { formatDay } from "../../src/ui/transcript-style";
 
 let setup: TestRendererSetup | undefined;
 afterEach(() => {
@@ -140,6 +141,28 @@ describe("real Solid/OpenTUI shell", () => {
     fake.settings.publish({ ...document, tui: { ...document.tui, density: "compact" } });
     await view.renderOnce();
     expect([row("grouped-0"), row("grouped-1")]).toEqual([1, 1]);
+  });
+  test("a new day draws a full-width rule followed by a blank line", async () => {
+    const { fake, view } = await mount();
+    const model = fake.timelines.get(conversationId)!;
+    const nextDay = welcomeMessage.receivedAt + 86_400_000;
+    model.publish({
+      ...model.getSnapshot(),
+      messages: [
+        welcomeMessage,
+        { ...welcomeMessage, id: entityId<"message">("next-day"), receivedAt: nextDay },
+      ],
+    });
+    await view.renderOnce();
+    const lines = view.captureCharFrame().split("\n");
+    const label = formatDay(nextDay);
+    const rule = lines.findIndex((line) => line.includes(` ${label} `));
+    const body = view.renderer.root.findDescendantById("body-next-day")!;
+    const transcript = lines[rule]!.slice(0, body.x + body.width);
+    expect(transcript.slice(0, transcript.indexOf(label))).toMatch(/─{10,}│ $/u);
+    expect(transcript.endsWith("──")).toBe(true);
+    expect(lines[rule + 1]!.slice(body.x).trim()).toBe("");
+    expect(lines[rule + 2]).toContain(welcomeMessage.text.slice(0, 20));
   });
   test("long names end-truncate with a single-cell ellipsis", async () => {
     const { fake, view } = await mount();

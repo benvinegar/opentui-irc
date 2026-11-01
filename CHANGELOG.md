@@ -24,6 +24,7 @@
 - Typing indicators follow IRCv3 more closely: stepping away from a kept draft sends "paused" rather than "done", so others see you paused instead of finished.
 - Calmer, keyboard-first layout: the top bar, per-network buttons, conversation toolbar, Send button and duplicate hint rows are gone. Secondary actions live in a `ctrl+k` palette; one footer shows contextual keys, status and a plaintext-connection warning.
 - Comfortable density, now the default for new profiles, puts a blank line above each new sender group; follow-up lines from the same sender stay together.
+- Day separators ("Today", "Yesterday", dates) are a full-width line with a blank line below, so a new day stands out.
 - Clicking a message opens a small menu at the click instead of a full-screen dialog (copy, reply, react with a choice of emoji, open links, remove mine), with one-letter shortcuts. Clicking a nickname shows a WHOIS-backed person card with Message and Copy nickname.
 - Dragging across message text copies the selection on release; a plain click still opens the message menu.
 - Text that doesn't fit (sidebar names, nicknames, topics, member names, status messages) ends with a one-cell "…" instead of a mid-string "...", keeping more of the name visible.
