@@ -26,7 +26,7 @@ export type Modal =
   | null;
 
 export type KeyHint = readonly [string, string];
-export type CardTone = "text" | "muted" | "error";
+type CardTone = "text" | "muted" | "error";
 export type CardLine = readonly [string, CardTone];
 
 export const messageTime = (message: Message) => message.serverTime ?? message.receivedAt;

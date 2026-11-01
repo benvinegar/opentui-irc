@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { JsonObject, JsonValue } from "../../src/contracts/control";
 import { actionSchema, parseAppAction, permissionsForAction } from "../../src/control/actions";
-import { fields, isJson, json, opaqueId } from "../../src/control/validation";
+import { isJsonValue } from "../../src/control/protocol";
+import { fields, json, opaqueId } from "../../src/control/validation";
 
 const samples = [
   { type: "network.connect", networkId: "network" },
@@ -295,7 +296,7 @@ describe("control JSON boundary", () => {
       },
     ];
     for (const value of values) {
-      expect(isJson(value)).toBe(false);
+      expect(isJsonValue(value)).toBe(false);
       expect(() => fields(value, [])).toThrow();
       expect(parseAppAction(value).ok).toBe(false);
     }

@@ -13,7 +13,7 @@ import type {
 import { failure, safeFailure, StorageFault, success } from "./errors";
 import { record, validTuiSettings, validUserSettings } from "./validation";
 
-export const DEFAULT_RETENTION_DAYS = 30;
+const DEFAULT_RETENTION_DAYS = 30;
 export function defaultUserSettings(): UserSettings {
   return {
     schemaVersion: 1,

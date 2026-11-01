@@ -15,7 +15,7 @@ export type FileCoverage = {
 export type Ratio = { covered: number; total: number };
 export type FileSummary = { path: string; lines: Ratio; functions: Ratio; branches: Ratio };
 
-export function normalizePath(path: string, root: string): string {
+function normalizePath(path: string, root: string): string {
   const relativePath = isAbsolute(path) ? relative(root, path) : path;
   return relativePath.replaceAll("\\", "/").replace(/^\.\//u, "");
 }
@@ -97,7 +97,7 @@ function executed(file: FileCoverage): boolean {
   return [...file.lines.values()].some((hits) => hits > 0);
 }
 
-export function mergeFiles(left: FileCoverage, right: FileCoverage): FileCoverage {
+function mergeFiles(left: FileCoverage, right: FileCoverage): FileCoverage {
   const merged = emptyFile(left.path);
   const statements = [left, right].find((source) => source.statementLines && source.lines.size > 0);
   if (statements) merged.statementLines = true;

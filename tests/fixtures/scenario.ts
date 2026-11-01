@@ -6,7 +6,7 @@ export const networkId = entityId<"network">("fixture-network");
 export const conversationId = entityId<"conversation">("fixture-channel");
 export const messageId = entityId<"message">("fixture-message");
 
-export const basicFeatures: FeatureSet = {
+const basicFeatures: FeatureSet = {
   history: false,
   replies: false,
   reactions: false,

@@ -169,7 +169,7 @@ export const hasReady = (events: SessionEvent[]) =>
 export type Fixture = Awaited<ReturnType<typeof harness>>;
 let syncs = 0;
 /** Lines are handled in order, so a PONG for a later PING proves earlier lines were processed. */
-export async function settle(fixture: Fixture) {
+async function settle(fixture: Fixture) {
   const token = `sync-${++syncs}`;
   fixture.send(`PING :${token}`);
   await until(() =>

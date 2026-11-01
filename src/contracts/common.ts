@@ -26,6 +26,7 @@ export function entityId<Kind extends string>(value: string): Id<Kind> {
 
 /** Milliseconds since Unix epoch, not a duration or IRC server-time string. */
 export type Timestamp = number;
+/** @public Contract shape; see docs/CONTRACTS.md. */
 export type Unsubscribe = () => void;
 export type Result<T, E = AppError> =
   | { readonly ok: true; readonly value: T }

@@ -59,9 +59,6 @@ export function choice<const T extends string>(value: unknown, choices: readonly
   for (const candidate of choices) if (value === candidate) return candidate;
   return fail("invalid-input", "An enumerated parameter is not supported.");
 }
-export function isJson(value: unknown): value is JsonValue {
-  return isJsonValue(value);
-}
 
 /** Owned, bounded output JSON. Omit undefined object properties like JSON.stringify, but
  * never invoke getters/toJSON, serialize exception instances, or silently rewrite non-JSON data. */
@@ -120,9 +117,4 @@ export function json(value: unknown): JsonValue {
   const result = copy(value, 0);
   if (Buffer.byteLength(JSON.stringify(result)) > 4194304) return invalid();
   return result;
-}
-export function jsonObject(value: unknown): JsonObject {
-  if (!isJsonValue(value) || !object(value))
-    fail("invalid-input", "A JSON object parameter is required.");
-  return value;
 }

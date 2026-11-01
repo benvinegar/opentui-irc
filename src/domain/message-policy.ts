@@ -46,7 +46,7 @@ export function compareMessageIds(left: string, right: string): number {
   }
   return a.length - b.length;
 }
-export function compareMessages(left: Message, right: Message): number {
+function compareMessages(left: Message, right: Message): number {
   return (
     (left.serverTime ?? left.receivedAt) - (right.serverTime ?? right.receivedAt) ||
     compareMessageIds(left.id, right.id)

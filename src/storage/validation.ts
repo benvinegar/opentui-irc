@@ -6,7 +6,7 @@ import type { ConversationRecord, ReadPosition, WorkspaceState } from "../contra
 export function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-export function keys(value: Record<string, unknown>, allowed: string[]): boolean {
+function keys(value: Record<string, unknown>, allowed: string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
 }
 export function text(value: unknown, max = 65536): value is string {

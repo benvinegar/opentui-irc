@@ -36,6 +36,7 @@
     "format:check": "oxfmt --check .",
     "lint": "oxlint . --deny-warnings",
     "lint:fix": "oxlint . --fix",
+    "knip": "knip",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -43,7 +44,7 @@
     "test:bun": "bun run scripts/test-bun.ts",
     "test:ergo": "bun run scripts/smoke-ergo.ts",
     "test:terminal": "python3 scripts/smoke-terminal.py",
-    "check": "bun run format:check && bun run lint && bun run typecheck && bun run coverage",
+    "check": "bun run format:check && bun run lint && bun run knip && bun run typecheck && bun run coverage",
     "prepare": "simple-git-hooks"
   },
   "dependencies": {
@@ -55,6 +56,7 @@
   "devDependencies": {
     "@types/bun": "^1.4.3",
     "@vitest/coverage-v8": "5.0.5",
+    "knip": "^6.44.1",
     "oxfmt": "^0.73.0",
     "oxlint": "^1.88.0",
     "simple-git-hooks": "^2.14.0",

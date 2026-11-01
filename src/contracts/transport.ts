@@ -1,6 +1,6 @@
 import type { Result } from "./common";
 
-/** Private to transport/session. Application/UI must never receive these bytes. */
+/** @public Private to transport/session. Application/UI must never receive these bytes. */
 export interface ConnectOptions {
   readonly host: string;
   readonly port: number;

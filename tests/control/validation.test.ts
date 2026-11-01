@@ -1,12 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  boolean,
-  choice,
-  ControlFault,
-  integer,
-  json,
-  jsonObject,
-} from "../../src/control/validation";
+import { boolean, choice, ControlFault, integer, json } from "../../src/control/validation";
 
 function code(run: () => unknown): string | undefined {
   try {
@@ -32,11 +25,6 @@ describe("control input validation helpers", () => {
   it("matches enumerations exactly", () => {
     expect(choice("b", ["a", "b"])).toBe("b");
     expect(code(() => choice("B", ["a", "b"]))).toBe("invalid-input");
-  });
-  it("accepts plain JSON objects only", () => {
-    expect(jsonObject({ a: [1, "x", null] })).toEqual({ a: [1, "x", null] });
-    for (const value of [[], "x", null, new Map(), { x: () => 1 }])
-      expect(code(() => jsonObject(value))).toBe("invalid-input");
   });
 });
 

@@ -14,7 +14,7 @@ import {
   type JsonValue,
 } from "../contracts/control";
 
-export interface ControlCliContext {
+interface ControlCliContext {
   readonly configDirectory?: string;
 }
 

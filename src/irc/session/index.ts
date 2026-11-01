@@ -117,6 +117,7 @@ export const defaultProtocolLimits: ProtocolLimits = {
   maxTagBytes: 8192,
   maxBufferedBytes: 16_384,
 };
+/** @public Documented in src/irc/README.md. */
 export const defaultSessionPolicy: SessionPolicy = {
   ...modernPolicyDefaults,
   connectTimeoutMs: 15_000,
